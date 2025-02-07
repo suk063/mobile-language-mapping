@@ -8,10 +8,8 @@ conda create -n mshab python=3.9
 conda activate mshab
 ```
 
-Then, proceed with the following steps depending on what you'd like to install.
-
 ### Envs
-
+roceed with the following steps to install
 
 ```bash
 pip install -e ./ManiSkill
@@ -19,7 +17,7 @@ pip install -e .
 pip install open_clip_torch omegaconf wandb tensorboard tensorboardX  msgpack torchvision
 ```
 
-We also host an altered version of the ReplicaCAD dataset necessary for low-level manipulation, which can be downloaded with ManiSkill's download utils. This may take some time:
+The ReplicaCAD dataset necessary for low-level manipulation, which can be downloaded with ManiSkill's download utils. This may take some time:
 ```bash
 python -m mani_skill.utils.download_asset ycb ReplicaCAD ReplicaCADRearrange
 ```
