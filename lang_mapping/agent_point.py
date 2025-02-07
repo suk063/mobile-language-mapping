@@ -25,7 +25,7 @@ class Agent_point(nn.Module):
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         max_time_steps: int = 201,
-        time_emb_dim: int = 12,
+        temporal_emb_dim: int = 12,
         clip_loss_coef: float = 0.01,
         hash_voxel: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
@@ -92,11 +92,11 @@ class Agent_point(nn.Module):
         self.voxel_points_dict = None
 
         # Time embeddings
-        self.time_emb_table_hand = nn.Parameter(
-            torch.randn(max_time_steps, time_emb_dim, device=self.device) * 0.01
+        self.temporal_emb_table_hand = nn.Parameter(
+            torch.randn(max_time_steps, temporal_emb_dim, device=self.device) * 0.01
         )
-        self.time_emb_table_head = nn.Parameter(
-            torch.randn(max_time_steps, time_emb_dim, device=self.device) * 0.01
+        self.temporal_emb_table_head = nn.Parameter(
+            torch.randn(max_time_steps, temporal_emb_dim, device=self.device) * 0.01
         )
 
         # Additional transforms for voxel features
@@ -105,16 +105,6 @@ class Agent_point(nn.Module):
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
-
-    def freeze_voxel_features(self):
-        """Freeze decoder and voxel parameters."""
-        self.implicit_decoder.eval()
-        for param in self.implicit_decoder.parameters():
-            param.requires_grad = False
-
-        self.hash_voxel.eval()
-        for param in self.hash_voxel.parameters():
-            param.requires_grad = False
 
     def get_or_build_voxel_grid(self):
         """Return a dict of (ix, iy, iz) -> voxel_feature for used voxels."""
@@ -229,11 +219,11 @@ class Agent_point(nn.Module):
             head_coords_world_flat, return_indices=return_indices
         )
 
-        # Time embeddings
-        time_emb_hand = self.time_emb_table_hand[step_nums]  # [B, time_emb_dim]
-        time_emb_head = self.time_emb_table_head[step_nums]
-        time_emb_hand = time_emb_hand.unsqueeze(1).expand(B, N, -1).reshape(B * N, -1)
-        time_emb_head = time_emb_head.unsqueeze(1).expand(B, N, -1).reshape(B * N, -1)
+        # Temporal embeddings
+        temporal_emb_hand = self.temporal_emb_table_hand[step_nums]  # [B, temporal_emb_dim]
+        temporal_emb_head = self.temporal_emb_table_head[step_nums]
+        temporal_emb_hand = temporal_emb_hand.unsqueeze(1).expand(B, N, -1).reshape(B * N, -1)
+        temporal_emb_head = temporal_emb_head.unsqueeze(1).expand(B, N, -1).reshape(B * N, -1)
 
         # Decoder for loss (cosine similarity)
         dec_hand = self.implicit_decoder(voxel_feat_for_points_hand, hand_coords_world_flat)

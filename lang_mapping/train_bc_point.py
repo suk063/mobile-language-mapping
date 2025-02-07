@@ -21,8 +21,8 @@ from torch.utils.tensorboard import SummaryWriter
 import mani_skill.envs
 from mani_skill.utils import common
 
-from mshab.agents.bc import Agent_point
-from mshab.agents.bc.mapping import VoxelHashTable, ImplicitDecoder
+from .agent_point import Agent_point
+from .mapping import VoxelHashTable, ImplicitDecoder
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
@@ -110,7 +110,7 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    time_emb_dim: int = 12
+    temporal_emb_dim: int = 12
     clip_loss_coef: float = 0.01
 
     num_eval_envs: int = field(init=False)
@@ -387,7 +387,7 @@ def train(cfg: TrainConfig):
         state_mlp_dim=cfg.algo.state_mlp_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         max_time_steps=eval_envs.max_episode_steps + 1,
-        time_emb_dim=cfg.algo.time_emb_dim,
+        temporal_emb_dim=cfg.algo.temporal_emb_dim,
         clip_loss_coef=cfg.algo.clip_loss_coef,
         hash_voxel=hash_voxel,
         implicit_decoder=implicit_decoder
