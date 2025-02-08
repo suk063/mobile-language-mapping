@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from .utils import rotary_pe_3d  # Ensure this is correctly imported from your utils
+from .utils import rotary_pe_3d  
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     """
