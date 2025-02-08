@@ -26,7 +26,6 @@ class Agent_point(nn.Module):
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         max_time_steps: int = 201,
         temporal_emb_dim: int = 12,
-        clip_loss_coef: float = 0.01,
         hash_voxel: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
     ):
@@ -40,7 +39,6 @@ class Agent_point(nn.Module):
             text_input += [""]
 
         self.device = device
-        self.clip_loss_coef = clip_loss_coef
         self.epoch = 0
 
         # State dimension
@@ -234,7 +232,7 @@ class Agent_point(nn.Module):
         cos_sim_head = F.cosine_similarity(dec_head, feats_head_flat, dim=-1)
         cos_loss_head = 1.0 - cos_sim_head.mean()
 
-        total_cos_loss = self.clip_loss_coef * (cos_loss_hand + cos_loss_head)
+        total_cos_loss = cos_loss_hand + cos_loss_head
 
         # Update voxel points if epoch == 0
         if return_indices:
@@ -306,7 +304,6 @@ class Agent_point_dynamic(nn.Module):
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         max_time_steps: int = 201,
         temporal_emb_dim: int = 12,
-        clip_loss_coef: float = 0.01,
         hash_voxel: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
     ):
@@ -320,7 +317,6 @@ class Agent_point_dynamic(nn.Module):
             text_input += [""]
 
         self.device = device
-        self.clip_loss_coef = clip_loss_coef
         self.epoch = 0
 
         # State dimension
@@ -514,7 +510,7 @@ class Agent_point_dynamic(nn.Module):
         cos_sim_head = F.cosine_similarity(dec_head, feats_head_flat, dim=-1)
         cos_loss_head = 1.0 - cos_sim_head.mean()
 
-        total_cos_loss = self.clip_loss_coef * (cos_loss_hand + cos_loss_head)
+        total_cos_loss = cos_loss_hand + cos_loss_head
 
         # Transformer input
         voxel_feat_for_points_hand_proj = self.voxel_proj(voxel_feat_for_points_hand)

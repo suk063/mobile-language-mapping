@@ -192,7 +192,7 @@ class VoxelHashTableDynamic(nn.Module):
         feature_dim_dynamic: int = 384,
         scene_bound_min: tuple = (-2.6, -8.1, 0),
         scene_bound_max: tuple = (4.6, 4.7, 3.1),
-        mod_time: int = 10,
+        mod_time: int = 201,
         device: str = "cuda:0",
     ):
         """
@@ -203,7 +203,7 @@ class VoxelHashTableDynamic(nn.Module):
             feature_dim_dynamic: Feature dim for dynamic portion of each voxel.
             scene_bound_min: Minimum (x, y, z) for the entire scene.
             scene_bound_max: Maximum (x, y, z) for the entire scene.
-            mod_time: Time modulus (e.g., 10 means times 0 and 10 map to the same time index).
+            mod_time: Time modulus.
             device: Torch device.
         """
         super().__init__()
