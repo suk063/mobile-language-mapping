@@ -84,8 +84,9 @@ class BCConfig:
     name: str = "bc"
     lr: float = 3e-4               # learning rate
     batch_size: int = 256          # batch size
-    stage1_epochs: int = 1         # stage 1 epochs
-    stage2_epochs: int = 10        # stage 2 epochs
+    stage1_epochs: int = 2         # stage 1 epochs
+    stage2_epochs: int = 6        # stage 2 epochs
+    stage3_epochs: int = 2        # stage 3 epochs
     eval_freq: int = 1
     log_freq: int = 1
     save_freq: int = 1
@@ -602,6 +603,91 @@ def train(cfg: TrainConfig):
 
     # Final save
     save_checkpoint(name="stage2-final")
+
+    # ------------------------------------------------
+    # Stage 3: Freeze mapping + Policy only (BC loss)
+    # ------------------------------------------------
+    # 1) Freeze mapping modules
+    for param in hash_voxel.parameters():
+        param.requires_grad = False
+    for param in implicit_decoder.parameters():
+        param.requires_grad = False
+
+    for epoch in range(cfg.algo.stage3_epochs):
+        global_epoch = (
+            logger_start_log_step
+            + cfg.algo.stage1_epochs
+            + cfg.algo.stage2_epochs
+            + epoch
+        )
+        logger.print(f"[Stage 3] Epoch: {global_epoch}")
+        tot_loss, n_samples = 0, 0
+        agent.train()
+        # hash_voxel & implicit_decoder remain in eval/frozen
+        hash_voxel.eval()
+        implicit_decoder.eval()
+
+        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage3-Batch", unit="batch"):
+            subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
+            obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
+
+            pi, cos_loss = agent(obs, subtask_labels, step_nums)
+            # We ignore cos_loss now (mapping is frozen)
+            bc_loss = F.mse_loss(pi, act)
+            loss = bc_loss  # Stage 3 uses only BC
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            tot_loss += loss.item()
+            n_samples += act.size(0)
+            global_step += 1
+
+            writer.add_scalar("Loss/Iteration", loss.item(), global_step)
+            writer.add_scalar("Behavior Cloning Loss/Iteration", bc_loss.item(), global_step)
+
+        avg_loss = tot_loss / n_samples
+        loss_logs = dict(loss=avg_loss)
+        timer.end(key="train")
+
+        # Logging
+        if check_freq(cfg.algo.log_freq, epoch):
+            logger.store(tag="losses", **loss_logs)
+            if epoch > 0:
+                logger.store("time", **timer.get_time_logs(epoch))
+            logger.log(global_epoch)
+            timer.end(key="log")
+
+        # Evaluation
+        if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
+            agent.eval()
+            # Mapping modules remain frozen
+            hash_voxel.eval()
+            implicit_decoder.eval()
+
+            eval_obs, _ = eval_envs.reset()
+            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_uids).to(device)
+            B = eval_subtask_labels.size()
+
+            for t in range(eval_envs.max_episode_steps):
+                with torch.no_grad():
+                    time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
+                    action, _ = agent(eval_obs, eval_subtask_labels, time_step)
+                # Stub environment step
+                eval_obs, _, _, _, _ = eval_envs.step(action)
+            if len(eval_envs.return_queue) > 0:
+                store_env_stats("eval")
+            logger.log(global_epoch)
+            timer.end(key="eval")
+
+        # Saving
+        if check_freq(cfg.algo.save_freq, epoch):
+            save_checkpoint(name="latest")
+            timer.end(key="checkpoint")
+
+    # Final save
+    save_checkpoint(name="stage3-final")
 
     bc_dataloader.close()
     eval_envs.close()
