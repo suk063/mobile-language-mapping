@@ -365,8 +365,7 @@ def train(cfg: TrainConfig):
     hash_voxel = VoxelHashTableDynamic(
         resolution=cfg.algo.resolution,
         hash_table_size=cfg.algo.hash_table_size,
-        feature_dim_static=cfg.algo.voxel_feature_dim // 2,
-        feature_dim_dynamic=cfg.algo.voxel_feature_dim // 2,
+        feature_dim=cfg.algo.voxel_feature_dim,
         scene_bound_min=tuple(cfg.algo.scene_bound_min),
         scene_bound_max=tuple(cfg.algo.scene_bound_max),
         mod_time= cfg.algo.mod_time,

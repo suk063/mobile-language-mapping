@@ -113,34 +113,35 @@ class TransformerEncoder(nn.Module):
 
 class LocalSelfAttentionFusion(nn.Module):
     """
-    Merges two features (voxel_feat, cnn_feat) per spatial location
-    via a self-attention layer. Each location is treated independently
-    as a 2-token sequence.
+    Fuses two feature vectors via self-attention.
+    Each voxel is treated independently as a 2-token sequence.
     """
     def __init__(self, feat_dim=120, num_heads=8):
         super().__init__()
         self.mha = nn.MultiheadAttention(embed_dim=feat_dim, num_heads=num_heads, batch_first=True)
         self.layernorm = nn.LayerNorm(feat_dim)
 
-    def forward(self, voxel_feat, cnn_feat):
+    def forward(self, feat1, feat2):
         """
-        voxel_feat, cnn_feat: (B, N, feat_dim)
-        Returns fused_feat: (B, N, feat_dim)
+        Args:
+            feat1, feat2: (B, N, feat_dim). 
+              - In typical usage here, N=1 and feat_dim=384.
+        Returns:
+            (B, N, feat_dim): fused feature after 2-token self-attention.
         """
-        B, N, D = voxel_feat.shape
+        # Stack feat1 and feat2 into a 2-token sequence: (B, N, 2, feat_dim)
+        x = torch.stack([feat1, feat2], dim=2)  # shape: (B, N, 2, feat_dim)
+        B, N, T, D = x.shape  # T=2
+        x = x.view(B*N, T, D)  # (B*N, 2, D)
 
-        # Combine voxel_feat and cnn_feat into a 2-token sequence per spatial location
-        x = torch.stack([voxel_feat, cnn_feat], dim=2)  # (B, N, 2, D)
-        x = x.view(B * N, 2, D)                        # (B*N, 2, D)
-
-        # Self-attention on the 2-token sequence
+        # Self-attention on the 2 tokens
         y, _ = self.mha(x, x, x)
-        y = self.layernorm(y)
+        y = self.layernorm(y)  # (B*N, 2, D)
 
-        # Average the 2 tokens to get the final fused representation
+        # Average the 2 tokens to get a single feature vector
         fused = y.mean(dim=1).view(B, N, D)
         return fused
-
+    
 class ActionMLP(nn.Module):
     """
     A feed-forward MLP for producing action outputs from a latent state vector.

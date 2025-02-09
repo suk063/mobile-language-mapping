@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .utils import positional_encoding
+from .policy import LocalSelfAttentionFusion
 
 class VoxelHashTable(nn.Module):
     """
@@ -181,15 +182,13 @@ class ImplicitDecoder(nn.Module):
 class VoxelHashTableDynamic(nn.Module):
     """
     Dynamic voxel hash table with separate embeddings for static and dynamic components.
-    Also stores (or predicts) a flow vector per voxel-time pair.
     """
 
     def __init__(
         self,
         resolution: float = 0.1,
         hash_table_size: int = 2**20,
-        feature_dim_static: int = 384,
-        feature_dim_dynamic: int = 384,
+        feature_dim: int = 120,
         scene_bound_min: tuple = (-2.6, -8.1, 0),
         scene_bound_max: tuple = (4.6, 4.7, 3.1),
         mod_time: int = 201,
@@ -209,11 +208,9 @@ class VoxelHashTableDynamic(nn.Module):
         super().__init__()
         self.resolution = resolution
         self.hash_table_size = hash_table_size
-        self.feature_dim_static = feature_dim_static
-        self.feature_dim_dynamic = feature_dim_dynamic
-        self.total_feature_dim = feature_dim_static + feature_dim_dynamic
         self.device = device
         self.mod_time = mod_time
+        self.feature_dim = feature_dim
 
         # Large primes for hashing
         self.primes_xyz = torch.tensor([73856093, 19349669, 83492791],
@@ -231,25 +228,24 @@ class VoxelHashTableDynamic(nn.Module):
 
         # 2) Define learnable static features [total_voxels, feature_dim_static]
         self.static_features = nn.Parameter(
-            torch.randn(self.total_voxels, feature_dim_static, device=device) * 0.01
+            torch.randn(self.total_voxels, self.feature_dim, device=device) * 0.01
         )
 
         # 3) Define learnable dynamic features [total_voxels, mod_time, feature_dim_dynamic]
         #    We store a separate dynamic embedding for each time index
         self.dynamic_features = nn.Parameter(
-            torch.randn(self.total_voxels, self.mod_time, feature_dim_dynamic, device=device) * 0.01
-        )
-
-        # 4) Define learnable scene flow [total_voxels, mod_time, 3]
-        #    Each voxel-time pair has a flow vector to warp points from t -> t+1
-        self.scene_flow = nn.Parameter(
-            torch.zeros(self.total_voxels, self.mod_time, 3, device=device)
+            torch.randn(self.total_voxels, self.mod_time, self.feature_dim, device=device) * 0.01
         )
 
         # 5) Build the hash table (stores indices of each voxel)
         self.buffer_voxel_index = torch.full((self.hash_table_size,), -1,
                                              dtype=torch.long, device=device)
         self.build_hash_grid()
+
+        self.fusion_static_dynamic = LocalSelfAttentionFusion(
+            feat_dim=feature_dim,  
+            num_heads=8
+        )
         
         # For debugging / point storage
         self.voxel_points = {}
@@ -287,7 +283,6 @@ class VoxelHashTableDynamic(nn.Module):
         Returns:
             feats: [M, feature_dim_static + feature_dim_dynamic]
             voxel_indices: [M] if return_indices=True, else None
-            flow: [M, 3] scene flow for each voxel-time
         """
         device = query_pts.device
         M = query_pts.shape[0]
@@ -303,18 +298,23 @@ class VoxelHashTableDynamic(nn.Module):
         modded_t = torch.fmod(query_times, self.mod_time).long().cuda()  # [M]
 
         # 3) Gather features
-        feats = torch.zeros(M, self.total_feature_dim, device=device)
+        feats = torch.zeros(M, self.feature_dim, device=device)
 
         if valid_mask.any():
-            v_idx = voxel_indices[valid_mask]                # [M_valid]
-            t_idx = modded_t[valid_mask]                     # [M_valid]
-            
-            # Gather static + dynamic
-            static_feats = self.static_features[v_idx]                               # [M_valid, feature_dim_static]
-            dynamic_feats = self.dynamic_features[v_idx, t_idx]                      # [M_valid, feature_dim_dynamic]
-            combined = torch.cat([static_feats, dynamic_feats], dim=-1)             # [M_valid, total_feature_dim]
-            
-            feats[valid_mask] = combined
+            v_idx = voxel_indices[valid_mask]
+            t_idx = modded_t[valid_mask]
+
+            # Gather static & dynamic embeddings
+            static_feats = self.static_features[v_idx]          # (M_valid, feature_dim)
+            dynamic_feats = self.dynamic_features[v_idx, t_idx] # (M_valid, feature_dim)
+
+            # Fuse them via self-attention
+            static_reshaped = static_feats.unsqueeze(1)   # (M_valid, 1, feat_dim)
+            dynamic_reshaped = dynamic_feats.unsqueeze(1) # (M_valid, 1, feat_dim)
+            fused = self.fusion_static_dynamic(static_reshaped, dynamic_reshaped)
+            fused = fused.squeeze(1)  # (M_valid, feat_dim)
+
+            feats[valid_mask] = fused
 
         if return_indices:
             return feats, voxel_indices
