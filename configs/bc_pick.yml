@@ -34,7 +34,7 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 32
+  batch_size: 30
 
   stage1_epochs: 3
   stage2_epochs: 9
@@ -71,6 +71,13 @@ algo:
   temporal_emb_dim: 12
   stage1_cos_loss_weight: 0.5
   stage2_cos_loss_weight: 0.005
+
+  # Pre-trained Weights
+  # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage1-final_agent.pt"
+  # pretrained_voxel_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1/models/stage1-final_voxel.pt"
+  # pretrained_implicit_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1/models/stage1-final_implicit.pt"
+  # pretrained_optimizer_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1/models/stage1-final_optimizer.pt"
+
 
 logger:
   workspace: mshab_exps

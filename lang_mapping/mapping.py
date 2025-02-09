@@ -237,7 +237,7 @@ class VoxelHashTableDynamic(nn.Module):
             torch.randn(self.total_voxels, self.mod_time, self.feature_dim, device=device) * 0.01
         )
 
-        # 5) Build the hash table (stores indices of each voxel)
+        # 4) Build the hash table (stores indices of each voxel)
         self.buffer_voxel_index = torch.full((self.hash_table_size,), -1,
                                              dtype=torch.long, device=device)
         self.build_hash_grid()

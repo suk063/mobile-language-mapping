@@ -118,6 +118,13 @@ class BCConfig:
 
     num_eval_envs: int = field(init=False)
 
+    # Pre-trained weights
+    pretrained_agent_path: str = None
+    pretrained_voxel_path:str = None
+    pretrained_implicit_path: str = None
+    pretrained_optimizer_path: str = None
+
+
     def _additional_processing(self):
         assert self.name == "bc"
         try:
@@ -403,6 +410,22 @@ def train(cfg: TrainConfig):
         + list(implicit_decoder.parameters())
     )
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
+
+    if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
+        print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
+        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
+
+    if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
+        print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
+        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device))
+
+    if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
+        print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
+        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device))
+
+    if cfg.algo.pretrained_optimizer_path is not None and os.path.exists(cfg.algo.pretrained_optimizer_path):
+        print(f"[INFO] Loading pretrained optimizer state from {cfg.algo.pretrained_optimizer_path}")
+        optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device))
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
