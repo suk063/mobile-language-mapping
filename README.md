@@ -1,6 +1,5 @@
 
 ## Setup and Running
-
 First, make your conda environment:
 
 ```bash
@@ -8,8 +7,8 @@ conda create -n mshab python=3.9
 conda activate mshab
 ```
 
-### Envs
-roceed with the following steps to install
+## Envs
+Proceed with the following steps to install
 
 ```bash
 pip install -e ./ManiSkill
@@ -22,7 +21,7 @@ The ReplicaCAD dataset necessary for low-level manipulation, which can be downlo
 python -m mani_skill.utils.download_asset ycb ReplicaCAD ReplicaCADRearrange
 ```
 
-### Dataset Download
+## Dataset Download
 
 Download the pre-generated data (224×224 resolution for a single scene) from the following URL:
 
@@ -36,7 +35,7 @@ $MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset
 
 *Note:* The default location for `MS_ASSET_DIR` is `~/.maniskill/data`.
 
-### Training and Evaluation
+## Training and Evaluation
 
 To begin training, run the following script:
 
