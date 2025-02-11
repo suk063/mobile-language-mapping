@@ -71,6 +71,7 @@ algo:
   temporal_emb_dim: 12
   stage1_cos_loss_weight: 0.2
   stage2_cos_loss_weight: 0.02
+  stage2_linear_scheduling: True
 
   # Pre-trained Weights
   # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage1-final_agent.pt"

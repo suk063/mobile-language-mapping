@@ -113,6 +113,7 @@ class BCConfig:
     temporal_emb_dim: int = 12
     stage1_cos_loss_weight: float = 0.1
     stage2_cos_loss_weight: float = 0.01
+    stage2_linear_scheduling: bool = True
 
     num_eval_envs: int = field(init=False)
 
@@ -564,8 +565,11 @@ def train(cfg: TrainConfig):
         agent.train()
         hash_voxel.train()
 
-        linear_scale = 1.0 - epoch / cfg.algo.stage2_epochs
-        cos_loss_weight =  cfg.algo.stage2_cos_loss_weight * linear_scale
+        if cfg.algo.stage2_linear_scheduling:
+            linear_scale = 1.0 - epoch / cfg.algo.stage2_epochs
+            cos_loss_weight =  cfg.algo.stage2_cos_loss_weight * linear_scale
+        else:
+            cos_loss_weight =  cfg.algo.stage2_cos_loss_weight
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
