@@ -11,7 +11,12 @@ conda activate mshab
 Proceed with the following steps to install
 
 ```bash
-pip install -e ./ManiSkill
+git clone https://github.com/haosulab/ManiSkill.git -b mshab --single-branch
+pip install -e ManiSkill
+```
+In [ManiSkill](https://github.com/haosulab/ManiSkill/blob/mshab/mani_skill/agents/robots/fetch/fetch.py#L70-L92), lines 75-76, 85-86, you need to change 128 to 224.
+
+```bash
 pip install -e .
 pip install open_clip_torch omegaconf wandb tensorboard tensorboardX  msgpack torchvision
 ```
