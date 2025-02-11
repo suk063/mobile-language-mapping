@@ -34,10 +34,10 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 16
+  batch_size: 32
 
-  stage1_epochs: 0
-  stage2_epochs: 10
+  stage1_epochs: 3
+  stage2_epochs: 14
   stage3_epochs: 3
 
   eval_freq: 1
@@ -68,7 +68,7 @@ algo:
   text_input: ["bowl", "apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   state_mlp_dim: 1024
-  temporal_emb_dim: 12
+  temporal_emb_dim: 60
   stage1_cos_loss_weight: 0.2
   stage2_cos_loss_weight: 0.02
   stage2_linear_scheduling: True

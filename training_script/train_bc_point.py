@@ -86,6 +86,8 @@ class BCConfig:
     batch_size: int = 256          # batch size
     stage1_epochs: int = 1         # stage 1 epochs
     stage2_epochs: int = 10        # stage 2 epochs
+    stage3_epochs: int = 1        # stage 2 epochs
+
     eval_freq: int = 1
     log_freq: int = 1
     save_freq: int = 1
@@ -380,7 +382,7 @@ def train(cfg: TrainConfig):
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
         hidden_dim=256,
         output_dim=cfg.algo.clip_input_dim,
-        L=20
+        L=10
     ).to(device)
 
     # Agent
