@@ -303,7 +303,6 @@ class Agent_point_dynamic(nn.Module):
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         max_time_steps: int = 201,
-        temporal_emb_dim: int = 12,
         hash_voxel: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
     ):
@@ -366,14 +365,6 @@ class Agent_point_dynamic(nn.Module):
         self.used_voxel_idx_set = set()
         self.voxel_grid = None
         self.voxel_points_dict = None
-
-        # Time embeddings
-        self.temporal_emb_table_hand = nn.Parameter(
-            torch.randn(max_time_steps, temporal_emb_dim, device=self.device) * 0.01
-        )
-        self.temporal_emb_table_head = nn.Parameter(
-            torch.randn(max_time_steps, temporal_emb_dim, device=self.device) * 0.01
-        )
 
         # Additional transforms for voxel features
         self.voxel_proj = nn.Linear(voxel_feature_dim, voxel_feature_dim).to(self.device)
@@ -487,19 +478,12 @@ class Agent_point_dynamic(nn.Module):
         feats_head_reduced = feats_head_flat_reduced.reshape(B_, N, -1)
 
         # Voxel lookup
-        times_t = step_nums  # shape [B], we will broadcast to [B*N]
-        times_t_expanded = times_t.unsqueeze(1).expand(-1, N).reshape(B_ * N)
+        times_t_expanded = step_nums.unsqueeze(1).expand(-1, N).reshape(B_ * N)
         voxel_feat_for_points_hand, hand_indices = self.hash_voxel.query_voxel_feature(
             hand_coords_world_flat, times_t_expanded)
 
         voxel_feat_for_points_head, head_indices = self.hash_voxel.query_voxel_feature(
             head_coords_world_flat, times_t_expanded)
-
-        # Temporal embeddings
-        temporal_emb_hand = self.temporal_emb_table_hand[step_nums]  # [B, temporal_emb_dim]
-        temporal_emb_head = self.temporal_emb_table_head[step_nums]
-        temporal_emb_hand = temporal_emb_hand.unsqueeze(1).expand(B, N, -1).reshape(B * N, -1)
-        temporal_emb_head = temporal_emb_head.unsqueeze(1).expand(B, N, -1).reshape(B * N, -1)
 
         # Decoder for loss (cosine similarity)
         dec_hand = self.implicit_decoder(voxel_feat_for_points_hand, hand_coords_world_flat)

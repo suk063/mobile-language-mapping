@@ -112,7 +112,6 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    temporal_emb_dim: int = 12
     stage1_cos_loss_weight: float = 0.5
     stage2_cos_loss_weight: float = 0.005
     stage2_linear_scheduling: bool = True
@@ -384,7 +383,7 @@ def train(cfg: TrainConfig):
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
         hidden_dim=256,
         output_dim=cfg.algo.clip_input_dim,
-        L=20
+        L=10
     ).to(device)
 
     # Agent
@@ -399,7 +398,6 @@ def train(cfg: TrainConfig):
         state_mlp_dim=cfg.algo.state_mlp_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         max_time_steps=eval_envs.max_episode_steps + 1,
-        temporal_emb_dim=cfg.algo.temporal_emb_dim,
         hash_voxel=hash_voxel,
         implicit_decoder=implicit_decoder
     ).to(device)

@@ -59,7 +59,7 @@ algo:
   hash_table_size: 2097152  # 2**21
   scene_bound_min: [-2.6, -8.1, 0.0]
   scene_bound_max: [4.6, 4.7, 3.1]
-  mod_time: 20
+  mod_time: 201
 
   # CLIP / Agent Settings
   clip_input_dim: 768
@@ -68,8 +68,8 @@ algo:
   text_input: ["bowl", "apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   state_mlp_dim: 1024
-  temporal_emb_dim: 60
-  stage1_cos_loss_weight: 0.2
+  temporal_emb_dim: 120
+  stage1_cos_loss_weight: 0.5
   stage2_cos_loss_weight: 0.02
   stage2_linear_scheduling: True
 
