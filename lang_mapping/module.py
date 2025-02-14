@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from .utils import rotary_pe_3d  
+from .utils import positional_encoding
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     """
@@ -203,3 +204,64 @@ class ActionMLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Compute the action outputs."""
         return self.net(x)
+
+class ImplicitDecoder(nn.Module):
+    """
+    A simple MLP to decode a 3D coordinate (with positional encoding) and its corresponding
+    voxel feature into another feature vector (default 768-D).
+    """
+    def __init__(self, voxel_feature_dim=120, hidden_dim=256, output_dim=768, L=10):
+        super().__init__()
+        self.voxel_feature_dim = voxel_feature_dim
+        self.hidden_dim = hidden_dim
+        self.L = L
+        self.pe_dim = 2 * self.L * 3  # 2*L for sine/cosine, times 3 for x, y, z
+
+        # First linear layer input dimension: voxel_feature_dim + pe_dim
+        self.input_dim = self.voxel_feature_dim + self.pe_dim
+        self.output_dim = output_dim
+
+        # Layers
+        self.fc1 = nn.Linear(self.input_dim, self.hidden_dim)
+        self.ln1 = nn.LayerNorm(self.hidden_dim)
+
+        self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.ln2 = nn.LayerNorm(self.hidden_dim)
+
+        # Third layer also takes the positional encoding as an additional input
+        self.fc3 = nn.Linear(self.hidden_dim + self.pe_dim, self.hidden_dim)
+        self.ln3 = nn.LayerNorm(self.hidden_dim)
+
+        self.fc4 = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.ln4 = nn.LayerNorm(self.hidden_dim)
+
+        self.fc5 = nn.Linear(self.hidden_dim, self.output_dim)
+
+    def forward(self, voxel_features, coords_3d):
+        """
+        Args:
+            voxel_features (Tensor): [N, voxel_feature_dim] - Features retrieved from the VoxelHashTable.
+            coords_3d (Tensor): [N, 3] - 3D coordinates for positional encoding.
+
+        Returns:
+            Tensor: [N, 768] - Decoded feature representation.
+        """
+        pe = positional_encoding(coords_3d, L=self.L)  # [N, pe_dim]
+
+        # 1) First linear
+        x = torch.cat([voxel_features, pe], dim=-1)
+        x = F.relu(self.ln1(self.fc1(x)), inplace=True)
+
+        # 2) Second linear
+        x = F.relu(self.ln2(self.fc2(x)), inplace=True)
+
+        # 3) Concat positional encoding again
+        x = torch.cat([x, pe], dim=-1)
+        x = F.relu(self.ln3(self.fc3(x)), inplace=True)
+
+        # 4) Fourth linear
+        x = F.relu(self.ln4(self.fc4(x)), inplace=True)
+
+        # 5) Fifth linear
+        x = self.fc5(x)
+        return x
