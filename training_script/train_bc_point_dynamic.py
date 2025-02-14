@@ -21,8 +21,9 @@ from torch.utils.tensorboard import SummaryWriter
 import mani_skill.envs
 from mani_skill.utils import common
 
-from lang_mapping.agent_point import Agent_point_dynamic
-from lang_mapping.mapping import VoxelHashTableDynamic, ImplicitDecoder
+from lang_mapping.agent.agent_dynamic import Agent_point_dynamic
+from lang_mapping.module import ImplicitDecoder
+from lang_mapping.mapper.mapper_dynamic import VoxelHashTableDynamic
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
