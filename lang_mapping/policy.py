@@ -141,7 +141,27 @@ class LocalSelfAttentionFusion(nn.Module):
         # Average the 2 tokens to get a single feature vector
         fused = y.mean(dim=1).view(B, N, D)
         return fused
-    
+
+class LocalSelfAttentionFusionMulti(nn.Module):
+    """
+    Fuses multiple features (e.g. [static, cond_time, cond_pose, cond_state]) via self-attention.
+    """
+    def __init__(self, feat_dim=120, num_heads=8):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(embed_dim=feat_dim, num_heads=num_heads, batch_first=True)
+        self.layernorm = nn.LayerNorm(feat_dim)
+
+    def forward(self, feats_list):
+        # feats_list: each is (B, N, D). Stack along token dimension -> (B, N, T, D)
+        x = torch.stack(feats_list, dim=2)
+        B, N, T, D = x.shape
+        x = x.view(B*N, T, D)
+        y, _ = self.mha(x, x, x)
+        y = self.layernorm(y)
+        # Average over T tokens
+        fused = y.mean(dim=1).view(B, N, D)
+        return fused
+
 class ActionMLP(nn.Module):
     """
     A feed-forward MLP for producing action outputs from a latent state vector.

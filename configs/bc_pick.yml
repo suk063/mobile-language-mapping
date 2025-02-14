@@ -37,7 +37,7 @@ algo:
   batch_size: 32
 
   stage1_epochs: 3
-  stage2_epochs: 14
+  stage2_epochs: 9
   stage3_epochs: 3
 
   eval_freq: 1
@@ -69,9 +69,9 @@ algo:
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   state_mlp_dim: 1024
   temporal_emb_dim: 120
-  stage1_cos_loss_weight: 0.5
-  stage2_cos_loss_weight: 0.02
-  stage2_linear_scheduling: True
+  stage1_cos_loss_weight: 0.01
+  stage2_cos_loss_weight: 0.01
+  stage2_linear_scheduling: False
 
   # Pre-trained Weights
   # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage1-final_agent.pt"
