@@ -37,7 +37,7 @@ algo:
   batch_size: 32
 
   stage1_epochs: 3
-  stage2_epochs: 14
+  stage2_epochs: 9
   stage3_epochs: 3
 
   eval_freq: 1
@@ -59,7 +59,7 @@ algo:
   hash_table_size: 2097152  # 2**21
   scene_bound_min: [-2.6, -8.1, 0.0]
   scene_bound_max: [4.6, 4.7, 3.1]
-  mod_time: 20
+  mod_time: 201
 
   # CLIP / Agent Settings
   clip_input_dim: 768
@@ -68,10 +68,10 @@ algo:
   text_input: ["bowl", "apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   state_mlp_dim: 1024
-  temporal_emb_dim: 60
-  stage1_cos_loss_weight: 0.2
-  stage2_cos_loss_weight: 0.02
-  stage2_linear_scheduling: True
+  temporal_emb_dim: 120
+  stage1_cos_loss_weight: 0.01
+  stage2_cos_loss_weight: 0.01
+  stage2_linear_scheduling: False
 
   # Pre-trained Weights
   # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage1-final_agent.pt"

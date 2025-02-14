@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .utils import positional_encoding
-from .policy import LocalSelfAttentionFusion
+from .policy import LocalSelfAttentionFusion, LocalSelfAttentionFusionMulti
 
 class VoxelHashTable(nn.Module):
     """
@@ -181,9 +181,9 @@ class ImplicitDecoder(nn.Module):
 
 class VoxelHashTableDynamic(nn.Module):
     """
-    Dynamic voxel hash table with separate embeddings for static and dynamic components.
+    A voxel hash table with separate static/dynamic embeddings (same dimension)
+    and a time-embedding table for temporal conditioning.
     """
-
     def __init__(
         self,
         resolution: float = 0.1,
@@ -194,70 +194,57 @@ class VoxelHashTableDynamic(nn.Module):
         mod_time: int = 201,
         device: str = "cuda:0",
     ):
-        """
-        Args:
-            resolution: Size of each voxel in meters.
-            hash_table_size: Size of the underlying hash buffer.
-            feature_dim_static: Feature dim for static portion of each voxel.
-            feature_dim_dynamic: Feature dim for dynamic portion of each voxel.
-            scene_bound_min: Minimum (x, y, z) for the entire scene.
-            scene_bound_max: Maximum (x, y, z) for the entire scene.
-            mod_time: Time modulus.
-            device: Torch device.
-        """
         super().__init__()
         self.resolution = resolution
         self.hash_table_size = hash_table_size
-        self.device = device
-        self.mod_time = mod_time
         self.feature_dim = feature_dim
+        self.mod_time = mod_time
+        self.device = device
 
-        # Large primes for hashing
+        # Hash primes for x,y,z
         self.primes_xyz = torch.tensor([73856093, 19349669, 83492791],
                                        device=device, dtype=torch.long)
-        # Another prime for time
-        self.prime_t = torch.tensor(1645333507, device=device, dtype=torch.long)
 
-        # 1) Build the base 3D voxel coordinates
+        # Create 3D voxel coordinates
         xs = torch.arange(scene_bound_min[0], scene_bound_max[0], resolution)
         ys = torch.arange(scene_bound_min[1], scene_bound_max[1], resolution)
         zs = torch.arange(scene_bound_min[2], scene_bound_max[2], resolution)
-        grid_x, grid_y, grid_z = torch.meshgrid(xs, ys, zs, indexing='ij')
-        self.voxel_coords = torch.stack([grid_x, grid_y, grid_z], dim=-1).view(-1, 3).to(device)
+        gx, gy, gz = torch.meshgrid(xs, ys, zs, indexing='ij')
+        self.voxel_coords = torch.stack([gx, gy, gz], dim=-1).view(-1, 3).to(device)
         self.total_voxels = self.voxel_coords.shape[0]
 
-        # 2) Define learnable static features [total_voxels, feature_dim_static]
+        # Static and dynamic embeddings
         self.static_features = nn.Parameter(
-            torch.randn(self.total_voxels, self.feature_dim, device=device) * 0.01
+            torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
         )
-
-        # 3) Define learnable dynamic features [total_voxels, mod_time, feature_dim_dynamic]
-        #    We store a separate dynamic embedding for each time index
         self.dynamic_features = nn.Parameter(
-            torch.randn(self.total_voxels, self.mod_time, self.feature_dim, device=device) * 0.01
+            torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
         )
 
-        # 4) Build the hash table (stores indices of each voxel)
-        self.buffer_voxel_index = torch.full((self.hash_table_size,), -1,
+        # Time embeddings for conditioning
+        self.time_embeddings = nn.Parameter(
+            torch.randn(self.mod_time, feature_dim, device=device) * 0.01
+        )
+
+        # Hash table index buffer
+        self.buffer_voxel_index = torch.full((hash_table_size,), -1,
                                              dtype=torch.long, device=device)
         self.build_hash_grid()
 
-        self.fusion_static_dynamic = LocalSelfAttentionFusion(
-            feat_dim=feature_dim,  
-            num_heads=8
-        )
-        
-        # For debugging / point storage
+        # Two attention modules for fusion
+        self.fusion_time_dynamic = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
+        self.fusion_static_dynamic = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
+
+        # Debug storage
         self.voxel_points = {}
 
     def build_hash_grid(self):
         """
-        Build the static hash grid for the 3D portion only.
-        Time dimension is handled separately in the query.
-        Collisions: if a hash bucket is already occupied, we do not store that voxel.
+        Build a hash grid of voxel indices. Collisions are skipped.
         """
         grid_coords = torch.floor(self.voxel_coords / self.resolution).to(torch.int64)
-        hash_vals = torch.fmod((grid_coords * self.primes_xyz).sum(dim=-1), self.hash_table_size)
+        hash_vals = torch.remainder((grid_coords * self.primes_xyz).sum(dim=-1),
+                                    self.hash_table_size)
 
         collisions = 0
         for i in range(self.total_voxels):
@@ -268,63 +255,244 @@ class VoxelHashTableDynamic(nn.Module):
                 collisions += 1
 
         if collisions > 0:
-            print(f"[WARNING] {collisions} collisions out of {self.total_voxels} voxels. "
-                  "Some voxels are not stored in the hash table.")
+            print(f"[WARNING] {collisions} collisions among {self.total_voxels} voxels.")
 
     def query_voxel_feature(self, query_pts, query_times, return_indices=False):
         """
-        Return static + dynamic features for (x, y, z, t).
-        
-        Args:
-            query_pts: [M, 3] float - 3D coordinates to query
-            query_times: [M] long - time steps to query
-            return_indices: bool - whether to return the raw voxel indices (-1 if not found)
-
-        Returns:
-            feats: [M, feature_dim_static + feature_dim_dynamic]
-            voxel_indices: [M] if return_indices=True, else None
+        Returns fused features for (x,y,z,t).
+        1) Hash to find voxel index
+        2) Gather static and dynamic feats
+        3) Add time embedding to dynamic via self-attention
+        4) Fuse static and conditioned dynamic
         """
         device = query_pts.device
         M = query_pts.shape[0]
 
-        # 1) Compute the 3D voxel index via hash
+        # Hash lookup
         grid_coords = torch.floor(query_pts / self.resolution).to(torch.int64)
-        hash_xyz = torch.fmod((grid_coords * self.primes_xyz).sum(dim=-1), self.hash_table_size).long()
+        hash_xyz = torch.remainder(
+            (grid_coords * self.primes_xyz).sum(dim=-1), self.hash_table_size
+        ).long()
 
-        voxel_indices = self.buffer_voxel_index[hash_xyz]  # [M]
-        valid_mask = (voxel_indices >= 0)
+        voxel_indices = self.buffer_voxel_index[hash_xyz]
+        valid_mask = voxel_indices >= 0
 
-        # 2) Map time to mod_time
-        modded_t = torch.fmod(query_times, self.mod_time).long().cuda()  # [M]
+        # Mod time
+        t_mod = torch.remainder(query_times, self.mod_time).long().to(device)
 
-        # 3) Gather features
+        # Prepare output
         feats = torch.zeros(M, self.feature_dim, device=device)
 
         if valid_mask.any():
             v_idx = voxel_indices[valid_mask]
-            t_idx = modded_t[valid_mask]
+            t_idx = t_mod[valid_mask]
 
-            # Gather static & dynamic embeddings
-            static_feats = self.static_features[v_idx]          # (M_valid, feature_dim)
-            dynamic_feats = self.dynamic_features[v_idx, t_idx] # (M_valid, feature_dim)
+            static_feats = self.static_features[v_idx]
+            dynamic_feats = self.dynamic_features[v_idx]
+            time_emb = self.time_embeddings[t_idx]
 
-            # Fuse them via self-attention
-            static_reshaped = static_feats.unsqueeze(1)   # (M_valid, 1, feat_dim)
-            dynamic_reshaped = dynamic_feats.unsqueeze(1) # (M_valid, 1, feat_dim)
-            fused = self.fusion_static_dynamic(static_reshaped, dynamic_reshaped)
-            fused = fused.squeeze(1)  # (M_valid, feat_dim)
+            # Fuse dynamic + time
+            cond_dynamic = self.fusion_time_dynamic(
+                dynamic_feats.unsqueeze(1),
+                time_emb.unsqueeze(1)
+            ).squeeze(1)
+
+            # Fuse static + cond_dynamic
+            fused = self.fusion_static_dynamic(
+                static_feats.unsqueeze(1),
+                cond_dynamic.unsqueeze(1)
+            ).squeeze(1)
 
             feats[valid_mask] = fused
 
         if return_indices:
             return feats, voxel_indices
-        else:
-            return feats, None
+        return feats, None
 
-    def add_points(self, voxel_indices: torch.Tensor, points_3d: torch.Tensor, times: torch.Tensor):
+    def add_points(self, voxel_indices, points_3d, times):
         """
-        Store some 3D points (and times) for debugging/analysis.
+        Store sample points/times for debugging.
         """
+        v_idx_cpu = voxel_indices.detach().cpu().numpy()
+        points_cpu = points_3d.detach().cpu()
+        times_cpu = times.detach().cpu().numpy()
+
+        for i in range(len(v_idx_cpu)):
+            vid = int(v_idx_cpu[i])
+            if vid < 0:
+                continue
+            if vid not in self.voxel_points:
+                self.voxel_points[vid] = []
+            if len(self.voxel_points[vid]) < 10:
+                self.voxel_points[vid].append((points_cpu[i], times_cpu[i]))
+
+class VoxelHashTableDynamicMulti(nn.Module):
+    """
+    Single dynamic_features_pose + single pose_mlp + single fusion_pose.
+    """
+    def __init__(
+        self,
+        resolution=0.1,
+        hash_table_size=2**20,
+        feature_dim=120,
+        scene_bound_min=(-2.6, -8.1, 0),
+        scene_bound_max=(4.6, 4.7, 3.1),
+        mod_time=201,
+        device="cuda:0",
+        pose_dim=12,   # example
+        state_dim=42  # example
+    ):
+        super().__init__()
+        self.resolution = resolution
+        self.hash_table_size = hash_table_size
+        self.feature_dim = feature_dim
+        self.mod_time = mod_time
+        self.device = device
+
+        # Primes for hashing
+        self.primes_xyz = torch.tensor([73856093, 19349669, 83492791], device=device, dtype=torch.long)
+
+        # Build voxel coords
+        xs = torch.arange(scene_bound_min[0], scene_bound_max[0], resolution)
+        ys = torch.arange(scene_bound_min[1], scene_bound_max[1], resolution)
+        zs = torch.arange(scene_bound_min[2], scene_bound_max[2], resolution)
+        gx, gy, gz = torch.meshgrid(xs, ys, zs, indexing='ij')
+        self.voxel_coords = torch.stack([gx, gy, gz], dim=-1).view(-1, 3).to(device)
+        self.total_voxels = self.voxel_coords.shape[0]
+
+        # Static features
+        self.static_features = nn.Parameter(
+            torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
+        )
+
+        # Dynamic features (time)
+        self.dynamic_features_time = nn.Parameter(
+            torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
+        )
+        self.time_embeddings = nn.Parameter(
+            torch.randn(self.mod_time, feature_dim, device=device) * 0.01
+        )
+
+        # Single dynamic features for pose (shared by head/hand)
+        self.dynamic_features_pose = nn.Parameter(
+            torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
+        )
+        # Single MLP for pose (head or hand)
+        self.pose_mlp = nn.Sequential(
+            nn.Linear(pose_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, feature_dim)
+        ).to(device)
+
+        # Dynamic features for state
+        self.dynamic_features_state = nn.Parameter(
+            torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
+        )
+        self.state_mlp = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, feature_dim)
+        ).to(device)
+
+        # Hash index buffer
+        self.buffer_voxel_index = torch.full((hash_table_size,), -1, dtype=torch.long, device=device)
+        self.build_hash_grid()
+
+        # Pairwise fusions
+        self.fusion_time_dynamic = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
+        self.fusion_pose = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
+        self.fusion_state = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
+
+        # Final multi-fusion
+        self.fusion_all_multi = LocalSelfAttentionFusionMulti(feat_dim=feature_dim, num_heads=8)
+
+        # Debug storage
+        self.voxel_points = {}
+
+    def build_hash_grid(self):
+        grid_coords = torch.floor(self.voxel_coords / self.resolution).to(torch.int64)
+        hash_vals = torch.remainder((grid_coords * self.primes_xyz).sum(dim=-1), self.hash_table_size)
+
+        collisions = 0
+        for i in range(self.total_voxels):
+            h = hash_vals[i].item()
+            if self.buffer_voxel_index[h] == -1:
+                self.buffer_voxel_index[h] = i
+            else:
+                collisions += 1
+
+        if collisions > 0:
+            print(f"[WARNING] {collisions} collisions among {self.total_voxels} voxels.")
+
+    def query_voxel_feature(
+        self,
+        query_pts,
+        query_times,
+        query_pose=None,
+        query_state=None,
+        return_indices=False
+    ):
+        device = query_pts.device
+        M = query_pts.shape[0]
+
+        # Hash lookup
+        grid_coords = torch.floor(query_pts / self.resolution).to(torch.int64)
+        hash_xyz = torch.remainder((grid_coords * self.primes_xyz).sum(dim=-1), self.hash_table_size)
+        voxel_indices = self.buffer_voxel_index[hash_xyz]
+        valid_mask = voxel_indices >= 0
+
+        # Time mod
+        t_mod = torch.remainder(query_times, self.mod_time).long().to(device)
+
+        feats = torch.zeros(M, self.feature_dim, device=device)
+
+        if valid_mask.any():
+            v_idx = voxel_indices[valid_mask]
+            t_idx = t_mod[valid_mask]
+
+            # Static
+            static_feats = self.static_features[v_idx]
+
+            # Time
+            dynamic_feats_time = self.dynamic_features_time[v_idx]
+            time_emb = self.time_embeddings[t_idx]
+            cond_time = self.fusion_time_dynamic(
+                dynamic_feats_time.unsqueeze(1),
+                time_emb.unsqueeze(1)
+            ).squeeze(1)
+
+            # Pose
+            dynamic_feats_pose = self.dynamic_features_pose[v_idx]
+            pose_emb = self.pose_mlp(query_pose[valid_mask])
+            cond_pose = self.fusion_pose(
+                dynamic_feats_pose.unsqueeze(1),
+                pose_emb.unsqueeze(1)
+            ).squeeze(1)
+
+            # State
+            dynamic_feats_state = self.dynamic_features_state[v_idx]
+            cond_state = torch.zeros_like(cond_time)
+            state_emb = self.state_mlp(query_state[valid_mask])
+            cond_state = self.fusion_state(
+                dynamic_feats_state.unsqueeze(1),
+                state_emb.unsqueeze(1)
+            ).squeeze(1)
+
+            # Fuse 4 tokens
+            # (B,N,D) -> here B=valid_count, N=1
+            static_1 = static_feats.unsqueeze(1)
+            time_1 = cond_time.unsqueeze(1)
+            pose_1 = cond_pose.unsqueeze(1)
+            state_1 = cond_state.unsqueeze(1)
+            fused_4 = self.fusion_all_multi([static_1, time_1, pose_1, state_1]).squeeze(1)
+
+            feats[valid_mask] = fused_4
+
+        if return_indices:
+            return feats, voxel_indices
+        return feats, None
+
+    def add_points(self, voxel_indices, points_3d, times):
         v_idx_cpu = voxel_indices.detach().cpu().numpy()
         points_cpu = points_3d.detach().cpu()
         times_cpu = times.detach().cpu().numpy()

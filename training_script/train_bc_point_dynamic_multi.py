@@ -21,8 +21,8 @@ from torch.utils.tensorboard import SummaryWriter
 import mani_skill.envs
 from mani_skill.utils import common
 
-from lang_mapping.agent_point import Agent_point_dynamic
-from lang_mapping.mapping import VoxelHashTableDynamic, ImplicitDecoder
+from lang_mapping.agent_point import Agent_point_dynamic_multi
+from lang_mapping.mapping import VoxelHashTableDynamicMulti, ImplicitDecoder
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
@@ -369,7 +369,7 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     # VoxelHashTable and ImplicitDecoder
-    hash_voxel = VoxelHashTableDynamic(
+    hash_voxel = VoxelHashTableDynamicMulti(
         resolution=cfg.algo.resolution,
         hash_table_size=cfg.algo.hash_table_size,
         feature_dim=cfg.algo.voxel_feature_dim,
@@ -387,7 +387,7 @@ def train(cfg: TrainConfig):
     ).to(device)
 
     # Agent
-    agent = Agent_point_dynamic(
+    agent = Agent_point_dynamic_multi(
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
