@@ -168,10 +168,9 @@ class VoxelHashTableDynamicMulti(nn.Module):
             return feats, voxel_indices
         return feats, None
 
-    def add_points(self, voxel_indices, points_3d, times):
+    def add_points(self, voxel_indices, points_3d):
         v_idx_cpu = voxel_indices.detach().cpu().numpy()
         points_cpu = points_3d.detach().cpu()
-        times_cpu = times.detach().cpu().numpy()
 
         for i in range(len(v_idx_cpu)):
             vid = int(v_idx_cpu[i])
@@ -180,4 +179,4 @@ class VoxelHashTableDynamicMulti(nn.Module):
             if vid not in self.voxel_points:
                 self.voxel_points[vid] = []
             if len(self.voxel_points[vid]) < 10:
-                self.voxel_points[vid].append((points_cpu[i], times_cpu[i]))
+                self.voxel_points[vid].append(points_cpu[i])
