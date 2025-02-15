@@ -10,6 +10,8 @@ import h5py
 from dacite import from_dict
 from omegaconf import OmegaConf
 from tqdm import tqdm
+import pickle
+
 
 import gymnasium as gym
 import numpy as np
@@ -522,6 +524,12 @@ def train(cfg: TrainConfig):
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
         timer.end(key="train")
+
+        if epoch == 0:
+            used_voxel_path = logger.model_path / "used_voxel_idx_set_epoch0.pkl"
+            with open(used_voxel_path, "wb") as f:
+                pickle.dump(list(agent.used_voxel_idx_set), f)
+            print(f"[INFO] used_voxel_idx_set saved at: {used_voxel_path}")
 
         # Logging
         if check_freq(cfg.algo.log_freq, epoch):

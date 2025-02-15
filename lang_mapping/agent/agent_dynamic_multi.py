@@ -200,6 +200,7 @@ class Agent_point_dynamic_multi(nn.Module):
         feats_head_reduced = feats_head_flat_reduced.reshape(B_, N, -1)
 
         # Voxel lookup
+        return_indices = (self.epoch == 0)
 
         times_t_expanded = step_nums.unsqueeze(1).expand(-1, N).reshape(B_ * N)
         hand_pose_expanded = hand_pose.expand(-1, N, -1, -1).reshape(B_*N, -1)
@@ -212,7 +213,8 @@ class Agent_point_dynamic_multi(nn.Module):
             query_pts=hand_coords_world_flat,
             query_times=times_t_expanded,
             query_pose=hand_pose_expanded,   # pass the "hand" pose
-            query_state=state_expanded
+            query_state=state_expanded,
+            return_indices=return_indices
         )
 
         # Query voxel for head
@@ -220,7 +222,8 @@ class Agent_point_dynamic_multi(nn.Module):
             query_pts=head_coords_world_flat,
             query_times=times_t_expanded,
             query_pose=head_pose_expanded,   # pass the "head" pose
-            query_state=state_expanded
+            query_state=state_expanded,
+            return_indices=return_indices
         )
 
         # Decoder for loss (cosine similarity)
@@ -233,6 +236,26 @@ class Agent_point_dynamic_multi(nn.Module):
         cos_loss_head = 1.0 - cos_sim_head.mean()
 
         total_cos_loss = cos_loss_hand + cos_loss_head
+
+        # Update voxel points if epoch == 0
+        if return_indices:
+            # Hand
+            valid_mask_hand = hand_indices >= 0
+            if valid_mask_hand.any():
+                valid_hand_idx = hand_indices[valid_mask_hand]
+                valid_hand_pts = hand_coords_world_flat[valid_mask_hand]
+                self.hash_voxel.add_points(valid_hand_idx, valid_hand_pts)
+                for idx in valid_hand_idx.detach().cpu().numpy():
+                    self.used_voxel_idx_set.add(int(idx))
+
+            # Head
+            valid_mask_head = head_indices >= 0
+            if valid_mask_head.any():
+                valid_head_idx = head_indices[valid_mask_head]
+                valid_head_pts = head_coords_world_flat[valid_mask_head]
+                self.hash_voxel.add_points(valid_head_idx, valid_head_pts)
+                for idx in valid_head_idx.detach().cpu().numpy():
+                    self.used_voxel_idx_set.add(int(idx))
 
         # Transformer input
         voxel_feat_for_points_hand_proj = self.voxel_proj(voxel_feat_for_points_hand)
@@ -268,3 +291,4 @@ class Agent_point_dynamic_multi(nn.Module):
         action_pred = self.action_mlp(inp)                   # [B, action_dim]
 
         return action_pred, total_cos_loss
+    
