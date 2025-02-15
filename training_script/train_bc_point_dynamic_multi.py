@@ -362,7 +362,7 @@ def train(cfg: TrainConfig):
     # Make eval env
     print("Making eval env...")
     eval_envs = make_env(cfg.eval_env, video_path=cfg.logger.eval_video_path)
-    eval_uids = eval_envs.unwrapped.task_plan[0].composite_subtask_uids
+    # eval_uids = eval_envs.unwrapped.task_plan[0].composite_subtask_uids
     print("Eval env made.")
 
     eval_obs, _ = eval_envs.reset(seed=cfg.seed + 1_000_000)
@@ -535,7 +535,7 @@ def train(cfg: TrainConfig):
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
             eval_obs, _ = eval_envs.reset()
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_uids).to(device)
+            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
             B = eval_subtask_labels.size()
 
             for t in range(eval_envs.max_episode_steps):
@@ -610,7 +610,7 @@ def train(cfg: TrainConfig):
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
             eval_obs, _ = eval_envs.reset()
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_uids).to(device)
+            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
             B = eval_subtask_labels.size()
 
             for t in range(eval_envs.max_episode_steps):
@@ -695,7 +695,7 @@ def train(cfg: TrainConfig):
             implicit_decoder.eval()
 
             eval_obs, _ = eval_envs.reset()
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_uids).to(device)
+            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
             B = eval_subtask_labels.size()
 
             for t in range(eval_envs.max_episode_steps):
