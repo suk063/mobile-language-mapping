@@ -162,6 +162,59 @@ def rotary_pe_3d(
 
     return torch.stack(out_blocks, dim=2).view(B, S, D)
 
+def chamfer_cosine(pred_feat, lbl_feat, threshold=0.01):
+    """
+    pred_feat, lbl_feat: [B, N, D]
+    threshold: maximum allowed distance (1 - cos).
+                if distance > threshold, we skip it by masking.
+    Returns the batch-averaged Chamfer distance.
+    """
+    # Normalize each feature vector: shape [B, N, D]
+    pred_norm = F.normalize(pred_feat, dim=-1)
+    lbl_norm  = F.normalize(lbl_feat,  dim=-1)
+
+    # Compute cosine similarity: [B, N, N]
+    cos_sim = torch.bmm(pred_norm, lbl_norm.transpose(1, 2))
+    dist = 1.0 - cos_sim  # we use "1 - cos" as distance
+
+    # Mask out pairs that exceed the threshold
+    dist_masked = dist.clone()
+    dist_masked[dist_masked > threshold] = 9999.0
+
+    row2col_vals, row2col_idxs = dist_masked.min(dim=2)  # [B, N]
+    col2row_vals, col2row_idxs = dist_masked.min(dim=1)  # [B, N]
+
+    # For each row, we only average over rows that found a distance < 9999
+    row_valid = (row2col_vals < 9999.0)
+    col_valid = (col2row_vals < 9999.0)
+
+    print("==== Debug Info ====")
+        # 예시로 배치마다, 각 pred row가 어떤 label 인덱스에 매핑되었는지와 거리를 출력
+    for b in range(dist_masked.size(0)):
+        print(f"[Batch {b}]")
+        # pred -> label 매핑
+        print("  Pred -> Label Mapping:")
+        for r in range(dist_masked.size(1)):
+            if row_valid[b, r]:
+                print(f"    pred[{r}] -> label[{row2col_idxs[b, r].item()}], dist={row2col_vals[b, r].item():.4f}")
+        
+        print("==============")
+        break
+    # If no valid row or column, we can set the average to 0 or something
+
+    if row_valid.any():
+        row_chamfer = row2col_vals[row_valid].mean()
+    else:
+        row_chamfer = torch.tensor(1.0, device=dist.device)
+
+    if col_valid.any():
+        col_chamfer = col2row_vals[col_valid].mean()
+    else:
+        col_chamfer = torch.tensor(1.0, device=dist.device)
+
+    chamfer_loss_val = row_chamfer 
+    return chamfer_loss_val
+
 # Basic image transform
 transform = transforms.Compose([
     transforms.Resize(

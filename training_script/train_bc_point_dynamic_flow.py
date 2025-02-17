@@ -115,6 +115,7 @@ class BCConfig:
     state_mlp_dim: int = 1024
     stage1_cos_loss_weight: float = 0.5
     stage2_cos_loss_weight: float = 0.005
+    scene_flow_loss_weight: float = 100
     stage2_linear_scheduling: bool = True
 
     num_eval_envs: int = field(init=False)
@@ -498,6 +499,7 @@ def train(cfg: TrainConfig):
 
             pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
             cos_loss = cfg.algo.stage1_cos_loss_weight * cos_loss
+            scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
             loss = cos_loss + scene_flow_loss
 
             optimizer.zero_grad()
@@ -573,6 +575,7 @@ def train(cfg: TrainConfig):
 
             pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
             cos_loss = cos_loss_weight * cos_loss
+            scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
             bc_loss = F.mse_loss(pi, act)
             loss = cos_loss + scene_flow_loss + bc_loss  # Stage 2 uses both
 

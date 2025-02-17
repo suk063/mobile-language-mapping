@@ -3,11 +3,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict
+from scipy.optimize import linear_sum_assignment
 
 # Local imports
 from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, transform
+from ..utils import get_3d_coordinates, get_visual_features, chamfer_cosine, transform
 
 import open_clip
     
@@ -239,21 +240,50 @@ class Agent_point_dynamic_flow(nn.Module):
 
         total_cos_loss = cos_loss_hand + cos_loss_head
 
-        # ============ 5) Compute scene flow loss ============
-        # Predicted flow v at time t
+        # -------------------------------------------------
+        # 6. Scene flow prediction
+        # -------------------------------------------------
         flow_hand = self.hash_voxel.query_scene_flow(hand_coords_world_flat, times_t_expanded)  # [N,3]
         flow_head = self.hash_voxel.query_scene_flow(head_coords_world_flat, times_t_expanded)
 
-        # We want (x + v) ~ x_{p1}, so:
-        #   scene_flow_loss = MSE( x + v, x_p1 )
         pred_hand_next = hand_coords_world_flat + flow_hand
         pred_head_next = head_coords_world_flat + flow_head
 
-        scene_flow_loss_hand = F.mse_loss(pred_hand_next, hand_coords_world_flat_p1)
-        scene_flow_loss_head = F.mse_loss(pred_head_next, head_coords_world_flat_p1)
-        scene_flow_loss = scene_flow_loss_hand + scene_flow_loss_head
+        step_nums_p1 = step_nums + 1
+        times_tp1_expanded = step_nums_p1.unsqueeze(1).expand(-1, N).reshape(B_ * N)
 
-        # reshape flow_hand, flow_head each to (B, N*3), then concat -> (B, 2*N*3)
+        voxel_feat_tp1_pred_hand, _ = self.hash_voxel.query_voxel_feature(
+            pred_hand_next, times_tp1_expanded
+        )
+        voxel_feat_tp1_pred_head, _ = self.hash_voxel.query_voxel_feature(
+            pred_head_next, times_tp1_expanded
+        )
+
+        voxel_feat_tp1_lbl_hand, _ = self.hash_voxel.query_voxel_feature(
+            hand_coords_world_flat_p1, times_tp1_expanded
+        )
+        voxel_feat_tp1_lbl_head, _ = self.hash_voxel.query_voxel_feature(
+            head_coords_world_flat_p1, times_tp1_expanded
+        )
+
+        # (A) Reshape to (B, N, D)
+        voxel_feat_tp1_pred_hand_b = voxel_feat_tp1_pred_hand.view(B_, N, -1)
+        voxel_feat_tp1_pred_head_b = voxel_feat_tp1_pred_head.view(B_, N, -1)
+        voxel_feat_tp1_lbl_hand_b  = voxel_feat_tp1_lbl_hand.view(B_, N, -1)
+        voxel_feat_tp1_lbl_head_b  = voxel_feat_tp1_lbl_head.view(B_, N, -1)
+    
+        # Hand chamfer
+        hand_chamfer_loss = chamfer_cosine(voxel_feat_tp1_pred_hand_b,
+                                                     voxel_feat_tp1_lbl_hand_b,
+                                                     threshold=0.01)
+        # Head chamfer
+        head_chamfer_loss = chamfer_cosine(voxel_feat_tp1_pred_head_b,
+                                                     voxel_feat_tp1_lbl_head_b,
+                                                     threshold=0.01)
+
+        scene_flow_loss = hand_chamfer_loss + head_chamfer_loss
+
+        # # reshape flow_hand, flow_head each to (B, N*3), then concat -> (B, 2*N*3)
         flow_hand_batched = flow_hand.view(B_, N, 3)
         flow_head_batched = flow_head.view(B_, N, 3)
         flow_hand_flat = flow_hand_batched.view(B_, -1)  # (B, N*3)
