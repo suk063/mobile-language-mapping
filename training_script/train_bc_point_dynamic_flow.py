@@ -496,7 +496,7 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss = agent(obs, subtask_labels, step_nums)
+            pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
             cos_loss = cfg.algo.stage1_cos_loss_weight * cos_loss
             loss = cos_loss + scene_flow_loss
 
@@ -535,7 +535,7 @@ def train(cfg: TrainConfig):
             for t in range(eval_envs.max_episode_steps):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action, _, _ = agent(eval_obs, eval_subtask_labels, time_step)
+                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
                 eval_obs, _, _, _, _ = eval_envs.step(action)
 
             if len(eval_envs.return_queue) > 0:
@@ -571,7 +571,7 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss = agent(obs, subtask_labels, step_nums)
+            pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
             cos_loss = cos_loss_weight * cos_loss
             bc_loss = F.mse_loss(pi, act)
             loss = cos_loss + scene_flow_loss + bc_loss  # Stage 2 uses both
@@ -611,7 +611,7 @@ def train(cfg: TrainConfig):
             for t in range(eval_envs.max_episode_steps):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action, _, _ = agent(eval_obs, eval_subtask_labels, time_step)
+                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
                 eval_obs, _, _, _, _ = eval_envs.step(action)
 
             if len(eval_envs.return_queue) > 0:
@@ -654,7 +654,7 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss = agent(obs, subtask_labels, step_nums)
+            pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
             # We ignore cos_loss now (mapping is frozen)
             bc_loss = F.mse_loss(pi, act)
             loss = bc_loss  # Stage 3 uses only BC
@@ -696,7 +696,7 @@ def train(cfg: TrainConfig):
             for t in range(eval_envs.max_episode_steps):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action, _, _ = agent(eval_obs, eval_subtask_labels, time_step)
+                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
                 # Stub environment step
                 eval_obs, _, _, _, _ = eval_envs.step(action)
             if len(eval_envs.return_queue) > 0:

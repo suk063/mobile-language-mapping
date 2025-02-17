@@ -2,7 +2,7 @@
 
 SEED=1
 
-TRAJS_PER_OBJ=1
+TRAJS_PER_OBJ=1000
 
 TASK=set_table
 SUBTASK=pick
@@ -47,7 +47,7 @@ args=(
     "algo.log_freq=1"
     "algo.save_freq=1"
     "eval_env.make_env=True"
-    "eval_env.num_envs=50"
+    "eval_env.num_envs=30"
     "eval_env.max_episode_steps=200"
     "eval_env.record_video=True"
     "eval_env.info_on_video=True"
