@@ -11,7 +11,7 @@ from ..utils import get_3d_coordinates, get_visual_features, transform
 
 import open_clip
     
-class Agent_point_dynamic(nn.Module):
+class Agent_point_dynamic_flow(nn.Module):
     def __init__(
         self,
         sample_obs,
@@ -138,6 +138,11 @@ class Agent_point_dynamic(nn.Module):
         pixels: Dict[str, torch.Tensor] = observations["pixels"]
         state: torch.Tensor = observations["state"]  # [B, state_dim]
 
+        hand_depth_p1 = pixels["fetch_hand_depth_p1"] / 1000.0
+        head_depth_p1 = pixels["fetch_head_depth_p1"] / 1000.0
+        hand_pose_p1 = pixels["fetch_hand_pose_p1"]
+        head_pose_p1 = pixels["fetch_head_pose_p1"]
+
         # Preprocess RGB
         hand_rgb = pixels["fetch_hand_rgb"]
         head_rgb = pixels["fetch_head_rgb"]
@@ -161,6 +166,11 @@ class Agent_point_dynamic(nn.Module):
             hand_depth = F.interpolate(hand_depth, (16, 16), mode="nearest")
             head_depth = F.interpolate(head_depth, (16, 16), mode="nearest")
 
+            hand_depth_p1 = hand_depth_p1.view(b2, fs2 * d2, h2, w2)
+            head_depth_p1 = head_depth_p1.view(b2, fs2 * d2, h2, w2)
+            hand_depth_p1 = F.interpolate(hand_depth_p1, (16, 16), mode="nearest")
+            head_depth_p1 = F.interpolate(head_depth_p1, (16, 16), mode="nearest")
+
         # Camera poses
         hand_pose = pixels["fetch_hand_pose"]
         head_pose = pixels["fetch_head_pose"]
@@ -178,12 +188,21 @@ class Agent_point_dynamic(nn.Module):
             head_visfeat, head_depth, head_pose, self.fx, self.fy, self.cx, self.cy
         )
 
+        hand_coords_world_p1, _ = get_3d_coordinates(
+            hand_visfeat, hand_depth_p1, hand_pose_p1, self.fx, self.fy, self.cx, self.cy
+        )
+        head_coords_world_p1, _ = get_3d_coordinates(
+            head_visfeat, head_depth_p1, head_pose_p1, self.fx, self.fy, self.cx, self.cy
+        )
+
         B_, C_, Hf, Wf = hand_coords_world.shape
         N = Hf * Wf
 
         # Flatten coordinates
         hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
         head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
+        hand_coords_world_flat_p1 = hand_coords_world_p1.permute(0, 2, 3, 1).reshape(B_ * N, 3)
+        head_coords_world_flat_p1 = head_coords_world_p1.permute(0, 2, 3, 1).reshape(B_ * N, 3)
 
         # Flatten CLIP features
         hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
@@ -218,6 +237,20 @@ class Agent_point_dynamic(nn.Module):
 
         total_cos_loss = cos_loss_hand + cos_loss_head
 
+        # ============ 5) Compute scene flow loss ============
+        # Predicted flow v at time t
+        flow_hand = self.hash_voxel.query_scene_flow(hand_coords_world_flat, times_t_expanded)  # [N,3]
+        flow_head = self.hash_voxel.query_scene_flow(head_coords_world_flat, times_t_expanded)
+
+        # We want (x + v) ~ x_{p1}, so:
+        #   scene_flow_loss = MSE( x + v, x_p1 )
+        pred_hand_next = hand_coords_world_flat + flow_hand
+        pred_head_next = head_coords_world_flat + flow_head
+
+        scene_flow_loss_hand = F.mse_loss(pred_hand_next, hand_coords_world_flat_p1)
+        scene_flow_loss_head = F.mse_loss(pred_head_next, head_coords_world_flat_p1)
+        scene_flow_loss = scene_flow_loss_hand + scene_flow_loss_head
+
         # Transformer input
         voxel_feat_for_points_hand_proj = self.voxel_proj(voxel_feat_for_points_hand)
         voxel_feat_for_points_head_proj = self.voxel_proj(voxel_feat_for_points_head)
@@ -251,4 +284,4 @@ class Agent_point_dynamic(nn.Module):
         inp = torch.cat([visual_token, state_token], dim=1)  # [B, state_mlp_dim * 2]
         action_pred = self.action_mlp(inp)                   # [B, action_dim]
 
-        return action_pred, total_cos_loss
+        return action_pred, total_cos_loss, scene_flow_loss

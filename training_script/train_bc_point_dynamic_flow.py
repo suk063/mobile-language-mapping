@@ -21,9 +21,9 @@ from torch.utils.tensorboard import SummaryWriter
 import mani_skill.envs
 from mani_skill.utils import common
 
-from lang_mapping.agent.agent_dynamic import Agent_point_dynamic
+from lang_mapping.agent.agent_dynamic_flow import Agent_point_dynamic_flow
 from lang_mapping.module import ImplicitDecoder
-from lang_mapping.mapper.mapper_dynamic import VoxelHashTableDynamic
+from lang_mapping.mapper.mapper_dynamic_flow import VoxelHashTableDynamicFlow
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
@@ -51,8 +51,6 @@ def build_object_map(json_file_path: str, object_names: List[str]) -> Dict[str, 
             obj_id = subtask["obj_id"]
 
             found_label = None
-            import pdb
-            pdb.set_trace()
             for i, obj_name in enumerate(object_names):
                 if obj_name in obj_id:
                     found_label = i
@@ -365,7 +363,7 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     # VoxelHashTable and ImplicitDecoder
-    hash_voxel = VoxelHashTableDynamic(
+    hash_voxel = VoxelHashTableDynamicFlow(
         resolution=cfg.algo.resolution,
         hash_table_size=cfg.algo.hash_table_size,
         feature_dim=cfg.algo.voxel_feature_dim,
@@ -383,7 +381,7 @@ def train(cfg: TrainConfig):
     ).to(device)
 
     # Agent
-    agent = Agent_point_dynamic(
+    agent = Agent_point_dynamic_flow(
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
@@ -498,9 +496,9 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss = agent(obs, subtask_labels, step_nums)
+            pi, cos_loss, scene_flow_loss = agent(obs, subtask_labels, step_nums)
             cos_loss = cfg.algo.stage1_cos_loss_weight * cos_loss
-            loss = cos_loss  # Stage 1 uses only cos_loss
+            loss = cos_loss + scene_flow_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -513,6 +511,7 @@ def train(cfg: TrainConfig):
             # Write to TensorBoard
             writer.add_scalar("Loss/Iteration", loss.item(), global_step)
             writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
+            writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
