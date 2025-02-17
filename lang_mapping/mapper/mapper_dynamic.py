@@ -15,6 +15,7 @@ class VoxelHashTableDynamic(nn.Module):
         scene_bound_min: tuple = (-2.6, -8.1, 0),
         scene_bound_max: tuple = (4.6, 4.7, 3.1),
         mod_time: int = 201,
+        dynamaic_only: bool = True,
         device: str = "cuda:0",
     ):
         super().__init__()
@@ -22,6 +23,7 @@ class VoxelHashTableDynamic(nn.Module):
         self.hash_table_size = hash_table_size
         self.feature_dim = feature_dim
         self.mod_time = mod_time
+        self.dynamic_only = dynamaic_only
         self.device = device
 
         # Hash primes for x,y,z
@@ -37,9 +39,10 @@ class VoxelHashTableDynamic(nn.Module):
         self.total_voxels = self.voxel_coords.shape[0]
 
         # Static and dynamic embeddings
-        self.static_features = nn.Parameter(
-            torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
-        )
+        if not dynamaic_only:
+            self.static_features = nn.Parameter(
+                torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
+            )
         self.dynamic_features = nn.Parameter(
             torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
         )
@@ -56,7 +59,8 @@ class VoxelHashTableDynamic(nn.Module):
 
         # Two attention modules for fusion
         self.fusion_time_dynamic = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
-        self.fusion_static_dynamic = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
+        if not dynamaic_only:
+            self.fusion_static_dynamic = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
 
         # Debug storage
         self.voxel_points = {}
@@ -110,7 +114,8 @@ class VoxelHashTableDynamic(nn.Module):
             v_idx = voxel_indices[valid_mask]
             t_idx = t_mod[valid_mask]
 
-            static_feats = self.static_features[v_idx]
+            if not self.dynamic_only:
+                static_feats = self.static_features[v_idx]
             dynamic_feats = self.dynamic_features[v_idx]
             time_emb = self.time_embeddings[t_idx]
 
@@ -121,10 +126,13 @@ class VoxelHashTableDynamic(nn.Module):
             ).squeeze(1)
 
             # Fuse static + cond_dynamic
-            fused = self.fusion_static_dynamic(
-                static_feats.unsqueeze(1),
-                cond_dynamic.unsqueeze(1)
-            ).squeeze(1)
+            if self.dynamic_only:
+                fused = cond_dynamic
+            else:
+                fused = self.fusion_static_dynamic(
+                    static_feats.unsqueeze(1),
+                    cond_dynamic.unsqueeze(1)
+                ).squeeze(1)
 
             feats[valid_mask] = fused
 

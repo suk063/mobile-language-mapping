@@ -36,9 +36,9 @@ algo:
   lr: 3e-4
   batch_size: 32
 
-  stage1_epochs: 3
-  stage2_epochs: 9
-  stage3_epochs: 3
+  stage1_epochs: 1
+  stage2_epochs: 18
+  stage3_epochs: 1
 
   eval_freq: 1
   log_freq: 1

@@ -116,6 +116,7 @@ class BCConfig:
     stage1_cos_loss_weight: float = 0.5
     stage2_cos_loss_weight: float = 0.005
     stage2_linear_scheduling: bool = True
+    dynamic_only: bool = True
 
     num_eval_envs: int = field(init=False)
 
@@ -377,6 +378,7 @@ def train(cfg: TrainConfig):
         scene_bound_min=tuple(cfg.algo.scene_bound_min),
         scene_bound_max=tuple(cfg.algo.scene_bound_max),
         mod_time= cfg.algo.mod_time,
+        dynamaic_only=cfg.algo.dynamic_only,
         device=device
     ).to(device)
 
