@@ -85,6 +85,7 @@ class BCConfig:
     name: str = "bc"
     lr: float = 3e-4               # learning rate
     batch_size: int = 256          # batch size
+    stage0_epochs: int = 1         # stage 1 epochs
     stage1_epochs: int = 2         # stage 1 epochs
     stage2_epochs: int = 6        # stage 2 epochs
     stage3_epochs: int = 2        # stage 3 epochs
@@ -113,10 +114,9 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    stage1_cos_loss_weight: float = 0.5
-    stage2_cos_loss_weight: float = 0.005
+    cos_loss_weight: float = 0.01
+    flow_cos_loss_weight: float = 0.01
     scene_flow_loss_weight: float = 100
-    stage2_linear_scheduling: bool = True
 
     num_eval_envs: int = field(init=False)
 
@@ -483,10 +483,82 @@ def train(cfg: TrainConfig):
         log_env.reset_queues()
 
     # -------------------------
+    # Stage 0: Only Mapping without flow cosine loss
+    # -------------------------
+    for epoch in range(cfg.algo.stage0_epochs):
+        global_epoch = logger_start_log_step + epoch
+        logger.print(f"[Stage 0] Epoch: {global_epoch}")
+        tot_loss, n_samples = 0, 0
+        agent.epoch = epoch
+        agent.train()
+        hash_voxel.train()
+
+        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage0-Batch", unit="batch"):
+            subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
+            obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
+
+            pi, cos_loss, scene_flow_loss, scene_flow_cos_loss = agent.forward_train(obs, subtask_labels, step_nums)
+            cos_loss = cfg.algo.cos_loss_weight * cos_loss
+            scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
+            scene_flow_cos_loss = cfg.algo.flow_cos_loss_weight * scene_flow_cos_loss
+            loss = cos_loss
+    
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            tot_loss += loss.item()
+            n_samples += act.size(0)
+            global_step += 1
+
+            # Write to TensorBoard
+            writer.add_scalar("Loss/Iteration", loss.item(), global_step)
+            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
+            writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
+            writer.add_scalar("Scene Flow Cos Loss/Iteration", scene_flow_cos_loss.item(), global_step)
+
+        avg_loss = tot_loss / n_samples
+        loss_logs = dict(loss=avg_loss)
+        timer.end(key="train")
+
+        # Logging
+        if check_freq(cfg.algo.log_freq, epoch):
+            logger.store(tag="losses", **loss_logs)
+            if epoch > 0:
+                logger.store("time", **timer.get_time_logs(epoch))
+            logger.log(global_epoch)
+            timer.end(key="log")
+
+        # Evaluation
+        if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
+            agent.eval()
+            eval_obs, _ = eval_envs.reset()
+            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
+            B = eval_subtask_labels.size()
+
+            for t in range(eval_envs.max_episode_steps):
+                with torch.no_grad():
+                    time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
+                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
+                eval_obs, _, _, _, _ = eval_envs.step(action)
+
+            if len(eval_envs.return_queue) > 0:
+                store_env_stats("eval")
+            logger.log(global_epoch)
+            timer.end(key="eval")
+
+        # Saving
+        if check_freq(cfg.algo.save_freq, epoch):
+            save_checkpoint(name="latest")
+            timer.end(key="checkpoint")
+
+    save_checkpoint(name="stage0-final")
+
+    # -------------------------
     # Stage 1: Only Mapping
     # -------------------------
     for epoch in range(cfg.algo.stage1_epochs):
-        global_epoch = logger_start_log_step + epoch
+        global_epoch = logger_start_log_step + cfg.algo.stage0_epochs + epoch
         logger.print(f"[Stage 1] Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
         agent.epoch = epoch
@@ -497,10 +569,11 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
-            cos_loss = cfg.algo.stage1_cos_loss_weight * cos_loss
+            pi, cos_loss, scene_flow_loss, scene_flow_cos_loss = agent.forward_train(obs, subtask_labels, step_nums)
+            cos_loss = cfg.algo.cos_loss_weight * cos_loss
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
-            loss = cos_loss + scene_flow_loss
+            scene_flow_cos_loss = cfg.algo.flow_cos_loss_weight * scene_flow_cos_loss
+            loss = cos_loss + scene_flow_cos_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -514,6 +587,7 @@ def train(cfg: TrainConfig):
             writer.add_scalar("Loss/Iteration", loss.item(), global_step)
             writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
             writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
+            writer.add_scalar("Scene Flow Cos Loss/Iteration", scene_flow_cos_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
@@ -556,28 +630,23 @@ def train(cfg: TrainConfig):
     # Stage 2: Mapping + Policy Learning
     # ----------------------------
     for epoch in range(cfg.algo.stage2_epochs):
-        global_epoch = logger_start_log_step + cfg.algo.stage1_epochs + epoch
+        global_epoch = logger_start_log_step + cfg.algo.stage0_epochs + cfg.algo.stage1_epochs + epoch
         logger.print(f"[Stage 2] Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
         agent.epoch = epoch
         agent.train()
         hash_voxel.train()
 
-        if cfg.algo.stage2_linear_scheduling:
-            linear_scale = 1.0 - epoch / cfg.algo.stage2_epochs
-            cos_loss_weight =  cfg.algo.stage2_cos_loss_weight * linear_scale
-        else:
-            cos_loss_weight =  cfg.algo.stage2_cos_loss_weight
-
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
-            cos_loss = cos_loss_weight * cos_loss
+            pi, cos_loss, scene_flow_loss, scene_flow_cos_loss = agent.forward_train(obs, subtask_labels, step_nums)
+            cos_loss = cfg.algo.cos_loss_weight * cos_loss
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
+            scene_flow_cos_loss = cfg.algo.flow_cos_loss_weight * scene_flow_cos_loss
             bc_loss = F.mse_loss(pi, act)
-            loss = cos_loss + scene_flow_loss + bc_loss  # Stage 2 uses both
+            loss = cos_loss  + scene_flow_cos_loss + bc_loss  # Stage 2 uses both
 
             optimizer.zero_grad()
             loss.backward()
@@ -590,6 +659,7 @@ def train(cfg: TrainConfig):
             writer.add_scalar("Loss/Iteration", loss.item(), global_step)
             writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
             writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
+            writer.add_scalar("Scene Flow Cos Loss/Iteration", scene_flow_cos_loss.item(), global_step)
             writer.add_scalar("Behavior Cloning Loss/Iteration", bc_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
@@ -642,6 +712,7 @@ def train(cfg: TrainConfig):
     for epoch in range(cfg.algo.stage3_epochs):
         global_epoch = (
             logger_start_log_step
+            + cfg.algo.stage0_epochs
             + cfg.algo.stage1_epochs
             + cfg.algo.stage2_epochs
             + epoch
@@ -657,7 +728,7 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
+            pi, cos_loss, scene_flow_loss, scene_flow_cos_loss = agent.forward_train(obs, subtask_labels, step_nums)
             # We ignore cos_loss now (mapping is frozen)
             bc_loss = F.mse_loss(pi, act)
             loss = bc_loss  # Stage 3 uses only BC
@@ -671,6 +742,9 @@ def train(cfg: TrainConfig):
             global_step += 1
 
             writer.add_scalar("Loss/Iteration", loss.item(), global_step)
+            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
+            writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
+            writer.add_scalar("Scene Flow Cos Loss/Iteration", scene_flow_cos_loss.item(), global_step)
             writer.add_scalar("Behavior Cloning Loss/Iteration", bc_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples

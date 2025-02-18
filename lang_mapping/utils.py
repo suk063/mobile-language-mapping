@@ -187,20 +187,8 @@ def chamfer_cosine(pred_feat, lbl_feat, threshold=0.01):
     # For each row, we only average over rows that found a distance < 9999
     row_valid = (row2col_vals < 9999.0)
     col_valid = (col2row_vals < 9999.0)
-
-    print("==== Debug Info ====")
-        # 예시로 배치마다, 각 pred row가 어떤 label 인덱스에 매핑되었는지와 거리를 출력
-    for b in range(dist_masked.size(0)):
-        print(f"[Batch {b}]")
-        # pred -> label 매핑
-        print("  Pred -> Label Mapping:")
-        for r in range(dist_masked.size(1)):
-            if row_valid[b, r]:
-                print(f"    pred[{r}] -> label[{row2col_idxs[b, r].item()}], dist={row2col_vals[b, r].item():.4f}")
-        
-        print("==============")
-        break
-    # If no valid row or column, we can set the average to 0 or something
+    
+    print(row_valid.sum() / 8192)
 
     if row_valid.any():
         row_chamfer = row2col_vals[row_valid].mean()

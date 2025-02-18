@@ -134,24 +134,29 @@ class Agent_point_dynamic_flow(nn.Module):
         1. Process RGB/Depth from observations.
         2. Extract CLIP features.
         3. Look up voxel features.
-        4. Compute reconstruction loss (cosine similarity).
+        4. Compute reconstruction loss (cosine similarity) for time t AND t+1(p1).
         5. Fuse features, pass through Transformer, and then Action MLP.
+        6. Compute scene flow loss.
         """
+        # ------------------------------------------------------
         # Unpack inputs
+        # ------------------------------------------------------
         pixels: Dict[str, torch.Tensor] = observations["pixels"]
         state: torch.Tensor = observations["state"]  # [B, state_dim]
 
+        # Depth at t+1
         hand_depth_p1 = pixels["fetch_hand_depth_p1"] / 1000.0
         head_depth_p1 = pixels["fetch_head_depth_p1"] / 1000.0
         hand_pose_p1 = pixels["fetch_hand_pose_p1"]
         head_pose_p1 = pixels["fetch_head_pose_p1"]
 
-        # Preprocess RGB
+        # Preprocess RGB at time t
         hand_rgb = pixels["fetch_hand_rgb"]
         head_rgb = pixels["fetch_head_rgb"]
         if hand_rgb.shape[2] != 3:
             hand_rgb = hand_rgb.permute(0, 1, 4, 2, 3)
             head_rgb = head_rgb.permute(0, 1, 4, 2, 3)
+
         B, fs, d, H, W = hand_rgb.shape
         hand_rgb = hand_rgb.reshape(B, fs * d, H, W)
         head_rgb = head_rgb.reshape(B, fs * d, H, W)
@@ -159,7 +164,7 @@ class Agent_point_dynamic_flow(nn.Module):
         hand_rgb = transform(hand_rgb.float() / 255.0)
         head_rgb = transform(head_rgb.float() / 255.0)
 
-        # Depth
+        # Depth at time t
         hand_depth = pixels["fetch_hand_depth"] / 1000.0
         head_depth = pixels["fetch_head_depth"] / 1000.0
         if hand_depth.dim() == 5:
@@ -174,16 +179,42 @@ class Agent_point_dynamic_flow(nn.Module):
             hand_depth_p1 = F.interpolate(hand_depth_p1, (16, 16), mode="nearest")
             head_depth_p1 = F.interpolate(head_depth_p1, (16, 16), mode="nearest")
 
-        # Camera poses
+        # Camera poses at time t
         hand_pose = pixels["fetch_hand_pose"]
         head_pose = pixels["fetch_head_pose"]
 
-        # Freeze CLIP feature extraction
+        # ------------------------------------------------------
+        # (추가) RGB at time t+1 (p1)
+        # ------------------------------------------------------
+        hand_rgb_p1 = pixels["fetch_hand_rgb_p1"]
+        head_rgb_p1 = pixels["fetch_head_rgb_p1"]
+
+        if hand_rgb_p1.shape[2] != 3:
+            hand_rgb_p1 = hand_rgb_p1.permute(0, 1, 4, 2, 3)
+            head_rgb_p1 = head_rgb_p1.permute(0, 1, 4, 2, 3)
+
+        B_p1, fs_p1, d_p1, H_p1, W_p1 = hand_rgb_p1.shape
+        hand_rgb_p1 = hand_rgb_p1.reshape(B_p1, fs_p1 * d_p1, H_p1, W_p1)
+        head_rgb_p1 = head_rgb_p1.reshape(B_p1, fs_p1 * d_p1, H_p1, W_p1)
+
+        hand_rgb_p1 = transform(hand_rgb_p1.float() / 255.0)
+        head_rgb_p1 = transform(head_rgb_p1.float() / 255.0)
+
+        # ------------------------------------------------------
+        # Extract CLIP visual features
+        # ------------------------------------------------------
         with torch.no_grad():
+            # time t
             hand_visfeat = get_visual_features(self.clip_model, hand_rgb)  # [B, clip_input_dim, Hf, Wf]
             head_visfeat = get_visual_features(self.clip_model, head_rgb)
+            # time t+1
+            hand_visfeat_p1 = get_visual_features(self.clip_model, hand_rgb_p1)
+            head_visfeat_p1 = get_visual_features(self.clip_model, head_rgb_p1)
 
+        # ------------------------------------------------------
         # 3D world coords
+        # ------------------------------------------------------
+        # time t
         hand_coords_world, hand_coords_cam = get_3d_coordinates(
             hand_visfeat, hand_depth, hand_pose, self.fx, self.fy, self.cx, self.cy
         )
@@ -191,45 +222,72 @@ class Agent_point_dynamic_flow(nn.Module):
             head_visfeat, head_depth, head_pose, self.fx, self.fy, self.cx, self.cy
         )
 
-        hand_coords_world_p1, _ = get_3d_coordinates(
-            hand_visfeat, hand_depth_p1, hand_pose_p1, self.fx, self.fy, self.cx, self.cy
+        # time t+1
+        hand_coords_world_p1, hand_coords_cam_p1 = get_3d_coordinates(
+            hand_visfeat_p1, hand_depth_p1, hand_pose_p1, self.fx, self.fy, self.cx, self.cy
         )
-        head_coords_world_p1, _ = get_3d_coordinates(
-            head_visfeat, head_depth_p1, head_pose_p1, self.fx, self.fy, self.cx, self.cy
+        head_coords_world_p1, head_coords_cam_p1 = get_3d_coordinates(
+            head_visfeat_p1, head_depth_p1, head_pose_p1, self.fx, self.fy, self.cx, self.cy
         )
 
+        # ------------------------------------------------------
+        # Flattening
+        # ------------------------------------------------------
         B_, C_, Hf, Wf = hand_coords_world.shape
         N = Hf * Wf
 
-        # Flatten coordinates
+        # t
         hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
         head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
+
+        # t+1
         hand_coords_world_flat_p1 = hand_coords_world_p1.permute(0, 2, 3, 1).reshape(B_ * N, 3)
         head_coords_world_flat_p1 = head_coords_world_p1.permute(0, 2, 3, 1).reshape(B_ * N, 3)
 
+        # ------------------------------------------------------
         # Flatten CLIP features
+        # ------------------------------------------------------
+        # t
         hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
         head_visfeat = head_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
-
         feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
 
+        # t+1
+        hand_visfeat_p1 = hand_visfeat_p1.permute(0, 2, 3, 1).reshape(B_, N, -1)
+        head_visfeat_p1 = head_visfeat_p1.permute(0, 2, 3, 1).reshape(B_, N, -1)
+        feats_hand_flat_p1 = hand_visfeat_p1.reshape(B_ * N, -1)
+        feats_head_flat_p1 = head_visfeat_p1.reshape(B_ * N, -1)
+
+        # ------------------------------------------------------
         # Reduce feature dim
+        # ------------------------------------------------------
+        # t
         feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat)  # [B*N, voxel_feature_dim]
         feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat)
-
-        feats_hand_reduced = feats_hand_flat_reduced.reshape(B_, N, -1)  # [B, N, voxel_feature_dim]
+        feats_hand_reduced = feats_hand_flat_reduced.reshape(B_, N, -1)
         feats_head_reduced = feats_head_flat_reduced.reshape(B_, N, -1)
 
-        # Voxel lookup
+        # t+1
+        feats_hand_flat_reduced_p1 = self.clip_dim_reducer(feats_hand_flat_p1)
+        feats_head_flat_reduced_p1 = self.clip_dim_reducer(feats_head_flat_p1)
+        feats_hand_reduced_p1 = feats_hand_flat_reduced_p1.reshape(B_, N, -1)
+        feats_head_reduced_p1 = feats_head_flat_reduced_p1.reshape(B_, N, -1)
+
+        # ------------------------------------------------------
+        # Voxel lookup (time t)
+        # ------------------------------------------------------
         times_t_expanded = step_nums.unsqueeze(1).expand(-1, N).reshape(B_ * N)
         voxel_feat_for_points_hand, hand_indices = self.hash_voxel.query_voxel_feature(
-            hand_coords_world_flat, times_t_expanded)
-
+            hand_coords_world_flat, times_t_expanded
+        )
         voxel_feat_for_points_head, head_indices = self.hash_voxel.query_voxel_feature(
-            head_coords_world_flat, times_t_expanded)
+            head_coords_world_flat, times_t_expanded
+        )
 
-        # Decoder for loss (cosine similarity)
+        # ------------------------------------------------------
+        # Decoder at time t for cos_loss
+        # ------------------------------------------------------
         dec_hand = self.implicit_decoder(voxel_feat_for_points_hand, hand_coords_world_flat)
         cos_sim_hand = F.cosine_similarity(dec_hand, feats_hand_flat, dim=-1)
         cos_loss_hand = 1.0 - cos_sim_hand.mean()
@@ -238,19 +296,41 @@ class Agent_point_dynamic_flow(nn.Module):
         cos_sim_head = F.cosine_similarity(dec_head, feats_head_flat, dim=-1)
         cos_loss_head = 1.0 - cos_sim_head.mean()
 
-        total_cos_loss = cos_loss_hand + cos_loss_head
+        # ------------------------------------------------------
+        # Voxel lookup (time t+1)
+        # ------------------------------------------------------
+        step_nums_p1 = step_nums + 1
+        times_tp1_expanded = step_nums_p1.unsqueeze(1).expand(-1, N).reshape(B_ * N)
+
+        voxel_feat_for_points_hand_p1, hand_indices_p1 = self.hash_voxel.query_voxel_feature(
+            hand_coords_world_flat_p1, times_tp1_expanded
+        )
+        voxel_feat_for_points_head_p1, head_indices_p1 = self.hash_voxel.query_voxel_feature(
+            head_coords_world_flat_p1, times_tp1_expanded
+        )
+
+        # ------------------------------------------------------
+        # Decoder at time t+1 for cos_loss
+        # ------------------------------------------------------
+        dec_hand_p1 = self.implicit_decoder(voxel_feat_for_points_hand_p1, hand_coords_world_flat_p1)
+        cos_sim_hand_p1 = F.cosine_similarity(dec_hand_p1, feats_hand_flat_p1, dim=-1)
+        cos_loss_hand_p1 = 1.0 - cos_sim_hand_p1.mean()
+
+        dec_head_p1 = self.implicit_decoder(voxel_feat_for_points_head_p1, head_coords_world_flat_p1)
+        cos_sim_head_p1 = F.cosine_similarity(dec_head_p1, feats_head_flat_p1, dim=-1)
+        cos_loss_head_p1 = 1.0 - cos_sim_head_p1.mean()
+
+        total_cos_loss = (cos_loss_hand + cos_loss_head +
+                          cos_loss_hand_p1 + cos_loss_head_p1)
 
         # -------------------------------------------------
-        # 6. Scene flow prediction
+        # Scene flow prediction & Chamfer loss
         # -------------------------------------------------
         flow_hand = self.hash_voxel.query_scene_flow(hand_coords_world_flat, times_t_expanded)  # [N,3]
         flow_head = self.hash_voxel.query_scene_flow(head_coords_world_flat, times_t_expanded)
 
         pred_hand_next = hand_coords_world_flat + flow_hand
         pred_head_next = head_coords_world_flat + flow_head
-
-        step_nums_p1 = step_nums + 1
-        times_tp1_expanded = step_nums_p1.unsqueeze(1).expand(-1, N).reshape(B_ * N)
 
         voxel_feat_tp1_pred_hand, _ = self.hash_voxel.query_voxel_feature(
             pred_hand_next, times_tp1_expanded
@@ -266,33 +346,49 @@ class Agent_point_dynamic_flow(nn.Module):
             head_coords_world_flat_p1, times_tp1_expanded
         )
 
-        # (A) Reshape to (B, N, D)
         voxel_feat_tp1_pred_hand_b = voxel_feat_tp1_pred_hand.view(B_, N, -1)
         voxel_feat_tp1_pred_head_b = voxel_feat_tp1_pred_head.view(B_, N, -1)
         voxel_feat_tp1_lbl_hand_b  = voxel_feat_tp1_lbl_hand.view(B_, N, -1)
         voxel_feat_tp1_lbl_head_b  = voxel_feat_tp1_lbl_head.view(B_, N, -1)
     
-        # Hand chamfer
-        hand_chamfer_loss = chamfer_cosine(voxel_feat_tp1_pred_hand_b,
-                                                     voxel_feat_tp1_lbl_hand_b,
-                                                     threshold=0.01)
-        # Head chamfer
-        head_chamfer_loss = chamfer_cosine(voxel_feat_tp1_pred_head_b,
-                                                     voxel_feat_tp1_lbl_head_b,
-                                                     threshold=0.01)
+        # Chamfer-like cosine loss
+        hand_chamfer_loss = chamfer_cosine(
+            voxel_feat_tp1_pred_hand_b,
+            voxel_feat_tp1_lbl_hand_b,
+            threshold=0.01
+        )
+        head_chamfer_loss = chamfer_cosine(
+            voxel_feat_tp1_pred_head_b,
+            voxel_feat_tp1_lbl_head_b,
+            threshold=0.01
+        )
 
         scene_flow_loss = hand_chamfer_loss + head_chamfer_loss
 
-        # # reshape flow_hand, flow_head each to (B, N*3), then concat -> (B, 2*N*3)
+        dec_hand_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_hand, pred_hand_next)
+        dec_head_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_head, pred_head_next)
+
+        cos_sim_hand_pred_p1 = F.cosine_similarity(dec_hand_pred_p1, feats_hand_flat_p1, dim=-1)
+        cos_sim_head_pred_p1 = F.cosine_similarity(dec_head_pred_p1, feats_head_flat_p1, dim=-1)
+        pred_cos_loss_hand_p1 = 1.0 - cos_sim_hand_pred_p1.mean()
+        pred_cos_loss_head_p1 = 1.0 - cos_sim_head_pred_p1.mean()
+
+        scene_flow_cos_loss = pred_cos_loss_hand_p1 + pred_cos_loss_head_p1
+
+        # -------------------------------------------------
+        # Prepare flow_emb to feed into Action MLP
+        # -------------------------------------------------
         flow_hand_batched = flow_hand.view(B_, N, 3)
         flow_head_batched = flow_head.view(B_, N, 3)
         flow_hand_flat = flow_hand_batched.view(B_, -1)  # (B, N*3)
         flow_head_flat = flow_head_batched.view(B_, -1)  # (B, N*3)
-        flow_cat = torch.cat([flow_hand_flat, flow_head_flat], dim=1)  # (B, 2*N*3=1536 if N=256)
+        flow_cat = torch.cat([flow_hand_flat, flow_head_flat], dim=1)  # (B, 2*N*3)
 
         flow_emb = self.flow_embed(flow_cat)  # [B, state_mlp_dim]
 
+        # -------------------------------------------------
         # Transformer input
+        # -------------------------------------------------
         voxel_feat_for_points_hand_proj = self.voxel_proj(voxel_feat_for_points_hand)
         voxel_feat_for_points_head_proj = self.voxel_proj(voxel_feat_for_points_head)
 
@@ -322,10 +418,10 @@ class Agent_point_dynamic_flow(nn.Module):
 
         # Final action MLP
         state_token = self.state_mlp(state)
-        inp = torch.cat([visual_token, state_token, flow_emb], dim=1)  # [B, state_mlp_dim * 2]
-        action_pred = self.action_mlp(inp)                   # [B, action_dim]
+        inp = torch.cat([visual_token, state_token, flow_emb], dim=1)  # [B, state_mlp_dim * 3]
+        action_pred = self.action_mlp(inp)  # [B, action_dim]
 
-        return action_pred, total_cos_loss, scene_flow_loss
+        return action_pred, total_cos_loss, scene_flow_loss, scene_flow_cos_loss
     
     def forward_eval(self, observations, object_labels, step_nums):
         """
