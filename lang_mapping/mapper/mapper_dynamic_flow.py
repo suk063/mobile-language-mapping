@@ -64,13 +64,13 @@ class VoxelHashTableDynamicFlow(nn.Module):
         )
         
         # Scene flow MLP
-        self.flow_mlp = nn.Sequential(
-            nn.Linear(scene_feature_dim, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, 3)  # outputs a 3D flow vector
-        )
+        # self.flow_mlp = nn.Sequential(
+        #     nn.Linear(scene_feature_dim, 64),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(64, 3)  # outputs a 3D flow vector
+        # )
 
-        # self.flow_mlp = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
+        self.flow_mlp = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
 
         # Hash table index buffer
         self.buffer_voxel_index = torch.full((hash_table_size,), -1,
@@ -205,7 +205,7 @@ class VoxelHashTableDynamicFlow(nn.Module):
         Predict scene flow v in R^3 at each spatial-temporal point (x, t).
         """
         flow_feats = self.query_voxel_flow_feature(query_pts, query_times)
-        v = self.flow_mlp(flow_feats)  # shape: [N, 3]
+        v = self.flow_mlp(flow_feats, query_pts)  # shape: [N, 3]
         return v
 
     def add_points(self, voxel_indices, points_3d, times):

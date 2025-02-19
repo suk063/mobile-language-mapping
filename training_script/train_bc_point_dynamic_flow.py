@@ -492,6 +492,7 @@ def train(cfg: TrainConfig):
         agent.epoch = epoch
         agent.train()
         hash_voxel.train()
+        hash_voxel.compute_time_variance(chunk_size=1000)
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage0-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
