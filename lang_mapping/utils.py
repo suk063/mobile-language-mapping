@@ -163,10 +163,6 @@ def rotary_pe_3d(
     return torch.stack(out_blocks, dim=2).view(B, S, D)
 
 def chamfer_3d(pred_points, gt_points, threshold=1):
-    """
-    pred_points, gt_points: [B, N, 3]
-    threshold: 거리를 이 값 이하인 경우만 고려 (기본값 0.1)
-    """
     dist = torch.cdist(pred_points, gt_points, p=2)
 
     row2col_vals, _ = dist.min(dim=2)  

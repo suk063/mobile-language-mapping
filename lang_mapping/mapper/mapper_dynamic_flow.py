@@ -64,13 +64,13 @@ class VoxelHashTableDynamicFlow(nn.Module):
         )
         
         # Scene flow MLP
-        self.flow_mlp = nn.Sequential(
-            nn.Linear(scene_feature_dim, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, 3)  # outputs a 3D flow vector
-        )
+        # self.flow_mlp = nn.Sequential(
+        #     nn.Linear(scene_feature_dim, 64),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(64, 3)  # outputs a 3D flow vector
+        # )
 
-        # self.flow_mlp = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
+        self.flow_mlp = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
 
         # Hash table index buffer
         self.buffer_voxel_index = torch.full((hash_table_size,), -1,
@@ -82,8 +82,8 @@ class VoxelHashTableDynamicFlow(nn.Module):
         self.fusion_static_dynamic = LocalSelfAttentionFusion(feat_dim=feature_dim, num_heads=8)
 
         # Two attention modules for flow feats
-        self.fusion_time_dynamic_flow = LocalSelfAttentionFusion(feat_dim=scene_feature_dim, num_heads=4)
-        self.fusion_static_dynamic_flow = LocalSelfAttentionFusion(feat_dim=scene_feature_dim, num_heads=4)
+        self.fusion_time_dynamic_flow = LocalSelfAttentionFusion(feat_dim=scene_feature_dim, num_heads=8)
+        self.fusion_static_dynamic_flow = LocalSelfAttentionFusion(feat_dim=scene_feature_dim, num_heads=8)
 
         # Debug storage
         self.voxel_points = {}
