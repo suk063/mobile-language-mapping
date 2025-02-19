@@ -8,7 +8,7 @@ from scipy.optimize import linear_sum_assignment
 # Local imports
 from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, chamfer_cosine, transform
+from ..utils import get_3d_coordinates, get_visual_features, chamfer_3d, transform
 
 import open_clip
     
@@ -332,38 +332,21 @@ class Agent_point_dynamic_flow(nn.Module):
         pred_hand_next = hand_coords_world_flat + flow_hand
         pred_head_next = head_coords_world_flat + flow_head
 
+        pred_hand_next_b = pred_hand_next.view(B_, N, 3)
+        pred_head_next_b = pred_head_next.view(B_, N, 3)
+        hand_coords_world_flat_p1_b = hand_coords_world_flat_p1.view(B_, N, 3)
+        head_coords_world_flat_p1_b = head_coords_world_flat_p1.view(B_, N, 3)
+
+        hand_chamfer_loss = chamfer_3d(pred_hand_next_b, hand_coords_world_flat_p1_b)
+        head_chamfer_loss = chamfer_3d(pred_head_next_b, head_coords_world_flat_p1_b)
+        scene_flow_loss = hand_chamfer_loss + head_chamfer_loss
+
         voxel_feat_tp1_pred_hand, _ = self.hash_voxel.query_voxel_feature(
             pred_hand_next, times_tp1_expanded
         )
         voxel_feat_tp1_pred_head, _ = self.hash_voxel.query_voxel_feature(
             pred_head_next, times_tp1_expanded
         )
-
-        voxel_feat_tp1_lbl_hand, _ = self.hash_voxel.query_voxel_feature(
-            hand_coords_world_flat_p1, times_tp1_expanded
-        )
-        voxel_feat_tp1_lbl_head, _ = self.hash_voxel.query_voxel_feature(
-            head_coords_world_flat_p1, times_tp1_expanded
-        )
-
-        voxel_feat_tp1_pred_hand_b = voxel_feat_tp1_pred_hand.view(B_, N, -1)
-        voxel_feat_tp1_pred_head_b = voxel_feat_tp1_pred_head.view(B_, N, -1)
-        voxel_feat_tp1_lbl_hand_b  = voxel_feat_tp1_lbl_hand.view(B_, N, -1)
-        voxel_feat_tp1_lbl_head_b  = voxel_feat_tp1_lbl_head.view(B_, N, -1)
-    
-        # Chamfer-like cosine loss
-        hand_chamfer_loss = chamfer_cosine(
-            voxel_feat_tp1_pred_hand_b,
-            voxel_feat_tp1_lbl_hand_b,
-            threshold=0.01
-        )
-        head_chamfer_loss = chamfer_cosine(
-            voxel_feat_tp1_pred_head_b,
-            voxel_feat_tp1_lbl_head_b,
-            threshold=0.01
-        )
-
-        scene_flow_loss = hand_chamfer_loss + head_chamfer_loss
 
         dec_hand_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_hand, pred_hand_next)
         dec_head_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_head, pred_head_next)

@@ -162,45 +162,34 @@ def rotary_pe_3d(
 
     return torch.stack(out_blocks, dim=2).view(B, S, D)
 
-def chamfer_cosine(pred_feat, lbl_feat, threshold=0.01):
+def chamfer_3d(pred_points, gt_points, threshold=1):
     """
-    pred_feat, lbl_feat: [B, N, D]
-    threshold: maximum allowed distance (1 - cos).
-                if distance > threshold, we skip it by masking.
-    Returns the batch-averaged Chamfer distance.
+    pred_points, gt_points: [B, N, 3]
+    threshold: 거리를 이 값 이하인 경우만 고려 (기본값 0.1)
     """
-    # Normalize each feature vector: shape [B, N, D]
-    pred_norm = F.normalize(pred_feat, dim=-1)
-    lbl_norm  = F.normalize(lbl_feat,  dim=-1)
+    dist = torch.cdist(pred_points, gt_points, p=2)
 
-    # Compute cosine similarity: [B, N, N]
-    cos_sim = torch.bmm(pred_norm, lbl_norm.transpose(1, 2))
-    dist = 1.0 - cos_sim  # we use "1 - cos" as distance
+    row2col_vals, _ = dist.min(dim=2)  
+    col2row_vals, _ = dist.min(dim=1)
 
-    # Mask out pairs that exceed the threshold
-    dist_masked = dist.clone()
-    dist_masked[dist_masked > threshold] = 9999.0
 
-    row2col_vals, row2col_idxs = dist_masked.min(dim=2)  # [B, N]
-    col2row_vals, col2row_idxs = dist_masked.min(dim=1)  # [B, N]
-
-    # For each row, we only average over rows that found a distance < 9999
-    row_valid = (row2col_vals < 9999.0)
-    col_valid = (col2row_vals < 9999.0)
+    row_mask = (row2col_vals <= threshold)
+    col_mask = (col2row_vals <= threshold)
     
-    print(row_valid.sum() / 8192)
+    valid_row2col = row2col_vals[row_mask]
+    valid_col2row = col2row_vals[col_mask]
 
-    if row_valid.any():
-        row_chamfer = row2col_vals[row_valid].mean()
+    if valid_row2col.numel() > 0:
+        row_loss = valid_row2col.mean()
     else:
-        row_chamfer = torch.tensor(1.0, device=dist.device)
+        row_loss = torch.tensor(0.0, device=dist.device)
 
-    if col_valid.any():
-        col_chamfer = col2row_vals[col_valid].mean()
+    if valid_col2row.numel() > 0:
+        col_loss = valid_col2row.mean()
     else:
-        col_chamfer = torch.tensor(1.0, device=dist.device)
+        col_loss = torch.tensor(0.0, device=dist.device)
 
-    chamfer_loss_val = row_chamfer 
+    chamfer_loss_val = row_loss + col_loss
     return chamfer_loss_val
 
 # Basic image transform

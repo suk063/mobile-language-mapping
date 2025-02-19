@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from ..module import LocalSelfAttentionFusion
+from ..module import LocalSelfAttentionFusion, ImplicitDecoder
 
 class VoxelHashTableDynamicFlow(nn.Module):
     """
@@ -62,13 +62,15 @@ class VoxelHashTableDynamicFlow(nn.Module):
         self.time_embeddings_flow = nn.Parameter(
             torch.randn(self.mod_time, scene_feature_dim, device=device) * 0.01
         )
-
+        
         # Scene flow MLP
         self.flow_mlp = nn.Sequential(
             nn.Linear(scene_feature_dim, 64),
             nn.ReLU(inplace=True),
             nn.Linear(64, 3)  # outputs a 3D flow vector
         )
+
+        # self.flow_mlp = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
 
         # Hash table index buffer
         self.buffer_voxel_index = torch.full((hash_table_size,), -1,

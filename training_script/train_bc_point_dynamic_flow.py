@@ -116,7 +116,7 @@ class BCConfig:
     state_mlp_dim: int = 1024
     cos_loss_weight: float = 0.01
     flow_cos_loss_weight: float = 0.01
-    scene_flow_loss_weight: float = 100
+    scene_flow_loss_weight: float = 0.1
 
     num_eval_envs: int = field(init=False)
 
@@ -573,7 +573,7 @@ def train(cfg: TrainConfig):
             cos_loss = cfg.algo.cos_loss_weight * cos_loss
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
             scene_flow_cos_loss = cfg.algo.flow_cos_loss_weight * scene_flow_cos_loss
-            loss = cos_loss + scene_flow_cos_loss
+            loss = cos_loss + scene_flow_loss + scene_flow_cos_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -646,7 +646,7 @@ def train(cfg: TrainConfig):
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
             scene_flow_cos_loss = cfg.algo.flow_cos_loss_weight * scene_flow_cos_loss
             bc_loss = F.mse_loss(pi, act)
-            loss = cos_loss  + scene_flow_cos_loss + bc_loss  # Stage 2 uses both
+            loss = cos_loss  + + scene_flow_loss + scene_flow_cos_loss + bc_loss  # Stage 2 uses both
 
             optimizer.zero_grad()
             loss.backward()
