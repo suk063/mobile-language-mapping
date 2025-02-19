@@ -8,7 +8,7 @@ from scipy.optimize import linear_sum_assignment
 # Local imports
 from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, chamfer_3d, transform
+from ..utils import get_3d_coordinates, get_visual_features, chamfer_3d_weighted, transform
 
 import open_clip
     
@@ -337,8 +337,26 @@ class Agent_point_dynamic_flow(nn.Module):
         hand_coords_world_flat_p1_b = hand_coords_world_flat_p1.view(B_, N, 3)
         head_coords_world_flat_p1_b = head_coords_world_flat_p1.view(B_, N, 3)
 
-        hand_chamfer_loss = chamfer_3d(pred_hand_next_b, hand_coords_world_flat_p1_b)
-        head_chamfer_loss = chamfer_3d(pred_head_next_b, head_coords_world_flat_p1_b)
+        #    shape: (B*N,) -> then reshape to (B, N)
+        hand_var_flat = self.hash_voxel.get_variance_for_points(pred_hand_next)  # (B*N,)
+        head_var_flat = self.hash_voxel.get_variance_for_points(pred_head_next)  # (B*N,)
+
+        hand_var_b = hand_var_flat.view(B_, N)
+        head_var_b = head_var_flat.view(B_, N)
+
+        hand_chamfer_loss = chamfer_3d_weighted(
+            pred_points=pred_hand_next_b, 
+            gt_points=hand_coords_world_flat_p1_b, 
+            pred_weights=hand_var_b,
+            threshold=1.0
+        )
+        head_chamfer_loss = chamfer_3d_weighted(
+            pred_points=pred_head_next_b, 
+            gt_points=head_coords_world_flat_p1_b, 
+            pred_weights=head_var_b,
+            threshold=1.0
+        )
+
         scene_flow_loss = hand_chamfer_loss + head_chamfer_loss
 
         voxel_feat_tp1_pred_hand, _ = self.hash_voxel.query_voxel_feature(

@@ -564,6 +564,7 @@ def train(cfg: TrainConfig):
         agent.epoch = epoch
         agent.train()
         hash_voxel.train()
+        hash_voxel.compute_time_variance(chunk_size=1000)
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
@@ -636,6 +637,7 @@ def train(cfg: TrainConfig):
         agent.epoch = epoch
         agent.train()
         hash_voxel.train()
+        hash_voxel.compute_time_variance(chunk_size=1000)
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
@@ -723,6 +725,7 @@ def train(cfg: TrainConfig):
         # hash_voxel & implicit_decoder remain in eval/frozen
         hash_voxel.eval()
         implicit_decoder.eval()
+        hash_voxel.compute_time_variance(chunk_size=1000)
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage3-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)

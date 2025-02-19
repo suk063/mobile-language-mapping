@@ -188,6 +188,38 @@ def chamfer_3d(pred_points, gt_points, threshold=1):
     chamfer_loss_val = row_loss + col_loss
     return chamfer_loss_val
 
+def chamfer_3d_weighted(pred_points, gt_points, pred_weights, threshold=1.0):
+    """
+    A weighted Chamfer 3D function.
+    Args:
+        pred_points:    (B, N_pred, 3), predicted points.
+        gt_points:      (B, N_gt, 3), ground-truth points.
+        pred_weights:   (B, N_pred), scalar weights per predicted point.
+        threshold:      distance threshold to mask out large distances (optional).
+    Returns:
+        Weighted Chamfer distance (scalar).
+    """
+    dist = torch.cdist(pred_points, gt_points, p=2)  # (B, N_pred, N_gt)
+
+    # row2col: distance from each predicted point to its nearest GT
+    row2col_vals, _ = dist.min(dim=2)  # (B, N_pred)
+
+    # col2row: distance from each GT to its nearest predicted point
+    col2row_vals, _ = dist.min(dim=1)  # (B, N_gt)
+
+    # Apply threshold mask (optional)
+    row_mask = (row2col_vals <= threshold)
+    col_mask = (col2row_vals <= threshold)
+
+    # Weighted row2col (pred->GT)
+    # Only consider distances within threshold
+    valid_row2col = row2col_vals[row_mask]
+    # Multiply the corresponding weights
+    valid_weights = pred_weights[row_mask]
+    row_loss = (valid_row2col * valid_weights).mean() if valid_row2col.numel() > 0 else torch.tensor(0.0, device=dist.device)
+
+    return row_loss
+
 # Basic image transform
 transform = transforms.Compose([
     transforms.Resize(

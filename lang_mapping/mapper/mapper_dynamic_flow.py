@@ -64,13 +64,13 @@ class VoxelHashTableDynamicFlow(nn.Module):
         )
         
         # Scene flow MLP
-        # self.flow_mlp = nn.Sequential(
-        #     nn.Linear(scene_feature_dim, 64),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(64, 3)  # outputs a 3D flow vector
-        # )
+        self.flow_mlp = nn.Sequential(
+            nn.Linear(scene_feature_dim, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 3)  # outputs a 3D flow vector
+        )
 
-        self.flow_mlp = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
+        # self.flow_mlp = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
 
         # Hash table index buffer
         self.buffer_voxel_index = torch.full((hash_table_size,), -1,
@@ -87,6 +87,8 @@ class VoxelHashTableDynamicFlow(nn.Module):
 
         # Debug storage
         self.voxel_points = {}
+
+        self.var_norm = None
 
     def build_hash_grid(self):
         """
@@ -222,3 +224,82 @@ class VoxelHashTableDynamicFlow(nn.Module):
                 self.voxel_points[vid] = []
             if len(self.voxel_points[vid]) < 10:
                 self.voxel_points[vid].append((points_cpu[i], times_cpu[i]))
+    
+    @torch.no_grad()
+    def compute_time_variance(self, chunk_size: int = 50000):
+        """
+        Compute time variance (L2 norm of variance vector) over the range of times [0..(self.mod_time-1)].
+        We use query_voxel_feature() to observe how each voxel's fused feature changes over time.
+        
+        Args:
+            chunk_size (int): number of voxels to process in a single iteration to reduce memory usage.
+        """
+        device = self.device
+        coords_all = self.voxel_coords  # shape = (N,3)
+        N = coords_all.shape[0]
+        times_ = torch.arange(0, self.mod_time, device=device, dtype=torch.long)
+        T = times_.numel()
+
+        var_norm_list = []
+
+        start_idx = 0
+        while start_idx < N:
+            end_idx = min(start_idx + chunk_size, N)
+            coords_chunk = coords_all[start_idx:end_idx]  # shape (M,3)
+            M = coords_chunk.shape[0]
+
+            # Expand coordinates for times
+            coords_expanded = coords_chunk.unsqueeze(1).expand(M, T, 3).reshape(-1, 3)  # (M*T,3)
+            times_expanded = times_.unsqueeze(0).expand(M, T).reshape(-1)               # (M*T,)
+
+            # Query voxel features (which includes static+dynamic+time attention)
+            feats_flat, _ = self.query_voxel_feature(coords_expanded, times_expanded, return_indices=False)
+            # feats_flat shape = (M*T, feature_dim)
+
+            feats_3d = feats_flat.view(M, T, self.feature_dim)  # (M, T, feature_dim)
+            
+            # Compute variance across time dimension
+            # var_3d shape = (M, feature_dim)
+            var_3d = feats_3d.var(dim=1, unbiased=True)
+            
+            # L2 norm of the variance vector
+            # var_norm shape = (M,)
+            var_norm = var_3d.norm(dim=1)
+
+            var_norm_list.append(var_norm)
+            start_idx = end_idx
+
+        # Concatenate results for all voxels
+        # shape = (N,)
+        self.var_norm = torch.cat(var_norm_list, dim=0)
+        print(f"[INFO] compute_time_variance: computed time variance for {N} voxels. var_norm shape={self.var_norm.shape}")
+
+    def get_variance_for_points(self, query_pts: torch.Tensor) -> torch.Tensor:
+        """
+        Given an array of 3D query points, returns the time variance (self.var_norm)
+        for the corresponding voxel. If the point is invalid (hash collision or out of range),
+        the variance is 0.
+        
+        Args:
+            query_pts (torch.Tensor): shape (N,3), each row is a 3D coordinate in world space.
+        
+        Returns:
+            torch.Tensor: shape (N,), the time variance scalar per point.
+        """
+        assert self.var_norm is not None, "Must call compute_time_variance() first to populate self.var_norm."
+
+        device = query_pts.device
+        N = query_pts.shape[0]
+
+        # Hash lookup
+        grid_coords = torch.floor(query_pts / self.resolution).to(torch.int64)
+        hash_xyz = torch.remainder((grid_coords * self.primes_xyz).sum(dim=-1), self.hash_table_size).long()
+
+        voxel_indices = self.buffer_voxel_index[hash_xyz]
+        valid_mask = (voxel_indices >= 0)
+
+        # Initialize output with zeros
+        out_var = torch.zeros(N, device=device, dtype=self.var_norm.dtype)
+        # For valid ones, fill in
+        out_var[valid_mask] = self.var_norm[voxel_indices[valid_mask]]
+        return out_var
