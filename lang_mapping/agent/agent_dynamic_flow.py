@@ -8,7 +8,7 @@ from scipy.optimize import linear_sum_assignment
 # Local imports
 from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, chamfer_3d_weighted, transform
+from ..utils import get_3d_coordinates, get_visual_features, chamfer_3d_weighted, chamfer_cosine_weighted, chamfer_cosine_coverage_loss, transform
 
 import open_clip
     
@@ -366,15 +366,48 @@ class Agent_point_dynamic_flow(nn.Module):
             pred_head_next, times_tp1_expanded
         )
 
-        dec_hand_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_hand, pred_hand_next)
-        dec_head_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_head, pred_head_next)
+        voxel_feat_for_points_hand_p1 = voxel_feat_for_points_hand_p1.detach()
+        voxel_feat_for_points_head_p1 = voxel_feat_for_points_head_p1.detach()
+        voxel_feat_tp1_pred_hand = voxel_feat_tp1_pred_hand.detach()
+        voxel_feat_tp1_pred_head = voxel_feat_tp1_pred_head.detach()
 
-        cos_sim_hand_pred_p1 = F.cosine_similarity(dec_hand_pred_p1, feats_hand_flat_p1, dim=-1)
-        cos_sim_head_pred_p1 = F.cosine_similarity(dec_head_pred_p1, feats_head_flat_p1, dim=-1)
-        pred_cos_loss_hand_p1 = 1.0 - cos_sim_hand_pred_p1.mean()
-        pred_cos_loss_head_p1 = 1.0 - cos_sim_head_pred_p1.mean()
+        # Reshape to [B, N, feature_dim]
+        voxel_feat_tp1_pred_hand_b = voxel_feat_tp1_pred_hand.view(B_, N, -1)
+        voxel_feat_tp1_pred_head_b = voxel_feat_tp1_pred_head.view(B_, N, -1)
 
-        scene_flow_cos_loss = pred_cos_loss_hand_p1 + pred_cos_loss_head_p1
+        # Ground truth (actual) t+1 features already exist in: voxel_feat_for_points_hand_p1, voxel_feat_for_points_head_p1
+        voxel_feat_for_points_hand_p1_b = voxel_feat_for_points_hand_p1.view(B_, N, -1)
+        voxel_feat_for_points_head_p1_b = voxel_feat_for_points_head_p1.view(B_, N, -1)
+
+        # Use the same variance-based weights for predicted side or define new ones if needed
+        hand_feat_var_flat = self.hash_voxel.get_variance_for_points(pred_hand_next)  # (B*N,)
+        head_feat_var_flat = self.hash_voxel.get_variance_for_points(pred_head_next)  # (B*N,)
+        hand_feat_var_b = hand_feat_var_flat.view(B_, N)
+        head_feat_var_b = head_feat_var_flat.view(B_, N)
+
+        # Compute Chamfer Cosine (Weighted)
+        hand_feat_chamfer_loss = chamfer_cosine_coverage_loss(
+            pred_feat=voxel_feat_tp1_pred_hand_b,
+            gt_feat=voxel_feat_for_points_hand_p1_b,
+            pred_weights=hand_feat_var_b,
+            threshold=1e-8  
+        )
+        head_feat_chamfer_loss = chamfer_cosine_coverage_loss(
+            pred_feat=voxel_feat_tp1_pred_head_b,
+            gt_feat=voxel_feat_for_points_head_p1_b,
+            pred_weights=head_feat_var_b,
+            threshold=1e-8
+        )
+
+        # dec_hand_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_hand, pred_hand_next)
+        # dec_head_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_head, pred_head_next)
+
+        # cos_sim_hand_pred_p1 = F.cosine_similarity(dec_hand_pred_p1, feats_hand_flat_p1, dim=-1)
+        # cos_sim_head_pred_p1 = F.cosine_similarity(dec_head_pred_p1, feats_head_flat_p1, dim=-1)
+        # pred_cos_loss_hand_p1 = 1.0 - cos_sim_hand_pred_p1.mean()
+        # pred_cos_loss_head_p1 = 1.0 - cos_sim_head_pred_p1.mean()
+
+        scene_flow_cos_loss = hand_feat_chamfer_loss + head_feat_chamfer_loss
 
         # -------------------------------------------------
         # Prepare flow_emb to feed into Action MLP
