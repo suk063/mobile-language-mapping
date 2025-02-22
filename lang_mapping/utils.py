@@ -202,7 +202,7 @@ def chamfer_cosine_weighted(
 
     valid_mask = (row2col_vals < 9999.0)
     valid_vals = row2col_vals[valid_mask]
-    valid_weights = pred_weights[valid_mask] ** 3
+    valid_weights = pred_weights[valid_mask] ** 2
 
 
     if valid_vals.numel() > 0:
