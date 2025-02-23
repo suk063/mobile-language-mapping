@@ -105,7 +105,9 @@ class BCConfig:
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
     scene_bound_max: List[float] = field(default_factory=lambda: [4.6, 4.7, 3.1])
-    mod_time: int = 10
+    mod_time: int = 201
+    trilinear_feat: bool = True
+    trilinear_flow: bool = True
 
     # CLIP / Agent Settings
     clip_input_dim: int = 768
@@ -371,6 +373,8 @@ def train(cfg: TrainConfig):
         scene_bound_min=tuple(cfg.algo.scene_bound_min),
         scene_bound_max=tuple(cfg.algo.scene_bound_max),
         mod_time= cfg.algo.mod_time,
+        trilinear_feat = cfg.algo.trilinear_feat,
+        trilinear_flow = cfg.algo.trilinear_flow,
         device=device
     ).to(device)
 

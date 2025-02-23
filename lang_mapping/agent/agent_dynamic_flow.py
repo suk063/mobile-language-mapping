@@ -390,13 +390,13 @@ class Agent_point_dynamic_flow(nn.Module):
             pred_feat=voxel_feat_tp1_pred_hand_b,
             gt_feat=voxel_feat_for_points_hand_p1_b,
             pred_weights=hand_feat_var_b,
-            threshold=0.05  
+            threshold=0.1  
         )
         head_feat_chamfer_loss = chamfer_cosine_weighted(
             pred_feat=voxel_feat_tp1_pred_head_b,
             gt_feat=voxel_feat_for_points_head_p1_b,
             pred_weights=head_feat_var_b,
-            threshold=0.05
+            threshold=0.1
         )
 
         # dec_hand_pred_p1 = self.implicit_decoder(voxel_feat_tp1_pred_hand, pred_hand_next)
