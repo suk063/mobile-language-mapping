@@ -4,7 +4,7 @@ import random
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 import h5py
 from dacite import from_dict
@@ -95,7 +95,7 @@ class BCConfig:
     save_backup_ckpts: bool = False
 
     data_dir_fp: str = None        # path to data .h5 files
-    max_cache_size: int = 0        # max data points to cache
+    max_cache_size: Union[int, Literal["all"]] = 0        # max data points to cache
     trajs_per_obj: Union[str, int] = "all"
     torch_deterministic: bool = True
 
@@ -186,163 +186,269 @@ def get_mshab_train_cfg(cfg: TrainConfig) -> TrainConfig:
     return from_dict(data_class=TrainConfig, data=OmegaConf.to_container(cfg))
 
 
-def recursive_tensor_size_bytes(obj):
-    """
-    Calculate total size of nested tensors in bytes.
-    """
-    extra_obj_size = 0
-    if isinstance(obj, dict):
-        extra_obj_size = sum([recursive_tensor_size_bytes(v) for v in obj.values()])
-    elif isinstance(obj, (list, tuple)):
-        extra_obj_size = sum([recursive_tensor_size_bytes(x) for x in obj])
-    elif isinstance(obj, torch.Tensor):
-        extra_obj_size = obj.nelement() * obj.element_size()
-    return sys.getsizeof(obj) + extra_obj_size
+def recursive_h5py_to_numpy(h5py_obs, slice=None):
+    if isinstance(h5py_obs, h5py.Group) or isinstance(h5py_obs, dict):
+        return dict(
+            (k, recursive_h5py_to_numpy(h5py_obs[k], slice)) for k in h5py_obs.keys()
+        )
+    if isinstance(h5py_obs, list):
+        return [recursive_h5py_to_numpy(x, slice) for x in h5py_obs]
+    if isinstance(h5py_obs, tuple):
+        return tuple(recursive_h5py_to_numpy(x, slice) for x in h5py_obs)
+    if slice is not None:
+        return h5py_obs[slice]
+    return h5py_obs[:]
 
 
-class BCDataset(ClosableDataset):
+class DPDataset(ClosableDataset):
     def __init__(
         self,
-        data_dir_fp: str,
-        max_cache_size: int,
-        transform_fn=torch.from_numpy,
-        trajs_per_obj: Union[str, int] = "all",
-        cat_state=True,
-        cat_pixels=False,
+        data_path,
+        obs_horizon,
+        pred_horizon,
+        control_mode,
+        trajs_per_obj="all",
+        max_image_cache_size=0,
+        truncate_trajectories_at_success=True,
     ):
-        data_dir_fp = Path(data_dir_fp)
-        self.data_files: List[h5py.File] = []
-        self.json_files: List[Dict] = []
-        self.obj_names_in_loaded_order: List[str] = []
-        # Collect file names
-        if data_dir_fp.is_file():
-            data_file_names = [data_dir_fp.name]
-            data_dir_fp = data_dir_fp.parent
+        data_path = Path(data_path)
+        if data_path.is_dir():
+            h5_fps = [
+                data_path / fp for fp in os.listdir(data_path) if fp.endswith(".h5")
+            ]
         else:
-            data_file_names = os.listdir(data_dir_fp)
-        # Load .h5 and .json
-        for data_fn in data_file_names:
-            if data_fn.endswith(".h5"):
-                json_fn = data_fn.replace(".h5", ".json")
-                self.data_files.append(h5py.File(data_dir_fp / data_fn, "r"))
-                with open(data_dir_fp / json_fn, "rb") as f:
-                    self.json_files.append(json.load(f))
-                self.obj_names_in_loaded_order.append(data_fn.replace(".h5", ""))
-        self.dataset_idx_to_data_idx = {}
-        dataset_idx = 0
-        # Build mapping from dataset index to file/episode/step
-        for file_idx, json_file in enumerate(self.json_files):
+            h5_fps = [data_path]
+
+        trajectories = dict(actions=[], observations=[], subtask_uids=[])
+        num_cached = 0
+        self.h5_files: List[h5py.File] = []
+        for fp_num, fp in enumerate(h5_fps):
+            json_fp = fp.with_suffix(".json")
+            with open(json_fp, "rb") as json_f:
+                json_file = json.load(json_f)
+
+            f = h5py.File(fp, "r")
+            num_uncached_this_file = 0
+
             if trajs_per_obj == "all":
-                episodes = json_file["episodes"]
+                keys = list(f.keys())
             else:
-                assert trajs_per_obj <= len(json_file["episodes"])
-                episodes = random.sample(json_file["episodes"], k=trajs_per_obj)
-            for ep_json in episodes:
-                ep_id = ep_json["episode_id"]
-                subtask_uid = ep_json["subtask_uid"]
-                # Exclude last step so t+1 always exists
-                for step in range(ep_json["elapsed_steps"] - 1):
-                    self.dataset_idx_to_data_idx[dataset_idx] = (
-                        file_idx, ep_id, step, subtask_uid
+                keys = random.sample(list(f.keys()), k=trajs_per_obj)
+
+            for k in tqdm(keys, desc=f"hf file {fp_num}"):
+                ep_num = int(k.replace("traj_", ""))
+                subtask_uid = json_file["episodes"][ep_num]["subtask_uid"]
+
+                obs, act = f[k]["obs"], f[k]["actions"][:]
+
+                if truncate_trajectories_at_success:
+                    success: List[bool] = f[k]["success"][:].tolist()
+                    success_cutoff = min(success.index(True) + 1, len(success))
+                    del success
+                else:
+                    success_cutoff = len(act)
+
+                # NOTE (arth): we always cache state obs and actions because they take up very little memory.
+                #       mostly constraints are on images, since those take up much more memory
+                state_obs_list = [
+                    *recursive_h5py_to_numpy(
+                        obs["agent"], slice=slice(success_cutoff + 1)
+                    ).values(),
+                    *recursive_h5py_to_numpy(
+                        obs["extra"], slice=slice(success_cutoff + 1)
+                    ).values(),
+                ]
+                state_obs_list = [
+                    x[:, None] if len(x.shape) == 1 else x for x in state_obs_list
+                ]
+                state_obs = torch.from_numpy(np.concatenate(state_obs_list, axis=1))
+                # don't cut off actions in case we are able to use in place of padding
+                act = torch.from_numpy(act)
+
+                pixel_obs = dict(
+                    fetch_head_rgb=obs["sensor_data"]["fetch_head"]["rgb"],
+                    fetch_head_depth=obs["sensor_data"]["fetch_head"]["depth"],
+                    fetch_hand_rgb=obs["sensor_data"]["fetch_hand"]["rgb"],
+                    fetch_hand_depth=obs["sensor_data"]["fetch_hand"]["depth"],
+                )
+                if (
+                    max_image_cache_size == "all"
+                    or len(act) <= max_image_cache_size - num_cached
+                ):
+                    pixel_obs = to_tensor(
+                        recursive_h5py_to_numpy(
+                            pixel_obs, slice=slice(success_cutoff + 1)
+                        )
                     )
-                    dataset_idx += 1
-        self._data_len = dataset_idx
-        self.max_cache_size = max_cache_size
-        self.cache = {}
-        self.transform_fn = transform_fn
-        self.cat_state = cat_state
-        self.cat_pixels = cat_pixels
+                    num_cached += len(act)
+                    print(num_cached)
+                    import psutil
+                    process = psutil.Process(os.getpid())
+                    print(
+                        f"cpu_mem_use_GB={process.memory_info().rss / (10**9)}"
+                    )
+                else:
+                    num_uncached_this_file += len(act)
+
+                # add cam extrinsics
+                cam_pose_obs = to_tensor(
+                    recursive_h5py_to_numpy(
+                        dict(
+                            fetch_head_pose=obs["sensor_param"]["fetch_head"][
+                                "extrinsic_cv"
+                            ],
+                            fetch_hand_pose=obs["sensor_param"]["fetch_hand"][
+                                "extrinsic_cv"
+                            ],
+                        ),
+                        slice=slice(success_cutoff + 1),
+                    ),
+                    dtype=torch.float,
+                )
+                pixel_obs.update(**cam_pose_obs)
+
+                trajectories["actions"].append(act)
+                trajectories["observations"].append(dict(state=state_obs, **pixel_obs))
+                trajectories["subtask_uids"].append(subtask_uid)
+
+            if num_uncached_this_file == 0:
+                f.close()
+            else:
+                self.h5_files.append(f)
+
+        # Pre-compute all possible (traj_idx, start, end) tuples, this is very specific to Diffusion Policy
+        if (
+            "delta_pos" in control_mode
+            or control_mode == "base_pd_joint_vel_arm_pd_joint_vel"
+        ):
+            self.pad_action_arm = torch.zeros(
+                (trajectories["actions"][0].shape[1] - 1,)
+            )
+            # to make the arm stay still, we pad the action with 0 in 'delta_pos' control mode
+            # gripper action needs to be copied from the last action
+        else:
+            raise NotImplementedError(f"Control Mode {control_mode} not supported")
+        self.obs_horizon, self.pred_horizon = obs_horizon, pred_horizon
+        self.slices = []
+        num_traj = len(trajectories["actions"])
+        total_transitions = 0
+        for traj_idx in range(num_traj):
+            # NOTE (arth): since we cut off data at first success, we might have extra actions available
+            #   after the end of slice which we can use instead of hand-made padded zero actions
+            L = trajectories["observations"][traj_idx]["state"].shape[0] - 1
+            total_transitions += L
+
+            # |o|o|                             observations: 2
+            # | |a|a|a|a|a|a|a|a|               actions executed: 8
+            # |p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16
+            pad_before = obs_horizon - 1
+            # Pad before the trajectory, so the first action of an episode is in "actions executed"
+            # obs_horizon - 1 is the number of "not used actions"
+            pad_after = pred_horizon - obs_horizon
+            # Pad after the trajectory, so all the observations are utilized in training
+            # Note that in the original code, pad_after = act_horizon - 1, but I think this is not the best choice
+            # NOTE (arth): add subtask_uid here for convenience
+            self.slices += [
+                (
+                    trajectories["subtask_uids"][traj_idx],
+                    traj_idx,
+                    start,
+                    start + pred_horizon,
+                )
+                # for start in range(-pad_before, L - pred_horizon + pad_after)
+                # NOTE (arth): start at 0 since we use o_t and o_{t+1} for scene flow est
+                for start in range(0, L - pred_horizon + pad_after)
+            ]  # slice indices follow convention [start, end)
+
+        print(
+            f"Total transitions: {total_transitions}, Total obs sequences: {len(self.slices)}"
+        )
+
+        self.trajectories = trajectories
+
+    def __getitem__(self, index):
+        subtask_uid, traj_idx, start, end = self.slices[index]
+        L, act_dim = self.trajectories["actions"][traj_idx].shape
+
+        obs_traj = self.trajectories["observations"][traj_idx]
+        obs_seq = {}
+        for k, v in obs_traj.items():
+            obs_seq[k] = v[
+                max(0, start) : start + self.obs_horizon
+            ]  # start+self.obs_horizon is at least 1
+            if len(obs_seq[k].shape) == 4:
+                obs_seq[k] = to_tensor(obs_seq[k])  # FS, D, H, W
+            if start < 0:  # pad before the trajectory
+                pad_obs_seq = torch.stack([obs_seq[k][0]] * abs(start), dim=0)
+                obs_seq[k] = torch.cat((pad_obs_seq, obs_seq[k]), dim=0)
+            # don't need to pad obs after the trajectory, see the above char drawing
+
+        act_seq = self.trajectories["actions"][traj_idx][max(0, start) : end]
+        if start < 0:  # pad before the trajectory
+            act_seq = torch.cat([act_seq[0].repeat(-start, 1), act_seq], dim=0)
+        if end > L:  # pad after the trajectory
+            gripper_action = act_seq[-1, -1]  # assume gripper is with pos controller
+            pad_action = torch.cat((self.pad_action_arm, gripper_action[None]), dim=0)
+            act_seq = torch.cat([act_seq, pad_action.repeat(end - L, 1)], dim=0)
+            # making the robot (arm and gripper) stay still
+        assert (
+            obs_seq["state"].shape[0] == self.obs_horizon
+            and act_seq.shape[0] == self.pred_horizon
+        )
+        return {"observations": obs_seq, "actions": act_seq, "subtask_uid": subtask_uid}
+
     def __len__(self):
-        return self._data_len
+        return len(self.slices)
+
     def close(self):
-        for f in self.data_files:
-            f.close()
-    def transform_idx(self, data_obj, idx):
-        # Recursively load and convert h5 data to torch Tensor
-        if isinstance(data_obj, (h5py.Group, dict)):
-            return {k: self.transform_idx(v, idx) for k, v in data_obj.items()}
-        arr = self.transform_fn(np.array(data_obj[idx]))
-        if len(arr.shape) == 0:
-            arr = arr.unsqueeze(0)
-        return arr
-    def get_single_item(self, index):
-        # Return from cache if available
-        if index in self.cache:
-            return self.cache[index]
-        file_idx, ep_id, step_num, subtask_uid = self.dataset_idx_to_data_idx[index]
-        ep_data = self.data_files[file_idx][f"traj_{ep_id}"]
-        obs_data = ep_data["obs"]
-        # Observations at t
-        agent_obs_t = self.transform_idx(obs_data["agent"], step_num)
-        extra_obs_t = self.transform_idx(obs_data["extra"], step_num)
-        fhand_depth_t = self.transform_idx(obs_data["sensor_data"]["fetch_hand"]["depth"], step_num).squeeze(-1).unsqueeze(0)
-        fhand_rgb_t   = self.transform_idx(obs_data["sensor_data"]["fetch_hand"]["rgb"], step_num).squeeze(-1).unsqueeze(0)
-        fhead_depth_t = self.transform_idx(obs_data["sensor_data"]["fetch_head"]["depth"], step_num).squeeze(-1).unsqueeze(0)
-        fhead_rgb_t   = self.transform_idx(obs_data["sensor_data"]["fetch_head"]["rgb"], step_num).squeeze(-1).unsqueeze(0)
-        fhand_pose_t  = self.transform_idx(obs_data["sensor_param"]["fetch_hand"]["extrinsic_cv"], step_num).squeeze(-1).unsqueeze(0)
-        fhead_pose_t  = self.transform_idx(obs_data["sensor_param"]["fetch_head"]["extrinsic_cv"], step_num).squeeze(-1).unsqueeze(0)
-        # Observations at t+1
-        agent_obs_tp1 = self.transform_idx(obs_data["agent"], step_num + 1)
-        extra_obs_tp1 = self.transform_idx(obs_data["extra"], step_num + 1)
-        fhand_depth_tp1 = self.transform_idx(obs_data["sensor_data"]["fetch_hand"]["depth"], step_num + 1).squeeze(-1).unsqueeze(0)
-        fhand_rgb_tp1   = self.transform_idx(obs_data["sensor_data"]["fetch_hand"]["rgb"], step_num + 1).squeeze(-1).unsqueeze(0)
-        fhead_depth_tp1 = self.transform_idx(obs_data["sensor_data"]["fetch_head"]["depth"], step_num + 1).squeeze(-1).unsqueeze(0)
-        fhead_rgb_tp1   = self.transform_idx(obs_data["sensor_data"]["fetch_head"]["rgb"], step_num + 1).squeeze(-1).unsqueeze(0)
-        fhand_pose_tp1  = self.transform_idx(obs_data["sensor_param"]["fetch_hand"]["extrinsic_cv"], step_num + 1).squeeze(-1).unsqueeze(0)
-        fhead_pose_tp1  = self.transform_idx(obs_data["sensor_param"]["fetch_head"]["extrinsic_cv"], step_num + 1).squeeze(-1).unsqueeze(0)
-        # Combine or separate state
-        if self.cat_state:
-            # Merge agent_obs and extra_obs at each timestep
-            state_t = torch.cat([*agent_obs_t.values(), *extra_obs_t.values()], dim=0)
-            state_tp1 = torch.cat([*agent_obs_tp1.values(), *extra_obs_tp1.values()], dim=0)
-            state_obs = {
-                "state": state_t,
-                "state_p1": state_tp1
-            }
-        else:
-            state_obs = {
-                "agent_obs_t": agent_obs_t,
-                "extra_obs_t": extra_obs_t,
-                "agent_obs_t+1": agent_obs_tp1,
-                "extra_obs_t+1": extra_obs_tp1,
-            }
-        # Combine or separate pixels
-        if self.cat_pixels:
-            pixel_obs = {
-                "fetch_hand_depth":  torch.stack([fhand_depth_t,  fhand_depth_tp1],  dim=0),
-                "fetch_hand_rgb":    torch.stack([fhand_rgb_t,    fhand_rgb_tp1],    dim=0),
-                "fetch_head_depth":  torch.stack([fhead_depth_t,  fhead_depth_tp1],  dim=0),
-                "fetch_head_rgb":    torch.stack([fhead_rgb_t,    fhead_rgb_tp1],    dim=0),
-                "fetch_hand_pose":   torch.stack([fhand_pose_t,   fhand_pose_tp1],   dim=0),
-                "fetch_head_pose":   torch.stack([fhead_pose_t,   fhead_pose_tp1],   dim=0),
-            }
-        else:
-            pixel_obs = {
-                "fetch_hand_depth":    fhand_depth_t,
-                "fetch_hand_depth_p1":  fhand_depth_tp1,
-                "fetch_hand_rgb":      fhand_rgb_t,
-                "fetch_hand_rgb_p1":    fhand_rgb_tp1,
-                "fetch_head_depth":    fhead_depth_t,
-                "fetch_head_depth_p1":  fhead_depth_tp1,
-                "fetch_head_rgb":      fhead_rgb_t,
-                "fetch_head_rgb_p1":    fhead_rgb_tp1,
-                "fetch_hand_pose":     fhand_pose_t,
-                "fetch_hand_pose_p1":   fhand_pose_tp1,
-                "fetch_head_pose":     fhead_pose_t,
-                "fetch_head_pose_p1":   fhead_pose_tp1,
-            }
+        for h5_file in self.h5_files:
+            h5_file.close()
+
+
+class TempTranslateToPointDataset(DPDataset):
+    def __init__(self, *args, cat_state=True, cat_pixels=False, **kwargs):
+        assert (
+            cat_state
+        ), "This is a low-effort temp wrapper which requires cat_state=True"
+        assert (
+            not cat_pixels
+        ), "This is a low-effort temp wrapper which requires cat_pixels=False"
+        super().__init__(*args, **kwargs)
+
+    def __getitem__(self, index):
+        assert isinstance(index, int)
+        item = super().__getitem__(index)
+
+        # NOTE (arth): reformat DPDataset obs to work with current train code
+
+        state_obs = item["observations"]["state"]
+        assert state_obs.size(0) == 2
+        state_obs = {"state": state_obs[0], "state_p1": state_obs[1]}
+
+        pixel_obs = {
+            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_depth_p1": item["observations"]["fetch_hand_depth"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb_p1": item["observations"]["fetch_hand_rgb"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth_p1": item["observations"]["fetch_head_depth"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb_p1": item["observations"]["fetch_head_rgb"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose_p1": item["observations"]["fetch_hand_pose"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose_p1": item["observations"]["fetch_head_pose"][1].squeeze(-1).unsqueeze(0),
+        }
+
         obs = {**state_obs, "pixels": pixel_obs}
-        # Action at t
-        act = self.transform_idx(ep_data["actions"], step_num)
-        data_point = (obs, act, subtask_uid, step_num)
-        # Cache if within max_cache_size
-        if len(self.cache) < self.max_cache_size:
-            self.cache[index] = data_point
-        return data_point
-    def __getitem__(self, idx):
-        if isinstance(idx, int):
-            return self.get_single_item(idx)
-        return [self.get_single_item(i) for i in idx]
+
+        # NOTE (arth): we use start act and step_num since we use o_t and o_{t+1} for scene flow est
+        act = item["actions"][0]
+        step_num = self.slices[index][2]
+
+        subtask_uid = item["subtask_uid"]
+
+        return (obs, act, subtask_uid, step_num)
 
 
 def train(cfg: TrainConfig):
@@ -443,18 +549,30 @@ def train(cfg: TrainConfig):
         torch.save(optimizer.state_dict(), optim_path)
 
     # Create BC dataset and dataloader
-    bc_dataset = BCDataset(
+    # bc_dataset = BCDataset(
+    #     cfg.algo.data_dir_fp,
+    #     cfg.algo.max_cache_size,
+    #     cat_state=cfg.eval_env.cat_state,
+    #     cat_pixels=cfg.eval_env.cat_pixels,
+    #     trajs_per_obj=cfg.algo.trajs_per_obj,
+    # )
+    # logger.print(
+    #     f"BC Dataset: {len(bc_dataset)} samples "
+    #     f"({cfg.algo.trajs_per_obj} trajs/obj) for "
+    #     f"{len(bc_dataset.obj_names_in_loaded_order)} objects",
+    #     flush=True,
+    # )
+    assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
+    bc_dataset = TempTranslateToPointDataset(
         cfg.algo.data_dir_fp,
-        cfg.algo.max_cache_size,
+        obs_horizon=2,
+        pred_horizon=2,
+        control_mode=eval_envs.unwrapped.control_mode,
+        trajs_per_obj=cfg.algo.trajs_per_obj,
+        max_image_cache_size=cfg.algo.max_cache_size,
+        truncate_trajectories_at_success=True,
         cat_state=cfg.eval_env.cat_state,
         cat_pixels=cfg.eval_env.cat_pixels,
-        trajs_per_obj=cfg.algo.trajs_per_obj,
-    )
-    logger.print(
-        f"BC Dataset: {len(bc_dataset)} samples "
-        f"({cfg.algo.trajs_per_obj} trajs/obj) for "
-        f"{len(bc_dataset.obj_names_in_loaded_order)} objects",
-        flush=True,
     )
 
     bc_dataloader = ClosableDataLoader(
