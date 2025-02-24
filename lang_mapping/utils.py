@@ -204,17 +204,15 @@ def chamfer_cosine_weighted(
     valid_vals = row2col_vals[valid_mask]
     valid_weights = pred_weights[valid_mask] ** 2
 
-    print("----- Debug Info -----")
-    for b_idx in range(B):
-        num_valid = valid_mask[b_idx].sum().item()
-        print(f"[Batch {b_idx}] #points below threshold: {num_valid}/{N}")
-        valid_pred_indices = torch.where(valid_mask[b_idx])[0]
-        valid_gt_indices   = row2col_idx[b_idx][valid_pred_indices]
-        unique_gt_idx, counts = torch.unique(valid_gt_indices, return_counts=True)
-        print(f"  -> Mapped GT idx: {unique_gt_idx.tolist()}")
-        print(f"  -> Counts:       {counts.tolist()}")
-
-
+    # print("----- Debug Info -----")
+    # for b_idx in range(B):
+    #     num_valid = valid_mask[b_idx].sum().item()
+    #     print(f"[Batch {b_idx}] #points below threshold: {num_valid}/{N}")
+    #     valid_pred_indices = torch.where(valid_mask[b_idx])[0]
+    #     valid_gt_indices   = row2col_idx[b_idx][valid_pred_indices]
+    #     unique_gt_idx, counts = torch.unique(valid_gt_indices, return_counts=True)
+    #     print(f"  -> Mapped GT idx: {unique_gt_idx.tolist()}")
+    #     print(f"  -> Counts:       {counts.tolist()}")
 
     if valid_vals.numel() > 0:
         row_loss = (valid_vals * valid_weights).mean()
@@ -254,15 +252,15 @@ def chamfer_cosine_coverage_loss(
     valid_mask = (row2col_vals <= threshold)  # [B, N] (bool)
 
     # Debugging prints
-    print("----- Debug Info -----")
-    for b_idx in range(B):
-        num_valid = valid_mask[b_idx].sum().item()
-        print(f"[Batch {b_idx}] #points below threshold: {num_valid}/{N}")
-        valid_pred_indices = torch.where(valid_mask[b_idx])[0]
-        valid_gt_indices   = row2col_idx[b_idx][valid_pred_indices]
-        unique_gt_idx, counts = torch.unique(valid_gt_indices, return_counts=True)
-        print(f"  -> Mapped GT idx: {unique_gt_idx.tolist()}")
-        print(f"  -> Counts:       {counts.tolist()}")
+    # print("----- Debug Info -----")
+    # for b_idx in range(B):
+    #     num_valid = valid_mask[b_idx].sum().item()
+    #     print(f"[Batch {b_idx}] #points below threshold: {num_valid}/{N}")
+    #     valid_pred_indices = torch.where(valid_mask[b_idx])[0]
+    #     valid_gt_indices   = row2col_idx[b_idx][valid_pred_indices]
+    #     unique_gt_idx, counts = torch.unique(valid_gt_indices, return_counts=True)
+    #     print(f"  -> Mapped GT idx: {unique_gt_idx.tolist()}")
+    #     print(f"  -> Counts:       {counts.tolist()}")
 
     # 5) Compute coverage using squared weights
     weights_sq = pred_weights**2               # [B, N]
