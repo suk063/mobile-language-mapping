@@ -8,11 +8,11 @@ from scipy.optimize import linear_sum_assignment
 # Local imports
 from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, chamfer_3d_weighted, chamfer_cosine_weighted, chamfer_cosine_coverage_loss, transform
+from ..utils import positional_encoding, get_3d_coordinates, get_visual_features, chamfer_3d_weighted, chamfer_cosine_weighted, chamfer_cosine_coverage_loss, transform
 
 import open_clip
     
-class Agent_point_dynamic_flow(nn.Module):
+class Agent_point_flow_traverse(nn.Module):
     def __init__(
         self,
         sample_obs,
@@ -92,7 +92,9 @@ class Agent_point_dynamic_flow(nn.Module):
         self.voxel_points_dict = None
 
         # Additional transforms for voxel features
-        self.voxel_proj = nn.Linear(voxel_feature_dim + 2 * 3 * 10, voxel_feature_dim).to(self.device)
+        self.L = 10
+        self.pe_dim = 2 * self.L * 3
+        self.voxel_proj = nn.Linear(voxel_feature_dim + self.pe_dim, voxel_feature_dim).to(self.device)
         self.feature_fusion = LocalSelfAttentionFusion(feat_dim=voxel_feature_dim)
 
         # Camera intrinsics
@@ -423,8 +425,14 @@ class Agent_point_dynamic_flow(nn.Module):
         # -------------------------------------------------
         # Transformer input
         # -------------------------------------------------
-        voxel_feat_for_points_hand_proj = self.voxel_proj(voxel_feat_for_points_hand)
-        voxel_feat_for_points_head_proj = self.voxel_proj(voxel_feat_for_points_head)
+        pe_hand = positional_encoding(hand_coords_world_flat, L=self.L)
+        pe_head = positional_encoding(head_coords_world_flat, L=self.L)
+
+        hand_with_pe = torch.cat([voxel_feat_for_points_hand, pe_hand], dim=-1)
+        head_with_pe = torch.cat([voxel_feat_for_points_head, pe_head], dim=-1)
+
+        voxel_feat_for_points_hand_proj = self.voxel_proj(hand_with_pe)
+        voxel_feat_for_points_head_proj = self.voxel_proj(head_with_pe)
 
         voxel_feat_for_points_hand_batched = voxel_feat_for_points_hand_proj.view(B, N, -1)
         voxel_feat_for_points_head_batched = voxel_feat_for_points_head_proj.view(B, N, -1)
@@ -553,8 +561,14 @@ class Agent_point_dynamic_flow(nn.Module):
         flow_emb = self.flow_embed(flow_cat)  # [B, state_mlp_dim]
 
         # Transformer input
-        voxel_feat_for_points_hand_proj = self.voxel_proj(voxel_feat_for_points_hand)
-        voxel_feat_for_points_head_proj = self.voxel_proj(voxel_feat_for_points_head)
+        pe_hand = positional_encoding(hand_coords_world_flat, L=self.L)
+        pe_head = positional_encoding(head_coords_world_flat, L=self.L)
+
+        hand_with_pe = torch.cat([voxel_feat_for_points_hand, pe_hand], dim=-1)
+        head_with_pe = torch.cat([voxel_feat_for_points_head, pe_head], dim=-1)
+
+        voxel_feat_for_points_hand_proj = self.voxel_proj(hand_with_pe)
+        voxel_feat_for_points_head_proj = self.voxel_proj(head_with_pe)
 
         voxel_feat_for_points_hand_batched = voxel_feat_for_points_hand_proj.view(B, N, -1)
         voxel_feat_for_points_head_batched = voxel_feat_for_points_head_proj.view(B, N, -1)
