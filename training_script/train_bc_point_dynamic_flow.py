@@ -516,19 +516,19 @@ def train(cfg: TrainConfig):
 
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
         print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
-        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
+        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device), strict=False)
 
     if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
         print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
-        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device))
+        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
 
     if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
         print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
-        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device))
+        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=False)
 
     if cfg.algo.pretrained_optimizer_path is not None and os.path.exists(cfg.algo.pretrained_optimizer_path):
         print(f"[INFO] Loading pretrained optimizer state from {cfg.algo.pretrained_optimizer_path}")
-        optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device))
+        optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device), strict=False)
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -697,7 +697,7 @@ def train(cfg: TrainConfig):
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
             scene_flow_cos_loss = cfg.algo.flow_cos_loss_weight * scene_flow_cos_loss
             bc_loss = F.mse_loss(pi, act)
-            loss = cos_loss  + + scene_flow_loss + scene_flow_cos_loss + bc_loss  # Stage 2 uses both
+            loss = cos_loss  + scene_flow_loss + scene_flow_cos_loss + bc_loss  # Stage 2 uses both
 
             optimizer.zero_grad()
             loss.backward()

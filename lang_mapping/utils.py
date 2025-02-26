@@ -274,7 +274,7 @@ def chamfer_cosine_coverage_loss(
     loss = 1.0 - coverage
     return loss
 
-def chamfer_3d_weighted(pred_points, gt_points, pred_weights, threshold=1.0):
+def chamfer_3d_weighted(pred_points, gt_points, pred_weights=None, threshold=1.0):
     """
     A weighted Chamfer 3D function.
     Args:
@@ -301,8 +301,11 @@ def chamfer_3d_weighted(pred_points, gt_points, pred_weights, threshold=1.0):
     # Only consider distances within threshold
     valid_row2col = row2col_vals[row_mask]
     # Multiply the corresponding weights
-    valid_weights = pred_weights[row_mask] ** 2
-    row_loss = (valid_row2col * valid_weights).mean() if valid_row2col.numel() > 0 else torch.tensor(0.0, device=dist.device)
+    if pred_weights:
+        valid_weights = pred_weights[row_mask] ** 2
+        row_loss = (valid_row2col * valid_weights).mean() if valid_row2col.numel() > 0 else torch.tensor(0.0, device=dist.device)
+    else:
+        row_loss = valid_row2col.mean() if valid_row2col.numel() > 0 else torch.tensor(0.0, device=dist.device)
 
     return row_loss
 

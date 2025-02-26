@@ -130,6 +130,7 @@ class LocalSelfAttentionFusion(nn.Module):
         Returns:
             (B, N, feat_dim): fused feature after 2-token self-attention.
         """
+        
         # Stack feat1 and feat2 into a 2-token sequence: (B, N, 2, feat_dim)
         x = torch.stack([feat1, feat2], dim=2)  # shape: (B, N, 2, feat_dim)
         B, N, T, D = x.shape  # T=2

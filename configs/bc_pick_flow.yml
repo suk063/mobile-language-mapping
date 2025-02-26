@@ -36,9 +36,9 @@ algo:
   lr: 3e-4
   batch_size: 32
 
-  stage1_epochs: 100
-  stage2_epochs: 0
-  stage3_epochs: 0
+  stage1_epochs: 1
+  stage2_epochs: 15
+  stage3_epochs: 1
 
   eval_freq: 1
   log_freq: 1
@@ -77,8 +77,8 @@ algo:
 
   # Pre-trained Weights
   # pretrained_agent_path:  "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage0-final_agent.pt"
-  pretrained_voxel_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage0-final_voxel.pt"
-  pretrained_implicit_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage0-final_implicit.pt"
+  # pretrained_voxel_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage0-final_voxel.pt"
+  # pretrained_implicit_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage0-final_implicit.pt"
   # pretrained_optimizer_path:  "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage0-final_optimizer.pt"
 
 

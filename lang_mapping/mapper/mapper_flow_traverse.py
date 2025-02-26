@@ -44,13 +44,8 @@ class VoxelHashTableFlowTraverse(nn.Module):
         self.total_voxels = self.voxel_coords.shape[0]
 
         # dynamic embeddings (for reconstruction tasks, etc.)
-        self.dynamic_features = nn.Parameter(
+        self.features = nn.Parameter(
             torch.randn(self.total_voxels, feature_dim, device=device) * 0.01
-        )
-
-        # Time embeddings (for reconstruction)
-        self.time_embeddings = nn.Parameter(
-            torch.randn(self.mod_time, feature_dim, device=device) * 0.01
         )
 
         self.dynamic_flow_features = nn.Parameter(
@@ -62,7 +57,8 @@ class VoxelHashTableFlowTraverse(nn.Module):
         )
         
         # Scene flow MLP
-        self.flow_mlp = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
+        self.flow_mlp_forward = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
+        self.flow_mlp_backward = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
 
         # Hash table index buffer
         self.buffer_voxel_index = torch.full((hash_table_size,), -1,
@@ -99,7 +95,7 @@ class VoxelHashTableFlowTraverse(nn.Module):
         if collisions > 0:
             print(f"[WARNING] {collisions} collisions among {self.total_voxels} voxels.")
 
-    def query_voxel_feature(self, query_pts, query_times, return_indices=False):
+    def query_voxel_feature(self, query_pts, return_indices=False):
         """
         Returns fused features for (x,y,z,t) from the dynamic embeddings
         plus a time embedding for reconstruction tasks.
@@ -110,9 +106,6 @@ class VoxelHashTableFlowTraverse(nn.Module):
         """
         device = query_pts.device
         M = query_pts.shape[0]
-
-        # Time index (modulus)
-        t_mod = torch.remainder(query_times, self.mod_time).long().to(device)
 
         # Initialize output
         feats = torch.zeros(M, self.feature_dim, device=device)
@@ -129,17 +122,10 @@ class VoxelHashTableFlowTraverse(nn.Module):
 
             if valid_mask.any():
                 v_idx = voxel_indices[valid_mask]
-                t_idx = t_mod[valid_mask]
 
-                dyn_feats = self.dynamic_features[v_idx]
-                time_emb = self.time_embeddings[t_idx]
+                dyn_feats = self.features[v_idx]
 
-                # Fuse dynamic + time
-                cond_dynamic = self.fusion_time_dynamic(
-                    dyn_feats.unsqueeze(1), time_emb.unsqueeze(1)
-                ).squeeze(1)
-
-                feats[valid_mask] = cond_dynamic
+                feats[valid_mask] = dyn_feats
 
             if return_indices:
                 return feats, voxel_indices
@@ -190,21 +176,13 @@ class VoxelHashTableFlowTraverse(nn.Module):
                 # Add weighted feats to accum
                 if valid_mask_c.any():
                     v_idx = corner_voxel_idx[valid_mask_c]
-                    dyn_feats_c = self.dynamic_features[v_idx]
+                    dyn_feats_c = self.features[v_idx]
 
                     # Weighted contribution
                     w_c = corner_weight[valid_mask_c].unsqueeze(-1)  # shape (valid_count,1)
                     dyn_feats_accum[valid_mask_c] += dyn_feats_c * w_c
 
-            # Now fuse with time embedding
-            time_emb = self.time_embeddings[t_mod]
-            # Note: we fuse each point's dynamic embedding with time embedding
-            # using the local self-attention module.
-            cond_dynamic = self.fusion_time_dynamic(
-                dyn_feats_accum.unsqueeze(1), time_emb.unsqueeze(1)
-            ).squeeze(1)
-
-            feats = cond_dynamic
+            feats = dyn_feats_accum
 
             if return_indices:
                 # There's no single voxel index for trilinear, so we can return None or the floor index
@@ -305,14 +283,70 @@ class VoxelHashTableFlowTraverse(nn.Module):
 
             return cond_flow_dyn
 
-    def query_scene_flow(self, query_pts, query_times):
+    # def query_scene_flow_forward(
+    #     self,
+    #     query_pts: torch.Tensor,        # [N, 3]
+    #     query_times: torch.Tensor,      # [N]
+    #     feats_t: torch.Tensor,          # [N, D]    (예: t 시점 2D 이미지 feature)
+    #     feats_tplus1: torch.Tensor,     # [N, D]    (예: t+1 시점 2D 이미지 feature)
+    #     state_t: torch.Tensor,          # [N, S]    (예: t 시점 state, point마다 replicate된 형태)
+    #     state_tplus1: torch.Tensor,     # [N, S]    (예: t+1 시점 state, point마다 replicate된 형태)
+    # ) -> torch.Tensor:
+    #     """
+    #     Forward flow:  t 시점의 (query_pts, feats_t, state_t)와
+    #     t+1 시점의 (feats_tplus1, state_tplus1)를 순서대로 concat하여
+    #     flow MLP의 입력으로 사용.
+    #     """
+    #     # 1) 기존 voxel-based flow feature 추출
+    #     flow_feats = self.query_voxel_flow_feature(query_pts, query_times)  # [N, scene_feature_dim]
+
+    #     # 2) forward 방향에서는 (t, t+1) 순서로 concat
+    #     #    즉, [flow_feats, feats_t, feats_tplus1, state_t, state_tplus1]
+    #     x = torch.cat([flow_feats, feats_t, feats_tplus1, state_t, state_tplus1], dim=1)
+        
+    #     # 3) ImplicitDecoder(=flow_mlp_forward) 호출
+    #     #    여기서는 x를 '확장된 voxel_feat'처럼 취급하여 coords와 함께 넘김
+    #     #    ImplicitDecoder 내부에서 coords에 대한 positional encoding + x를 concat함
+    #     v = self.flow_mlp_forward(x, query_pts)  # -> [N, 3]
+    #     return v
+
+    # def query_scene_flow_backward(
+    #     self,
+    #     query_pts: torch.Tensor,        # [N, 3]
+    #     query_times: torch.Tensor,      # [N]
+    #     feats_t: torch.Tensor,          # [N, D]   (예: t 시점 2D 이미지 feature)
+    #     feats_tplus1: torch.Tensor,     # [N, D]   (예: t+1 시점 2D 이미지 feature)
+    #     state_t: torch.Tensor,          # [N, S]   (예: t 시점 state)
+    #     state_tplus1: torch.Tensor,     # [N, S]   (예: t+1 시점 state)
+    # ) -> torch.Tensor:
+    #     """
+    #     Backward flow:  t+1 시점에서 t 시점으로의 flow를 추정하므로
+    #     concat 순서를 (t+1, t)로 반대로 해준다.
+    #     """
+    #     flow_feats = self.query_voxel_flow_feature(query_pts, query_times)  # [N, scene_feature_dim]
+
+    #     # backward 방향에서는 (t+1, t) 순서로 concat
+    #     x = torch.cat([flow_feats, feats_tplus1, feats_t, state_tplus1, state_t], dim=1)
+
+    #     v = self.flow_mlp_backward(x, query_pts)
+    #     return v
+    
+    def query_scene_flow_forward(self, query_pts, query_times):
         """
-        Predict scene flow v in R^3 at each spatial-temporal point (x, t).
+        Forward flow: predict next position p_{t+1} = p_t + flow.
         """
         flow_feats = self.query_voxel_flow_feature(query_pts, query_times)
-        v = self.flow_mlp(flow_feats, query_pts)  # shape: [N, 3]
+        v = self.flow_mlp_forward(flow_feats, query_pts)  # shape: [N, 3]
         return v
 
+    def query_scene_flow_backward(self, query_pts, query_times):
+        """
+        Backward flow: predict previous position p_{t-1} = p_t + backward_flow.
+        """
+        flow_feats = self.query_voxel_flow_feature(query_pts, query_times)
+        v = self.flow_mlp_backward(flow_feats, query_pts)  # shape: [N, 3]
+        return v
+    
     def add_points(self, voxel_indices, points_3d, times):
         """
         Store sample points/times for debugging.
@@ -329,82 +363,3 @@ class VoxelHashTableFlowTraverse(nn.Module):
                 self.voxel_points[vid] = []
             if len(self.voxel_points[vid]) < 10:
                 self.voxel_points[vid].append((points_cpu[i], times_cpu[i]))
-    
-    @torch.no_grad()
-    def compute_time_variance(self, chunk_size: int = 50000):
-        """
-        Compute time variance (L2 norm of variance vector) over the range of times [0..(self.mod_time-1)].
-        We use query_voxel_feature() to observe how each voxel's fused feature changes over time.
-        
-        Args:
-            chunk_size (int): number of voxels to process in a single iteration to reduce memory usage.
-        """
-        device = self.device
-        coords_all = self.voxel_coords  # shape = (N,3)
-        N = coords_all.shape[0]
-        times_ = torch.arange(0, self.mod_time, device=device, dtype=torch.long)
-        T = times_.numel()
-
-        var_norm_list = []
-
-        start_idx = 0
-        while start_idx < N:
-            end_idx = min(start_idx + chunk_size, N)
-            coords_chunk = coords_all[start_idx:end_idx]  # shape (M,3)
-            M = coords_chunk.shape[0]
-
-            # Expand coordinates for times
-            coords_expanded = coords_chunk.unsqueeze(1).expand(M, T, 3).reshape(-1, 3)  # (M*T,3)
-            times_expanded = times_.unsqueeze(0).expand(M, T).reshape(-1)               # (M*T,)
-
-            # Query voxel features (which includes static+dynamic+time attention)
-            feats_flat, _ = self.query_voxel_feature(coords_expanded, times_expanded, return_indices=False)
-            # feats_flat shape = (M*T, feature_dim)
-
-            feats_3d = feats_flat.view(M, T, self.feature_dim)  # (M, T, feature_dim)
-            
-            # Compute variance across time dimension
-            # var_3d shape = (M, feature_dim)
-            var_3d = feats_3d.var(dim=1, unbiased=True)
-            
-            # L2 norm of the variance vector
-            # var_norm shape = (M,)
-            var_norm = var_3d.norm(dim=1)
-
-            var_norm_list.append(var_norm)
-            start_idx = end_idx
-
-        # Concatenate results for all voxels
-        # shape = (N,)
-        self.var_norm = torch.cat(var_norm_list, dim=0)
-        print(f"[INFO] compute_time_variance: computed time variance for {N} voxels. var_norm shape={self.var_norm.shape}")
-
-    def get_variance_for_points(self, query_pts: torch.Tensor) -> torch.Tensor:
-        """
-        Given an array of 3D query points, returns the time variance (self.var_norm)
-        for the corresponding voxel. If the point is invalid (hash collision or out of range),
-        the variance is 0.
-        
-        Args:
-            query_pts (torch.Tensor): shape (N,3), each row is a 3D coordinate in world space.
-        
-        Returns:
-            torch.Tensor: shape (N,), the time variance scalar per point.
-        """
-        assert self.var_norm is not None, "Must call compute_time_variance() first to populate self.var_norm."
-
-        device = query_pts.device
-        N = query_pts.shape[0]
-
-        # Hash lookup
-        grid_coords = torch.floor(query_pts / self.resolution).to(torch.int64)
-        hash_xyz = torch.remainder((grid_coords * self.primes_xyz).sum(dim=-1), self.hash_table_size).long()
-
-        voxel_indices = self.buffer_voxel_index[hash_xyz]
-        valid_mask = (voxel_indices >= 0)
-
-        # Initialize output with zeros
-        out_var = torch.zeros(N, device=device, dtype=self.var_norm.dtype)
-        # For valid ones, fill in
-        out_var[valid_mask] = self.var_norm[voxel_indices[valid_mask]]
-        return out_var

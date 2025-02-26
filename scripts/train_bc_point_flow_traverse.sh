@@ -2,7 +2,7 @@
 
 SEED=1
 
-TRAJS_PER_OBJ=1
+TRAJS_PER_OBJ=1000
 
 TASK=set_table
 SUBTASK=pick
@@ -43,7 +43,7 @@ args=(
     "algo.trajs_per_obj=$TRAJS_PER_OBJ"
     "algo.data_dir_fp=$data_dir_fp"
     "algo.max_cache_size=$MAX_CACHE_SIZE"
-    "algo.eval_freq=0"
+    "algo.eval_freq=1"
     "algo.log_freq=1"
     "algo.save_freq=1"
     "eval_env.make_env=True"

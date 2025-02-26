@@ -613,17 +613,15 @@ def train(cfg: TrainConfig):
         agent.epoch = epoch
         agent.train()
         hash_voxel.train()
-        hash_voxel.compute_time_variance(chunk_size=1000)
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss, scene_flow_cos_loss = agent.forward_train(obs, subtask_labels, step_nums)
+            pi, cos_loss, scene_flow_loss, flow_consistency_loss = agent.forward_train(obs, subtask_labels, step_nums)
             cos_loss = cfg.algo.cos_loss_weight * cos_loss
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
-            scene_flow_cos_loss = cfg.algo.flow_cos_loss_weight * scene_flow_cos_loss
-            loss = cos_loss + scene_flow_loss + scene_flow_cos_loss
+            loss = cos_loss + scene_flow_loss + flow_consistency_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -637,8 +635,8 @@ def train(cfg: TrainConfig):
             writer.add_scalar("Loss/Iteration", loss.item(), global_step)
             writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
             writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
-            writer.add_scalar("Scene Flow Cos Loss/Iteration", scene_flow_cos_loss.item(), global_step)
-
+            writer.add_scalar("Flow Consistency Loss/Iteration", flow_consistency_loss.item(), global_step)
+        
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
         timer.end(key="train")
@@ -686,18 +684,16 @@ def train(cfg: TrainConfig):
         agent.epoch = epoch
         agent.train()
         hash_voxel.train()
-        hash_voxel.compute_time_variance(chunk_size=1000)
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss, scene_flow_cos_loss = agent.forward_train(obs, subtask_labels, step_nums)
+            pi, cos_loss, scene_flow_loss, flow_consistency_loss = agent.forward_train(obs, subtask_labels, step_nums)
             cos_loss = cfg.algo.cos_loss_weight * cos_loss
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
-            scene_flow_cos_loss = cfg.algo.flow_cos_loss_weight * scene_flow_cos_loss
             bc_loss = F.mse_loss(pi, act)
-            loss = cos_loss  + scene_flow_loss + scene_flow_cos_loss + bc_loss  # Stage 2 uses both
+            loss = cos_loss  + scene_flow_loss + bc_loss + flow_consistency_loss # Stage 2 uses both
 
             optimizer.zero_grad()
             loss.backward()
@@ -710,7 +706,7 @@ def train(cfg: TrainConfig):
             writer.add_scalar("Loss/Iteration", loss.item(), global_step)
             writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
             writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
-            writer.add_scalar("Scene Flow Cos Loss/Iteration", scene_flow_cos_loss.item(), global_step)
+            writer.add_scalar("Flow Consistency Loss/Iteration", flow_consistency_loss.item(), global_step)
             writer.add_scalar("Behavior Cloning Loss/Iteration", bc_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
@@ -773,13 +769,12 @@ def train(cfg: TrainConfig):
         # hash_voxel & implicit_decoder remain in eval/frozen
         hash_voxel.eval()
         implicit_decoder.eval()
-        hash_voxel.compute_time_variance(chunk_size=1000)
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage3-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss, scene_flow_cos_loss = agent.forward_train(obs, subtask_labels, step_nums)
+            pi, cos_loss, scene_flow_loss = agent.forward_train(obs, subtask_labels, step_nums)
             # We ignore cos_loss now (mapping is frozen)
             bc_loss = F.mse_loss(pi, act)
             loss = bc_loss  # Stage 3 uses only BC
@@ -793,9 +788,6 @@ def train(cfg: TrainConfig):
             global_step += 1
 
             writer.add_scalar("Loss/Iteration", loss.item(), global_step)
-            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
-            writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
-            writer.add_scalar("Scene Flow Cos Loss/Iteration", scene_flow_cos_loss.item(), global_step)
             writer.add_scalar("Behavior Cloning Loss/Iteration", bc_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
