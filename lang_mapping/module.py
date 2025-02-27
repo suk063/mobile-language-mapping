@@ -259,17 +259,16 @@ class ImplicitDecoder(nn.Module):
         # 3) fc3 (positional encoding 다시 결합)
         x = torch.cat([x, pe], dim=-1)
         x = F.relu(self.ln3(self.fc3(x)), inplace=True)
+        
+        x3 = x
 
         # 4) fc4
-        x = F.relu(self.ln4(self.fc4(x)), inplace=True)
-
-        # 여기서 x가 "마지막에서 두 번째" 레이어 출력
-        x4 = x
+        x = F.relu(self.ln4(self.fc4(x3)), inplace=True)
 
         # 5) fc5 (최종 출력)
-        out = self.fc5(x4)
+        out = self.fc5(x)
 
         if return_intermediate:
-            return x4, out
+            return x3, out
         else:
             return out

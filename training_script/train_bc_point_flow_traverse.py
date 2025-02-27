@@ -118,6 +118,7 @@ class BCConfig:
     cos_loss_weight: float = 0.01
     flow_cos_loss_weight: float = 0.01
     scene_flow_loss_weight: float = 0.1
+    hidden_dim: int = 240
 
     num_eval_envs: int = field(init=False)
 
@@ -485,7 +486,7 @@ def train(cfg: TrainConfig):
 
     implicit_decoder = ImplicitDecoder(
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
-        hidden_dim=768,
+        hidden_dim=cfg.algo.hidden_dim,
         output_dim=cfg.algo.clip_input_dim,
         L=10
     ).to(device)
@@ -500,6 +501,7 @@ def train(cfg: TrainConfig):
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
         state_mlp_dim=cfg.algo.state_mlp_dim,
+        hidden_dim=cfg.algo.hidden_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         max_time_steps=eval_envs.max_episode_steps + 1,
         hash_voxel=hash_voxel,

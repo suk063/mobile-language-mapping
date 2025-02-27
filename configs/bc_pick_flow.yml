@@ -74,6 +74,7 @@ algo:
   scene_flow_loss_weight: 0.1
   cos_loss_weight: 0.02
   flow_cos_loss_weight: 0.2
+  hidden_dim: 240
 
   # Pre-trained Weights
   # pretrained_agent_path:  "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_agent.pt"

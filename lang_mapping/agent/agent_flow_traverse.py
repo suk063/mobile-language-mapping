@@ -23,6 +23,7 @@ class Agent_point_flow_traverse(nn.Module):
         clip_input_dim: int = 768,
         state_mlp_dim: int = 1024,
         voxel_feature_dim: int = 768,
+        hidden_dim=240,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         max_time_steps: int = 201,
@@ -59,7 +60,7 @@ class Agent_point_flow_traverse(nn.Module):
 
         # Text
         text_tokens = self.tokenizer(text_input).to(self.device)
-        self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
+        self.text_proj = nn.Linear(clip_input_dim, hidden_dim).to(self.device)
         with torch.no_grad():
             text_embeddings = self.clip_model.encode_text(text_tokens)
             text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
@@ -68,8 +69,11 @@ class Agent_point_flow_traverse(nn.Module):
             text_embeddings = text_embeddings - redundant_emb
             self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
 
+        # Projection to reduce CLIP feature dim
+        self.clip_dim_reducer = nn.Linear(clip_input_dim, hidden_dim).to(self.device)
+
         # Transformer
-        self.transformer = TransformerEncoder(input_dim=clip_input_dim, hidden_dim=256, num_layers=1, num_heads=4, output_dim=state_mlp_dim)  
+        self.transformer = TransformerEncoder(input_dim=hidden_dim, hidden_dim=256, num_layers=2, num_heads=8, output_dim=state_mlp_dim)  
 
         self.flow_embed = nn.Linear(2 * 3 * 256, state_mlp_dim).to(self.device)
 
@@ -94,7 +98,7 @@ class Agent_point_flow_traverse(nn.Module):
         self.voxel_proj = nn.Linear(voxel_feature_dim + self.pe_dim, voxel_feature_dim).to(self.device)
         
         self.time_aggregation = LocalSelfAttentionFusion(feat_dim=voxel_feature_dim)
-        self.feature_fusion = LocalSelfAttentionFusion(feat_dim=clip_input_dim)
+        self.feature_fusion = LocalSelfAttentionFusion(feat_dim=hidden_dim)
         
         self.velocity_encoder = nn.Linear(3, voxel_feature_dim)
 
@@ -257,11 +261,8 @@ class Agent_point_flow_traverse(nn.Module):
         feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
 
-        # t+1
-        hand_visfeat_p1 = hand_visfeat_p1.permute(0, 2, 3, 1).reshape(B_, N, -1)
-        head_visfeat_p1 = head_visfeat_p1.permute(0, 2, 3, 1).reshape(B_, N, -1)
-        feats_hand_flat_p1 = hand_visfeat_p1.reshape(B_ * N, -1)
-        feats_head_flat_p1 = head_visfeat_p1.reshape(B_ * N, -1)
+        hand_visfeat_reduced = self.clip_dim_reducer(feats_hand_flat).view(B_, N, -1)
+        head_visfeat_reduced = self.clip_dim_reducer(feats_head_flat).view(B_, N, -1)  # [B, N, 256]
 
         # ------------------------------------------------------
         # Voxel lookup (time t)
@@ -503,8 +504,8 @@ class Agent_point_flow_traverse(nn.Module):
         dec_hand_feat_batched = dec_hand_feat.view(B_, N, -1)  # [B, N, 768]
         dec_head_feat_batched = dec_head_feat.view(B_, N, -1)
 
-        fused_hand = self.feature_fusion(dec_hand_feat_batched, hand_visfeat)  # 둘 다 [B, N, 768]
-        fused_head = self.feature_fusion(dec_head_feat_batched, head_visfeat)
+        fused_hand = self.feature_fusion(dec_hand_feat_batched, hand_visfeat_reduced)  # 둘 다 [B, N, 768]
+        fused_head = self.feature_fusion(dec_head_feat_batched, head_visfeat_reduced)
 
         # -------------------------------------------------
         # Prepare flow_emb to feed into Action MLP
@@ -520,7 +521,8 @@ class Agent_point_flow_traverse(nn.Module):
         # -------------------------------------------------
         # Transformer input
         # -------------------------------------------------
-        selected_text_reduced = self.text_embeddings[object_labels, :]
+        text_embeddings_reduced = self.text_proj(self.text_embeddings)
+        selected_text_reduced = text_embeddings_reduced[object_labels, :]
 
         batch_hand_coords = hand_coords_world_flat.view(B, N, 3)
         batch_head_coords = head_coords_world_flat.view(B, N, 3)
@@ -613,8 +615,13 @@ class Agent_point_flow_traverse(nn.Module):
         # ------------------------------------------------------
         # 4. Flatten CLIP features
         # ------------------------------------------------------
-        hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)  # [B, N, clip_dim]
+        hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
         head_visfeat = head_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
+        feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
+        feats_head_flat = head_visfeat.reshape(B_ * N, -1)
+
+        hand_visfeat_reduced = self.clip_dim_reducer(feats_hand_flat).view(B_, N, -1)
+        head_visfeat_reduced = self.clip_dim_reducer(feats_head_flat).view(B_, N, -1)  # [B, N, 256]
 
         # ------------------------------------------------------
         # 5. Basic voxel feature lookup (time t)
@@ -716,8 +723,8 @@ class Agent_point_flow_traverse(nn.Module):
         dec_hand_feat_batched = dec_hand_feat.view(B_, N, -1)
         dec_head_feat_batched = dec_head_feat.view(B_, N, -1)
 
-        fused_hand = self.feature_fusion(dec_hand_feat_batched, hand_visfeat)  # [B, N, 768]
-        fused_head = self.feature_fusion(dec_head_feat_batched, head_visfeat)
+        fused_hand = self.feature_fusion(dec_hand_feat_batched, hand_visfeat_reduced)  # [B, N, 768]
+        fused_head = self.feature_fusion(dec_head_feat_batched, head_visfeat_reduced)
 
         # ------------------------------------------------------
         # 8. Flow 임베딩 (forward flow 사용)
@@ -733,7 +740,8 @@ class Agent_point_flow_traverse(nn.Module):
         # ------------------------------------------------------
         # 9. Text embedding 선택
         # ------------------------------------------------------
-        selected_text_reduced = self.text_embeddings[object_labels, :]  # [B, 768]
+        text_embeddings_reduced = self.text_proj(self.text_embeddings)
+        selected_text_reduced = text_embeddings_reduced[object_labels, :]
 
         batch_hand_coords = hand_coords_world_flat.view(B_, N, 3)
         batch_head_coords = head_coords_world_flat.view(B_, N, 3)
