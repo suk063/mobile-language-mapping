@@ -24,7 +24,7 @@ MS_ASSET_DIR="$HOME/.maniskill/data"
 RESUME_LOGDIR="$WORKSPACE/$EXP_NAME"
 RESUME_CONFIG="$RESUME_LOGDIR/config.yml"
 
-MAX_CACHE_SIZE=100_000   # safe num for about 64 GiB system memory
+MAX_CACHE_SIZE=0   # safe num for about 64 GiB system memory
 
 if [[ $SUBTASK == "open" || $SUBTASK == "close" || $SUBTASK == "pick" || $SUBTASK == "place" ]]; then
     data_dir_fp="$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset/$TASK/$SUBTASK/$OBJ.h5"

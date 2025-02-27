@@ -211,58 +211,65 @@ class ImplicitDecoder(nn.Module):
     A simple MLP to decode a 3D coordinate (with positional encoding) and its corresponding
     voxel feature into another feature vector (default 768-D).
     """
-    def __init__(self, voxel_feature_dim=120, hidden_dim=256, output_dim=768, L=10):
+    def __init__(self, voxel_feature_dim=768, hidden_dim=768, output_dim=768, L=10):
         super().__init__()
         self.voxel_feature_dim = voxel_feature_dim
         self.hidden_dim = hidden_dim
         self.L = L
         self.pe_dim = 2 * self.L * 3  # 2*L for sine/cosine, times 3 for x, y, z
 
-        # First linear layer input dimension: voxel_feature_dim + pe_dim
+        # 첫 레이어 input: voxel_feature_dim + pe_dim
         self.input_dim = self.voxel_feature_dim + self.pe_dim
         self.output_dim = output_dim
 
-        # Layers
         self.fc1 = nn.Linear(self.input_dim, self.hidden_dim)
         self.ln1 = nn.LayerNorm(self.hidden_dim)
 
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.ln2 = nn.LayerNorm(self.hidden_dim)
 
-        # Third layer also takes the positional encoding as an additional input
+        # 세 번째 레이어는 positional encoding 재결합
         self.fc3 = nn.Linear(self.hidden_dim + self.pe_dim, self.hidden_dim)
         self.ln3 = nn.LayerNorm(self.hidden_dim)
 
         self.fc4 = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.ln4 = nn.LayerNorm(self.hidden_dim)
 
+        # 최종 출력
         self.fc5 = nn.Linear(self.hidden_dim, self.output_dim)
 
-    def forward(self, voxel_features, coords_3d):
+    def forward(self, voxel_features, coords_3d, return_intermediate=False):
         """
         Args:
-            voxel_features (Tensor): [N, voxel_feature_dim] - Features retrieved from the VoxelHashTable.
-            coords_3d (Tensor): [N, 3] - 3D coordinates for positional encoding.
-
+            voxel_features (Tensor): [N, voxel_feature_dim=768].
+            coords_3d (Tensor): [N, 3].
+            return_intermediate (bool): True면 (마지막-1 레이어 출력, 최종 출력)을 함께 반환.
         Returns:
-            Tensor: [N, 768] - Decoded feature representation.
+            Tensor: [N, output_dim=768] (또는 (x4, out))
         """
         pe = positional_encoding(coords_3d, L=self.L)  # [N, pe_dim]
 
-        # 1) First linear
+        # 1) fc1
         x = torch.cat([voxel_features, pe], dim=-1)
         x = F.relu(self.ln1(self.fc1(x)), inplace=True)
 
-        # 2) Second linear
+        # 2) fc2
         x = F.relu(self.ln2(self.fc2(x)), inplace=True)
 
-        # 3) Concat positional encoding again
+        # 3) fc3 (positional encoding 다시 결합)
         x = torch.cat([x, pe], dim=-1)
         x = F.relu(self.ln3(self.fc3(x)), inplace=True)
 
-        # 4) Fourth linear
+        # 4) fc4
         x = F.relu(self.ln4(self.fc4(x)), inplace=True)
 
-        # 5) Fifth linear
-        x = self.fc5(x)
-        return x
+        # 여기서 x가 "마지막에서 두 번째" 레이어 출력
+        x4 = x
+
+        # 5) fc5 (최종 출력)
+        out = self.fc5(x4)
+
+        if return_intermediate:
+            return x4, out
+        else:
+            return out

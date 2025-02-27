@@ -485,7 +485,7 @@ def train(cfg: TrainConfig):
 
     implicit_decoder = ImplicitDecoder(
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
-        hidden_dim=256,
+        hidden_dim=768,
         output_dim=cfg.algo.clip_input_dim,
         L=10
     ).to(device)
@@ -528,7 +528,7 @@ def train(cfg: TrainConfig):
 
     if cfg.algo.pretrained_optimizer_path is not None and os.path.exists(cfg.algo.pretrained_optimizer_path):
         print(f"[INFO] Loading pretrained optimizer state from {cfg.algo.pretrained_optimizer_path}")
-        optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device), strict=False)
+        optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device))
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -569,7 +569,7 @@ def train(cfg: TrainConfig):
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
-        truncate_trajectories_at_success=True,
+        truncate_trajectories_at_success=False,
         cat_state=cfg.eval_env.cat_state,
         cat_pixels=cfg.eval_env.cat_pixels,
     )
