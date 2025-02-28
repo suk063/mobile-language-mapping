@@ -79,7 +79,7 @@ def make_interact_env():
         reward_mode="normalized_dense",
         control_mode="pd_joint_delta_pos_body_pos",
         render_mode="all",
-        shader_dir="minimal",
+        shader_dir="default",
         robot_uids="fetch",
         sim_backend="gpu",
         sim_config=MS_SIM_CONFIG,

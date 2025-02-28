@@ -175,6 +175,17 @@ class Agent_point_flow_traverse(nn.Module):
         # Depth at time t
         hand_depth = pixels["fetch_hand_depth"] / 1000.0
         head_depth = pixels["fetch_head_depth"] / 1000.0
+        
+        if hand_depth.dim() == 4:
+            b2, d2, h2, w2 = hand_depth.shape
+            
+            hand_depth = F.interpolate(hand_depth, (16, 16), mode="nearest")
+            head_depth = F.interpolate(head_depth, (16, 16), mode="nearest")
+            
+            hand_depth_p1 = F.interpolate(hand_depth_p1, (16, 16), mode="nearest")
+            head_depth_p1 = F.interpolate(head_depth_p1, (16, 16), mode="nearest")
+                
+        
         if hand_depth.dim() == 5:
             b2, fs2, d2, h2, w2 = hand_depth.shape
             hand_depth = hand_depth.view(b2, fs2 * d2, h2, w2)
