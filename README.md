@@ -29,14 +29,14 @@ python -m mani_skill.utils.download_asset ycb ReplicaCAD ReplicaCADRearrange
 
 Download the pre-generated data (224×224 resolution for a single scene) from the following URL:
 
-[Google Drive Folder](https://drive.google.com/drive/folders/1euvIuJBM_MZMEQq1eZFMPk8Kip7q9piV?usp=drive_link)
+[Google Drive Folder](https://drive.google.com/drive/u/1/folders/1Fq9UX86H1S-Lsfceeje9SC7Ak3bq45v9)
 
 After downloading:
-- Place the folder rearrange_dataset into the following directory:
+- Place the folder `rearrange_dataset` into the following directory:
 ```bash
 $MS_ASSET_DIR/scene_datasets/replica_cad_dataset
 ```
-- Place the task_plans folder into the following directory:
+- Place the `task_plans` folder into the following directory:
 ```bash
 $MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange
 ```
