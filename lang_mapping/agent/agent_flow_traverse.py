@@ -440,6 +440,13 @@ class Agent_point_flow_traverse(nn.Module):
             consistency_loss_hand_bwfw + consistency_loss_head_bwfw
         )
         
+        flow_reg_loss = (
+            flow_hand.pow(2).mean() +
+            flow_head.pow(2).mean() +
+            flow_hand_bw.pow(2).mean() +
+            flow_head_bw.pow(2).mean()
+        )
+        
         # -------------------------------------------------
         # (1) Hand 쪽 time aggregation
         # -------------------------------------------------
@@ -576,7 +583,7 @@ class Agent_point_flow_traverse(nn.Module):
         inp = torch.cat([visual_token, state_token, flow_emb], dim=1)  # [B, state_mlp_dim * 3]
         action_pred = self.action_mlp(inp)  # [B, action_dim]
 
-        return action_pred, total_cos_loss, scene_flow_loss, flow_consistency_loss
+        return action_pred, total_cos_loss, scene_flow_loss, flow_consistency_loss, flow_reg_loss
     
     def forward_eval(self, observations, object_labels, step_nums):
         """
