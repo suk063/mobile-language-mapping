@@ -31,12 +31,15 @@ Download the pre-generated data (224×224 resolution for a single scene) from th
 
 [Google Drive Folder](https://drive.google.com/drive/folders/1euvIuJBM_MZMEQq1eZFMPk8Kip7q9piV?usp=drive_link)
 
-After downloading, place the data in the following directory:
-
+After downloading:
+- Place the folder rearrange_dataset into the following directory:
 ```bash
-$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset
+$MS_ASSET_DIR/scene_datasets/replica_cad_dataset
 ```
-
+- Place the task_plans folder into the following directory:
+```bash
+$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange
+```
 *Note:* The default location for `MS_ASSET_DIR` is `~/.maniskill/data`.
 
 ## Training and Evaluation
