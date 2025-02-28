@@ -4,7 +4,7 @@ eval_env:
   make_env: True
 
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 63
+  num_envs: 1
   max_episode_steps: 500
  
   continuous_task: True
@@ -16,9 +16,6 @@ eval_env:
   stationary_base: False
   stationary_torso: False
   stationary_head: True
-
-  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/tidy_house/pick/train/all.json
-  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/tidy_house/pick/train/spawn_data.pt"
 
   record_video: False
   info_on_video: True
@@ -37,7 +34,7 @@ algo:
   batch_size: 32
 
   stage1_epochs: 1
-  stage2_epochs: 15
+  stage2_epochs: 30
   stage3_epochs: 1
 
   eval_freq: 1
@@ -79,7 +76,7 @@ algo:
   # Pre-trained Weights
   # pretrained_agent_path:  "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_agent.pt"
   # pretrained_voxel_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_voxel.pt"
-  # pretrained_implicit_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_implicit.pt"
+  pretrained_implicit_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_implicit.pt"
   # pretrained_optimizer_path:  "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_optimizer.pt"
 
 

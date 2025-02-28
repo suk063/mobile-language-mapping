@@ -57,8 +57,8 @@ class VoxelHashTableFlowTraverse(nn.Module):
         )
         
         # Scene flow MLP
-        self.flow_mlp_forward = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
-        self.flow_mlp_backward = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
+        self.flow_mlp_forward = ImplicitDecoder(voxel_feature_dim=874, hidden_dim=256, output_dim=3, L=10)
+        self.flow_mlp_backward = ImplicitDecoder(voxel_feature_dim=874, hidden_dim=256, output_dim=3, L=10)
 
         # Hash table index buffer
         self.buffer_voxel_index = torch.full((hash_table_size,), -1,
@@ -331,20 +331,24 @@ class VoxelHashTableFlowTraverse(nn.Module):
     #     v = self.flow_mlp_backward(x, query_pts)
     #     return v
     
-    def query_scene_flow_forward(self, query_pts, query_times):
+    def query_scene_flow_forward(self, query_pts, query_times, feats, state):
         """
         Forward flow: predict next position p_{t+1} = p_t + flow.
         """
         flow_feats = self.query_voxel_flow_feature(query_pts, query_times)
-        v = self.flow_mlp_forward(flow_feats, query_pts)  # shape: [N, 3]
+        x = torch.cat([flow_feats, feats, state], dim=1)
+        v = self.flow_mlp_forward(x, query_pts)
+        
         return v
 
-    def query_scene_flow_backward(self, query_pts, query_times):
+    def query_scene_flow_backward(self, query_pts, query_times, feats, state):
         """
         Backward flow: predict previous position p_{t-1} = p_t + backward_flow.
         """
         flow_feats = self.query_voxel_flow_feature(query_pts, query_times)
-        v = self.flow_mlp_backward(flow_feats, query_pts)  # shape: [N, 3]
+        x = torch.cat([flow_feats, feats, state], dim=1)
+        v = self.flow_mlp_backward(x, query_pts)
+        
         return v
     
     def add_points(self, voxel_indices, points_3d, times):
