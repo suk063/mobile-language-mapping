@@ -57,8 +57,8 @@ class VoxelHashTableFlowTraverse(nn.Module):
         )
         
         # Scene flow MLP
-        self.flow_mlp_forward = ImplicitDecoder(voxel_feature_dim=874, hidden_dim=256, output_dim=3, L=10)
-        self.flow_mlp_backward = ImplicitDecoder(voxel_feature_dim=874, hidden_dim=256, output_dim=3, L=10)
+        self.flow_mlp_forward = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
+        self.flow_mlp_backward = ImplicitDecoder(voxel_feature_dim=scene_feature_dim, hidden_dim=256, output_dim=3, L=10)
 
         # Hash table index buffer
         self.buffer_voxel_index = torch.full((hash_table_size,), -1,
@@ -282,72 +282,22 @@ class VoxelHashTableFlowTraverse(nn.Module):
             ).squeeze(1)
 
             return cond_flow_dyn
-
-    # def query_scene_flow_forward(
-    #     self,
-    #     query_pts: torch.Tensor,        # [N, 3]
-    #     query_times: torch.Tensor,      # [N]
-    #     feats_t: torch.Tensor,          # [N, D]    (예: t 시점 2D 이미지 feature)
-    #     feats_tplus1: torch.Tensor,     # [N, D]    (예: t+1 시점 2D 이미지 feature)
-    #     state_t: torch.Tensor,          # [N, S]    (예: t 시점 state, point마다 replicate된 형태)
-    #     state_tplus1: torch.Tensor,     # [N, S]    (예: t+1 시점 state, point마다 replicate된 형태)
-    # ) -> torch.Tensor:
-    #     """
-    #     Forward flow:  t 시점의 (query_pts, feats_t, state_t)와
-    #     t+1 시점의 (feats_tplus1, state_tplus1)를 순서대로 concat하여
-    #     flow MLP의 입력으로 사용.
-    #     """
-    #     # 1) 기존 voxel-based flow feature 추출
-    #     flow_feats = self.query_voxel_flow_feature(query_pts, query_times)  # [N, scene_feature_dim]
-
-    #     # 2) forward 방향에서는 (t, t+1) 순서로 concat
-    #     #    즉, [flow_feats, feats_t, feats_tplus1, state_t, state_tplus1]
-    #     x = torch.cat([flow_feats, feats_t, feats_tplus1, state_t, state_tplus1], dim=1)
         
-    #     # 3) ImplicitDecoder(=flow_mlp_forward) 호출
-    #     #    여기서는 x를 '확장된 voxel_feat'처럼 취급하여 coords와 함께 넘김
-    #     #    ImplicitDecoder 내부에서 coords에 대한 positional encoding + x를 concat함
-    #     v = self.flow_mlp_forward(x, query_pts)  # -> [N, 3]
-    #     return v
-
-    # def query_scene_flow_backward(
-    #     self,
-    #     query_pts: torch.Tensor,        # [N, 3]
-    #     query_times: torch.Tensor,      # [N]
-    #     feats_t: torch.Tensor,          # [N, D]   (예: t 시점 2D 이미지 feature)
-    #     feats_tplus1: torch.Tensor,     # [N, D]   (예: t+1 시점 2D 이미지 feature)
-    #     state_t: torch.Tensor,          # [N, S]   (예: t 시점 state)
-    #     state_tplus1: torch.Tensor,     # [N, S]   (예: t+1 시점 state)
-    # ) -> torch.Tensor:
-    #     """
-    #     Backward flow:  t+1 시점에서 t 시점으로의 flow를 추정하므로
-    #     concat 순서를 (t+1, t)로 반대로 해준다.
-    #     """
-    #     flow_feats = self.query_voxel_flow_feature(query_pts, query_times)  # [N, scene_feature_dim]
-
-    #     # backward 방향에서는 (t+1, t) 순서로 concat
-    #     x = torch.cat([flow_feats, feats_tplus1, feats_t, state_tplus1, state_t], dim=1)
-
-    #     v = self.flow_mlp_backward(x, query_pts)
-    #     return v
-    
-    def query_scene_flow_forward(self, query_pts, query_times, feats, state):
+    def query_scene_flow_forward(self, query_pts, query_times):
         """
         Forward flow: predict next position p_{t+1} = p_t + flow.
         """
         flow_feats = self.query_voxel_flow_feature(query_pts, query_times)
-        x = torch.cat([flow_feats, feats, state], dim=1)
-        v = self.flow_mlp_forward(x, query_pts)
+        v = self.flow_mlp_forward(flow_feats, query_pts)
         
         return v
 
-    def query_scene_flow_backward(self, query_pts, query_times, feats, state):
+    def query_scene_flow_backward(self, query_pts, query_times):
         """
         Backward flow: predict previous position p_{t-1} = p_t + backward_flow.
         """
         flow_feats = self.query_voxel_flow_feature(query_pts, query_times)
-        x = torch.cat([flow_feats, feats, state], dim=1)
-        v = self.flow_mlp_backward(x, query_pts)
+        v = self.flow_mlp_backward(flow_feats, query_pts)
         
         return v
     

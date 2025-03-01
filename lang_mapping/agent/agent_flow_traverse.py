@@ -73,7 +73,7 @@ class Agent_point_flow_traverse(nn.Module):
         self.clip_dim_reducer = nn.Linear(clip_input_dim, hidden_dim).to(self.device)
 
         # Transformer
-        self.transformer = TransformerEncoder(input_dim=hidden_dim, hidden_dim=256, num_layers=2, num_heads=8, output_dim=state_mlp_dim)  
+        self.transformer = TransformerEncoder(input_dim=hidden_dim, hidden_dim=256, num_layers=4, num_heads=8, output_dim=state_mlp_dim)  
 
         self.flow_embed = nn.Linear(2 * 3 * 256, state_mlp_dim).to(self.device)
 
@@ -310,16 +310,12 @@ class Agent_point_flow_traverse(nn.Module):
 
         flow_hand = self.hash_voxel.query_scene_flow_forward(
             query_pts=hand_coords_world_flat,        # [B*N, 3]
-            query_times=times_t_expanded,            # [B*N]
-            feats=feats_hand_flat,                   # [B*N, clip_dim]
-            state=expanded_state_t                   # [B*N, state_dim]
+            query_times=times_t_expanded            # [B*N]
         )
         
         flow_head = self.hash_voxel.query_scene_flow_forward(
             query_pts=head_coords_world_flat,
-            query_times=times_t_expanded,
-            feats=feats_head_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
 
         # -------------------------------------------------
@@ -327,15 +323,11 @@ class Agent_point_flow_traverse(nn.Module):
         # -------------------------------------------------
         flow_hand_bw = self.hash_voxel.query_scene_flow_backward(
             query_pts=hand_coords_world_flat_p1,
-            query_times=times_tp1_expanded,
-            feats=feats_hand_flat_p1,     # 시간 t 피쳐
-            state=expanded_state_tp1
+            query_times=times_tp1_expanded
         )
         flow_head_bw = self.hash_voxel.query_scene_flow_backward(
             query_pts=head_coords_world_flat_p1,
-            query_times=times_tp1_expanded,
-            feats=feats_head_flat_p1,     # 시간 t 피쳐
-            state=expanded_state_tp1
+            query_times=times_tp1_expanded
         )
         
         # -------------------------------------------------
@@ -394,15 +386,11 @@ class Agent_point_flow_traverse(nn.Module):
         # -------------------------------------------------
         flow_hand_bw_consistency = self.hash_voxel.query_scene_flow_backward(
                 query_pts=pred_hand_next,
-                query_times=times_tp1_expanded,
-                feats=feats_hand_flat_p1,
-                state=expanded_state_tp1
+                query_times=times_tp1_expanded
         )
         flow_head_bw_consistency = self.hash_voxel.query_scene_flow_backward(
             query_pts=pred_head_next,
-            query_times=times_tp1_expanded,
-            feats=feats_head_flat_p1,
-            state=expanded_state_tp1
+            query_times=times_tp1_expanded
         )
         
         pred_hand_fwbw = pred_hand_next + flow_hand_bw_consistency
@@ -416,15 +404,11 @@ class Agent_point_flow_traverse(nn.Module):
         #   => flow_hand_fw_consistency
         flow_hand_fw_consistency = self.hash_voxel.query_scene_flow_forward(
             query_pts=pred_hand_prev,           # 지금은 t 좌표로 봄
-            query_times=times_t_expanded,
-            feats=feats_hand_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
         flow_head_fw_consistency = self.hash_voxel.query_scene_flow_forward(
             query_pts=pred_head_prev,
-            query_times=times_t_expanded,
-            feats=feats_head_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
 
         #   => (x' + v_bw) + v_fw_pred
@@ -466,9 +450,7 @@ class Agent_point_flow_traverse(nn.Module):
         # t → t-1
         flow_hand_bw = self.hash_voxel.query_scene_flow_backward(
             query_pts=hand_coords_world_flat,  # t 시점 좌표
-            query_times=times_t_expanded,
-            feats=feats_hand_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
         pred_hand_m1 = hand_coords_world_flat + flow_hand_bw
         flow_hand_bw_enc = self.velocity_encoder(flow_hand_bw)       # [B*N, 120]
@@ -503,9 +485,7 @@ class Agent_point_flow_traverse(nn.Module):
         # t → t-1
         flow_head_bw = self.hash_voxel.query_scene_flow_backward(
             query_pts=head_coords_world_flat,  # t 시점 좌표
-            query_times=times_t_expanded,
-            feats=feats_head_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
         pred_head_m1 = head_coords_world_flat + flow_head_bw
         flow_head_bw_enc = self.velocity_encoder(flow_head_bw)       # [B*N, 120]
@@ -681,15 +661,11 @@ class Agent_point_flow_traverse(nn.Module):
         
         flow_hand_fw = self.hash_voxel.query_scene_flow_forward(
             query_pts=hand_coords_world_flat, 
-            query_times=times_t_expanded,
-            feats=feats_hand_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
         flow_head_fw = self.hash_voxel.query_scene_flow_forward(
             query_pts=head_coords_world_flat,
-            query_times=times_t_expanded,
-            feats=feats_head_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
 
 
@@ -720,15 +696,11 @@ class Agent_point_flow_traverse(nn.Module):
         # (b) Backward flow & time t-1
         flow_hand_bw = self.hash_voxel.query_scene_flow_backward(
             query_pts=hand_coords_world_flat,
-            query_times=times_t_expanded,
-            feats=feats_hand_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
         flow_head_bw = self.hash_voxel.query_scene_flow_backward(
             query_pts=head_coords_world_flat,
-            query_times=times_t_expanded,
-            feats=feats_head_flat,
-            state=expanded_state_t
+            query_times=times_t_expanded
         )
         # pred position at t-1
         pred_hand_prev = hand_coords_world_flat + flow_hand_bw
