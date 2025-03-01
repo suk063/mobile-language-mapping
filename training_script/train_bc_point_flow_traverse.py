@@ -625,7 +625,7 @@ def train(cfg: TrainConfig):
             cos_loss = cfg.algo.cos_loss_weight * cos_loss
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
             flow_reg_loss = cfg.algo.flow_reg_loss_weight * flow_reg_loss
-            loss = cos_loss + scene_flow_loss + flow_consistency_loss
+            loss = cos_loss + scene_flow_loss + flow_consistency_loss + flow_reg_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -699,7 +699,7 @@ def train(cfg: TrainConfig):
             scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
             flow_reg_loss = cfg.algo.flow_reg_loss_weight * flow_reg_loss
             bc_loss = F.mse_loss(pi, act)
-            loss = cos_loss  + scene_flow_loss + bc_loss + flow_consistency_loss # Stage 2 uses both
+            loss = cos_loss  + scene_flow_loss + bc_loss + flow_consistency_loss + flow_reg_loss# Stage 2 uses both
 
             optimizer.zero_grad()
             loss.backward()
