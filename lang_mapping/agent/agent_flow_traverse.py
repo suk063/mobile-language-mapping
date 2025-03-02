@@ -100,7 +100,7 @@ class Agent_point_flow_traverse(nn.Module):
         self.time_aggregation = LocalSelfAttentionFusion(feat_dim=voxel_feature_dim)
         self.feature_fusion = LocalSelfAttentionFusion(feat_dim=hidden_dim)
         
-        self.velocity_encoder = nn.Linear(3, voxel_feature_dim)
+        self.velocity_mlp = nn.Linear(2 * self.L * 3, voxel_feature_dim)
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
@@ -418,7 +418,7 @@ class Agent_point_flow_traverse(nn.Module):
         consistency_loss_hand_bwfw = F.mse_loss(pred_hand_bwfw, hand_coords_world_flat_p1)
         consistency_loss_head_bwfw = F.mse_loss(pred_head_bwfw, head_coords_world_flat_p1)
 
-        # 총 consistency loss
+        # consistency loss
         flow_consistency_loss = (
             consistency_loss_hand_fwbw + consistency_loss_head_fwbw +
             consistency_loss_hand_bwfw + consistency_loss_head_bwfw
@@ -432,50 +432,52 @@ class Agent_point_flow_traverse(nn.Module):
         )
         
         # -------------------------------------------------
-        # (1) Hand 쪽 time aggregation
+        # (1) Hand time aggregation
         # -------------------------------------------------
         # t → t+1
-        flow_hand_enc = self.velocity_encoder(flow_hand)             # [B*N, 120]
-        voxel_feat_tp1_pred_hand, _ = self.hash_voxel.query_voxel_feature(pred_hand_next)                                                            # [B*N, 120]
+        flow_hand_pe = positional_encoding(flow_hand, L=self.L)
+        flow_hand_enc = self.velocity_mlp(flow_hand_pe)   # [B*N, voxel_feature_dim]
+
+        voxel_feat_tp1_pred_hand, _ = self.hash_voxel.query_voxel_feature(pred_hand_next)                                                 # [B*N, 120]
 
         # [B*N, 120] -> [B, N, 120]
         flow_hand_enc_b = flow_hand_enc.view(B_, N, -1)
         voxel_feat_tp1_pred_hand_b = voxel_feat_tp1_pred_hand.view(B_, N, -1)
 
-        # time aggregation은 보통 [B, N, feat_dim] 형태의 입력을 기대
         tp1_aggregated_hand_b = self.time_aggregation(flow_hand_enc_b, voxel_feat_tp1_pred_hand_b)
-        # 출력도 [B, N, feat_dim]이므로, 다시 [B*N, feat_dim]으로 되돌림
         tp1_aggregated_hand = tp1_aggregated_hand_b.view(B_*N, -1)
 
         # t → t-1
         flow_hand_bw = self.hash_voxel.query_scene_flow_backward(
-            query_pts=hand_coords_world_flat,  # t 시점 좌표
+            query_pts=hand_coords_world_flat,  
             query_times=times_t_expanded
         )
+        flow_hand_bw_pe = positional_encoding(flow_hand_bw, L=self.L)
+        flow_hand_bw_enc = self.velocity_mlp(flow_hand_bw_pe)
+        
         pred_hand_m1 = hand_coords_world_flat + flow_hand_bw
-        flow_hand_bw_enc = self.velocity_encoder(flow_hand_bw)       # [B*N, 120]
-        voxel_feat_tm1_pred_hand, _ = self.hash_voxel.query_voxel_feature(pred_hand_m1)                                                            # [B*N, 120]
-
+        voxel_feat_tm1_pred_hand, _ = self.hash_voxel.query_voxel_feature(pred_hand_m1)                                                          
+        
         flow_hand_bw_enc_b = flow_hand_bw_enc.view(B_, N, -1)
         voxel_feat_tm1_pred_hand_b = voxel_feat_tm1_pred_hand.view(B_, N, -1)
 
         tm1_aggregated_hand_b = self.time_aggregation(flow_hand_bw_enc_b, voxel_feat_tm1_pred_hand_b)
         tm1_aggregated_hand = tm1_aggregated_hand_b.view(B_*N, -1)
 
-        # 최종적으로 현재 시점(t)의 voxel + t+1/t-1에서 가져온 voxel들을 가중합
         voxel_feat_aggregated_hand = (
-            0.5 * voxel_feat_for_points_hand
-            + 0.25 * tp1_aggregated_hand
-            + 0.25 * tm1_aggregated_hand
+            0.8 * voxel_feat_for_points_hand
+            + 0.1 * tp1_aggregated_hand
+            + 0.1 * tm1_aggregated_hand
         )
 
 
         # -------------------------------------------------
-        # (2) Head 쪽 time aggregation
+        # (2) Head time aggregation
         # -------------------------------------------------
-        flow_head_enc = self.velocity_encoder(flow_head)             # [B*N, 120]
+        flow_head_pe = positional_encoding(flow_head, L=self.L)
+        flow_head_enc = self.velocity_mlp(flow_head_pe)
+        
         voxel_feat_tp1_pred_head, _ = self.hash_voxel.query_voxel_feature(pred_head_next)                                                            # [B*N, 120]
-
         flow_head_enc_b = flow_head_enc.view(B_, N, -1)
         voxel_feat_tp1_pred_head_b = voxel_feat_tp1_pred_head.view(B_, N, -1)
 
@@ -484,11 +486,14 @@ class Agent_point_flow_traverse(nn.Module):
 
         # t → t-1
         flow_head_bw = self.hash_voxel.query_scene_flow_backward(
-            query_pts=head_coords_world_flat,  # t 시점 좌표
+            query_pts=head_coords_world_flat,  
             query_times=times_t_expanded
         )
+        
+        flow_head_bw_pe = positional_encoding(flow_head_bw, L=self.L)
+        flow_head_bw_enc = self.velocity_mlp(flow_head_bw_pe)
+        
         pred_head_m1 = head_coords_world_flat + flow_head_bw
-        flow_head_bw_enc = self.velocity_encoder(flow_head_bw)       # [B*N, 120]
         voxel_feat_tm1_pred_head, _ = self.hash_voxel.query_voxel_feature(pred_head_m1)                                                            # [B*N, 120]
 
         flow_head_bw_enc_b = flow_head_bw_enc.view(B_, N, -1)
@@ -498,9 +503,9 @@ class Agent_point_flow_traverse(nn.Module):
         tm1_aggregated_head = tm1_aggregated_head_b.view(B_*N, -1)
 
         voxel_feat_aggregated_head = (
-            0.5 * voxel_feat_for_points_head
-            + 0.25 * tp1_aggregated_head
-            + 0.25 * tm1_aggregated_head
+            0.8 * voxel_feat_for_points_head
+            + 0.1 * tp1_aggregated_head
+            + 0.1 * tm1_aggregated_head
         )
         # ------------------------------------------------------
         # Decoder at time t for cos_loss
@@ -674,9 +679,12 @@ class Agent_point_flow_traverse(nn.Module):
         pred_head_next = head_coords_world_flat + flow_head_fw
 
         # encoding of velocity
-        flow_hand_enc = self.velocity_encoder(flow_hand_fw)  # [B*N, 120]
-        flow_head_enc = self.velocity_encoder(flow_head_fw)
-
+        flow_hand_fw_pe = positional_encoding(flow_hand_fw, L=self.L)
+        flow_hand_enc = self.velocity_mlp(flow_hand_fw_pe)
+  
+        flow_head_fw_pe = positional_encoding(flow_head_fw, L=self.L)
+        flow_head_enc = self.velocity_mlp(flow_head_fw_pe)
+        
         # voxel feature at predicted next
         voxel_feat_tp1_pred_hand, _ = self.hash_voxel.query_voxel_feature(pred_hand_next)
         voxel_feat_tp1_pred_head, _ = self.hash_voxel.query_voxel_feature(pred_head_next)
@@ -706,8 +714,11 @@ class Agent_point_flow_traverse(nn.Module):
         pred_hand_prev = hand_coords_world_flat + flow_hand_bw
         pred_head_prev = head_coords_world_flat + flow_head_bw
 
-        flow_hand_bw_enc = self.velocity_encoder(flow_hand_bw)
-        flow_head_bw_enc = self.velocity_encoder(flow_head_bw)
+        flow_hand_bw_pe = positional_encoding(flow_hand_bw, L=self.L)
+        flow_hand_bw_enc = self.velocity_mlp(flow_hand_bw_pe)
+
+        flow_head_bw_pe = positional_encoding(flow_head_bw, L=self.L)
+        flow_head_bw_enc = self.velocity_mlp(flow_head_bw_pe)
 
         voxel_feat_tm1_pred_hand, _ = self.hash_voxel.query_voxel_feature(pred_hand_prev)
         voxel_feat_tm1_pred_head, _ = self.hash_voxel.query_voxel_feature(pred_head_prev)
@@ -722,16 +733,15 @@ class Agent_point_flow_traverse(nn.Module):
         tm1_aggregated_head_b = self.time_aggregation(flow_head_bw_enc_b, voxel_feat_tm1_pred_head_b)
         tm1_aggregated_head = tm1_aggregated_head_b.view(B_ * N, -1)
 
-        # 최종 Aggregation
         voxel_feat_aggregated_hand = (
-            0.5 * voxel_feat_for_points_hand
-            + 0.25 * tp1_aggregated_hand
-            + 0.25 * tm1_aggregated_hand
+            0.8 * voxel_feat_for_points_hand
+            + 0.1 * tp1_aggregated_hand
+            + 0.1 * tm1_aggregated_hand
         )
         voxel_feat_aggregated_head = (
-            0.5 * voxel_feat_for_points_head
-            + 0.25 * tp1_aggregated_head
-            + 0.25 * tm1_aggregated_head
+            0.8 * voxel_feat_for_points_head
+            + 0.1 * tp1_aggregated_head
+            + 0.1 * tm1_aggregated_head
         )
         
         # ------------------------------------------------------
