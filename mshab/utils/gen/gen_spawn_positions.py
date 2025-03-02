@@ -83,7 +83,7 @@ def make_env(scene_builder_cls) -> SceneManipulationEnv:
         reward_mode="normalized_dense",
         control_mode="pd_joint_delta_pos",
         render_mode="rgb_array",
-        shader_dir="default",
+        shader_dir="minimal",
         robot_uids="fetch",
         # time limit
         max_episode_steps=100,

@@ -49,7 +49,7 @@ class EnvConfig:
     make_env: bool = True
     obs_mode: str = "rgbd"
     render_mode: str = "all"
-    shader_dir: str = "default"
+    shader_dir: str = "minimal"
 
     continuous_task: bool = True
 

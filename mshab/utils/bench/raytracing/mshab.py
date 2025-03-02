@@ -25,7 +25,7 @@ env = gym.make(
     reward_mode=None,
     control_mode="pd_joint_delta_pos",
     render_mode=None,
-    shader_dir="default",
+    shader_dir="minimal",
     robot_uids="fetch_1cam",
     sim_backend="gpu",
     # time limit
