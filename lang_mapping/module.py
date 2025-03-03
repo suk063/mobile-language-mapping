@@ -146,7 +146,7 @@ class LocalSelfAttentionFusion(nn.Module):
 
 class LocalSelfAttentionFusionMulti(nn.Module):
     """
-    Fuses multiple features (e.g. [static, cond_time, cond_pose, cond_state]) via self-attention.
+    Fuses multiple features (e.g. [voxel_feat_t, voxel_feat_tp1, voxel_feat_tm1]) via self-attention.
     """
     def __init__(self, feat_dim=120, num_heads=8):
         super().__init__()
@@ -154,16 +154,25 @@ class LocalSelfAttentionFusionMulti(nn.Module):
         self.layernorm = nn.LayerNorm(feat_dim)
 
     def forward(self, feats_list):
-        # feats_list: each is (B, N, D). Stack along token dimension -> (B, N, T, D)
-        x = torch.stack(feats_list, dim=2)
+        """
+        Args:
+            feats_list: list of [B, N, D], 예: [feat_t, feat_tp1, feat_tm1]
+        Returns:
+            fused: [B, N, D], 첫 번째 토큰(현재 시점 토큰)에 해당하는 최종 어텐션 결과
+        """
+        x = torch.stack(feats_list, dim=2)  # [B, N, 3, D]
         B, N, T, D = x.shape
+
+        # (B*N, T, D) reshape
         x = x.view(B*N, T, D)
         y, _ = self.mha(x, x, x)
-        y = self.layernorm(y)
-        # Average over T tokens
-        fused = y.mean(dim=1).view(B, N, D)
-        return fused
+        y = self.layernorm(y)  # [B*N, T, D]
 
+        y0 = y[:, 0, :]        # [B*N, D]
+        fused = y0.view(B, N, D)  # [B, N, D]
+
+        return fused
+    
 class ActionMLP(nn.Module):
     """
     A feed-forward MLP for producing action outputs from a latent state vector.

@@ -248,7 +248,8 @@ class DPDataset(ClosableDataset):
                     success_cutoff = min(success.index(True) + 1, len(success))
                     del success
                 else:
-                    success_cutoff = len(act)
+                    # success_cutoff = len(act)
+                    success_cutoff = 100
 
                 # NOTE (arth): we always cache state obs and actions because they take up very little memory.
                 #       mostly constraints are on images, since those take up much more memory
