@@ -465,9 +465,9 @@ class Agent_point_flow_traverse(nn.Module):
         tm1_aggregated_hand = tm1_aggregated_hand_b.view(B_*N, -1)
 
         voxel_feat_aggregated_hand = (
-            0.8 * voxel_feat_for_points_hand
-            + 0.1 * tp1_aggregated_hand
-            + 0.1 * tm1_aggregated_hand
+            0.5 * voxel_feat_for_points_hand
+            + 0.25 * tp1_aggregated_hand
+            + 0.25 * tm1_aggregated_hand
         )
 
 
@@ -503,9 +503,9 @@ class Agent_point_flow_traverse(nn.Module):
         tm1_aggregated_head = tm1_aggregated_head_b.view(B_*N, -1)
 
         voxel_feat_aggregated_head = (
-            0.8 * voxel_feat_for_points_head
-            + 0.1 * tp1_aggregated_head
-            + 0.1 * tm1_aggregated_head
+            0.5 * voxel_feat_for_points_head
+            + 0.25 * tp1_aggregated_head
+            + 0.25 * tm1_aggregated_head
         )
         # ------------------------------------------------------
         # Decoder at time t for cos_loss
@@ -734,14 +734,14 @@ class Agent_point_flow_traverse(nn.Module):
         tm1_aggregated_head = tm1_aggregated_head_b.view(B_ * N, -1)
 
         voxel_feat_aggregated_hand = (
-            0.8 * voxel_feat_for_points_hand
-            + 0.1 * tp1_aggregated_hand
-            + 0.1 * tm1_aggregated_hand
+            0.5 * voxel_feat_for_points_hand
+            + 0.25 * tp1_aggregated_hand
+            + 0.25 * tm1_aggregated_hand
         )
         voxel_feat_aggregated_head = (
-            0.8 * voxel_feat_for_points_head
-            + 0.1 * tp1_aggregated_head
-            + 0.1 * tm1_aggregated_head
+            0.5 * voxel_feat_for_points_head
+            + 0.25 * tp1_aggregated_head
+            + 0.25 * tm1_aggregated_head
         )
         
         # ------------------------------------------------------
