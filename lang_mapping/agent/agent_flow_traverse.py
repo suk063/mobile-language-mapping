@@ -405,10 +405,10 @@ class Agent_point_flow_traverse(nn.Module):
         )
         
         flow_reg_loss = (
-            flow_hand_fw_t.pow(2).mean() +
-            flow_head_fw_t.pow(2).mean() +
-            flow_hand_bw_tp1.pow(2).mean() +
-            flow_head_bw_tp1.pow(2).mean()
+            flow_hand_fw_t.norm(dim=-1).mean()
+            + flow_head_fw_t.norm(dim=-1).mean()
+            + flow_hand_bw_tp1.norm(dim=-1).mean()
+            + flow_head_bw_tp1.norm(dim=-1).mean()
         )
         
         # -------------------------------------------------
