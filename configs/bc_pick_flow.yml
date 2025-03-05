@@ -76,10 +76,10 @@ algo:
   hidden_dim: 240
 
   # Pre-trained Weights
-  # pretrained_agent_path:  "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_agent.pt"
-  # pretrained_voxel_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_voxel.pt"
-  # pretrained_implicit_path: "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_implicit.pt"
-  # pretrained_optimizer_path:  "mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_optimizer.pt"
+  pretrained_agent_path:  "mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_agent.pt"
+  pretrained_voxel_path: "mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_voxel.pt"
+  pretrained_implicit_path: "mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_implicit.pt"
+  pretrained_optimizer_path:  "mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_optimizer.pt"
 
 
 logger:

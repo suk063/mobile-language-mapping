@@ -113,9 +113,8 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    stage1_cos_loss_weight: float = 0.5
-    stage2_cos_loss_weight: float = 0.005
-    stage2_linear_scheduling: bool = True
+    hidden_dim: int = 240
+    cos_loss_weight: float = 0.1
     dynamic_only: bool = True
 
     num_eval_envs: int = field(init=False)
@@ -384,7 +383,7 @@ def train(cfg: TrainConfig):
 
     implicit_decoder = ImplicitDecoder(
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
-        hidden_dim=256,
+        hidden_dim=cfg.algo.hidden_dim,
         output_dim=cfg.algo.clip_input_dim,
         L=10
     ).to(device)
@@ -399,6 +398,7 @@ def train(cfg: TrainConfig):
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
         state_mlp_dim=cfg.algo.state_mlp_dim,
+        hidden_dim=cfg.algo.hidden_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         max_time_steps=eval_envs.max_episode_steps + 1,
         hash_voxel=hash_voxel,
@@ -506,7 +506,7 @@ def train(cfg: TrainConfig):
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
             pi, cos_loss = agent(obs, subtask_labels, step_nums)
-            cos_loss = cfg.algo.stage1_cos_loss_weight * cos_loss
+            cos_loss = cfg.algo.cos_loss_weight * cos_loss
             loss = cos_loss  # Stage 1 uses only cos_loss
 
             optimizer.zero_grad()
@@ -569,18 +569,12 @@ def train(cfg: TrainConfig):
         agent.train()
         hash_voxel.train()
 
-        if cfg.algo.stage2_linear_scheduling:
-            linear_scale = 1.0 - epoch / cfg.algo.stage2_epochs
-            cos_loss_weight =  cfg.algo.stage2_cos_loss_weight * linear_scale
-        else:
-            cos_loss_weight =  cfg.algo.stage2_cos_loss_weight
-
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
             pi, cos_loss = agent(obs, subtask_labels, step_nums)
-            cos_loss = cos_loss_weight * cos_loss
+            cos_loss = cfg.algo.cos_loss_weight * cos_loss
             bc_loss = F.mse_loss(pi, act)
             loss = cos_loss + bc_loss  # Stage 2 uses both
 

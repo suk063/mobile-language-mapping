@@ -15,7 +15,7 @@ WORKSPACE="mshab_exps"
 GROUP=$TASK-rcad-bc-point-$SUBTASK
 EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-local-trajs_per_obj=$TRAJS_PER_OBJ"
 # shellcheck disable=SC2001
-PROJECT_NAME="MS-HAB-RCAD-bc-point"
+PROJECT_NAME="MS-HAB-RCAD-bc-point-time"
 
 WANDB=True
 TENSORBOARD=True
