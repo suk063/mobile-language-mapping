@@ -158,7 +158,7 @@ class LocalSelfAttentionFusionMulti(nn.Module):
         Args:
             feats_list: list of [B, N, D], 예: [feat_t, feat_tp1, feat_tm1]
         Returns:
-            fused: [B, N, D], 첫 번째 토큰(현재 시점 토큰)에 해당하는 최종 어텐션 결과
+            fused: [B, N, D]
         """
         x = torch.stack(feats_list, dim=2)  # [B, N, 3, D]
         B, N, T, D = x.shape
@@ -252,9 +252,9 @@ class ImplicitDecoder(nn.Module):
         Args:
             voxel_features (Tensor): [N, voxel_feature_dim=768].
             coords_3d (Tensor): [N, 3].
-            return_intermediate (bool): True면 (마지막-1 레이어 출력, 최종 출력)을 함께 반환.
+            return_intermediate (bool)
         Returns:
-            Tensor: [N, output_dim=768] (또는 (x4, out))
+            Tensor: [N, output_dim=768]
         """
         pe = positional_encoding(coords_3d, L=self.L)  # [N, pe_dim]
 
