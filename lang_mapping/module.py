@@ -262,22 +262,22 @@ class ImplicitDecoder(nn.Module):
         x = torch.cat([voxel_features, pe], dim=-1)
         x = F.relu(self.ln1(self.fc1(x)), inplace=True)
 
-        # 2) fc2
-        x = F.relu(self.ln2(self.fc2(x)), inplace=True)
+        x1 = x
 
-        # 3) fc3 (positional encoding 다시 결합)
+        # 2) fc2
+        x = F.relu(self.ln2(self.fc2(x1)), inplace=True)
+
+        # 3) fc3 
         x = torch.cat([x, pe], dim=-1)
         x = F.relu(self.ln3(self.fc3(x)), inplace=True)
         
-        x3 = x
-
         # 4) fc4
-        x = F.relu(self.ln4(self.fc4(x3)), inplace=True)
+        x = F.relu(self.ln4(self.fc4(x)), inplace=True)
 
-        # 5) fc5 (최종 출력)
+        # 5) fc5 
         out = self.fc5(x)
 
         if return_intermediate:
-            return x3, out
+            return x1, out
         else:
             return out
