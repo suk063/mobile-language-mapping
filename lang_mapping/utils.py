@@ -274,40 +274,47 @@ def chamfer_cosine_coverage_loss(
     loss = 1.0 - coverage
     return loss
 
-def chamfer_3d_weighted(pred_points, gt_points, pred_weights=None, threshold=1.0):
+def chamfer_3d_weighted(
+    pred_points: torch.Tensor,  # (B, N_pred, 3)
+    gt_points: torch.Tensor,    # (B, N_gt, 3)
+    mask_pred: torch.Tensor,    # (B, N_pred) -> True if dist <= 1m
+    mask_gt: torch.Tensor,      # (B, N_gt)   -> True if dist <= 1m
+    pred_weights: torch.Tensor = None,
+):
     """
-    A weighted Chamfer 3D function.
+    Computes Chamfer distance for points within 1m (mask==True).
+    - row2col + col2row
+    - No regularization term is included here.
+
     Args:
-        pred_points:    (B, N_pred, 3), predicted points.
-        gt_points:      (B, N_gt, 3), ground-truth points.
-        pred_weights:   (B, N_pred), scalar weights per predicted point.
-        threshold:      distance threshold to mask out large distances (optional).
+        pred_points: (B, N_pred, 3)
+        gt_points:   (B, N_gt, 3)
+        mask_pred:   (B, N_pred)
+        mask_gt:     (B, N_gt)
+        pred_weights:(B, N_pred), optional weighting
+
     Returns:
-        Weighted Chamfer distance (scalar).
+        chamfer_loss = row_loss + col_loss
     """
-    dist = torch.cdist(pred_points, gt_points, p=2)  # (B, N_pred, N_gt)
+    device = pred_points.device
+    # (B, N_pred, N_gt)
+    dist = torch.cdist(pred_points, gt_points, p=2)
 
-    # row2col: distance from each predicted point to its nearest GT
-    row2col_vals, _ = dist.min(dim=2)  # (B, N_pred)
+    # row2col
+    row2col_vals, row2col_idx = dist.min(dim=2)  # dist.shape = (B, N_pred, N_gt)
+    gt_valid_for_pred = torch.gather(mask_gt, 1, row2col_idx)  # (B, N_pred)
+    row_valid = mask_pred & gt_valid_for_pred
+    row2col_selected = row2col_vals[row_valid]
+    row_loss = row2col_selected.mean() if row2col_selected.numel() > 0 else torch.tensor(0.0, device=device)
 
-    # col2row: distance from each GT to its nearest predicted point
-    col2row_vals, _ = dist.min(dim=1)  # (B, N_gt)
+    # col2row (gt->pred)
+    col2row_vals, col2row_idx = dist.min(dim=1)  # (B, N_gt)
+    pred_valid_for_gt = torch.gather(mask_pred, 1, col2row_idx)  # (B, N_gt)
+    col_valid = mask_gt & pred_valid_for_gt
+    col2row_selected = col2row_vals[col_valid]
+    col_loss = col2row_selected.mean() if col2row_selected.numel() > 0 else torch.tensor(0.0, device=device)
 
-    # Apply threshold mask (optional)
-    row_mask = (row2col_vals <= threshold)
-    col_mask = (col2row_vals <= threshold)
-
-    # Weighted row2col (pred->GT)
-    # Only consider distances within threshold
-    valid_row2col = row2col_vals[row_mask]
-    # Multiply the corresponding weights
-    if pred_weights:
-        valid_weights = pred_weights[row_mask] ** 2
-        row_loss = (valid_row2col * valid_weights).mean() if valid_row2col.numel() > 0 else torch.tensor(0.0, device=dist.device)
-    else:
-        row_loss = valid_row2col.mean() if valid_row2col.numel() > 0 else torch.tensor(0.0, device=dist.device)
-
-    return row_loss
+    return row_loss + col_loss
 
 # Basic image transform
 transform = transforms.Compose([

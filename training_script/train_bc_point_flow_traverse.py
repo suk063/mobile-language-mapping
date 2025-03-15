@@ -107,6 +107,7 @@ class BCConfig:
     mod_time: int = 201
     trilinear_feat: bool = True
     trilinear_flow: bool = True
+    threshold_dist: float = 1.0
 
     # CLIP / Agent Settings
     clip_input_dim: int = 768
@@ -507,6 +508,7 @@ def train(cfg: TrainConfig):
         hidden_dim=cfg.algo.hidden_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         max_time_steps=eval_envs.max_episode_steps + 1,
+        threshold_dist=cfg.algo.threshold_dist,
         hash_voxel=hash_voxel,
         implicit_decoder=implicit_decoder
     ).to(device)
