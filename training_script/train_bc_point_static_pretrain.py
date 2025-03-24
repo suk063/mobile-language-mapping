@@ -604,10 +604,9 @@ def train(cfg: TrainConfig):
             p.requires_grad = False
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
-            subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            total_cos_loss = agent.forward_mapping(obs, subtask_labels, step_nums)
+            total_cos_loss = agent.forward_mapping(obs)
             loss = cfg.algo.cos_loss_weight * total_cos_loss
 
             optimizer.zero_grad()
@@ -662,7 +661,7 @@ def train(cfg: TrainConfig):
         hash_voxel.eval()
         implicit_decoder.eval()
 
-        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage3-Batch", unit="batch"):
+        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 

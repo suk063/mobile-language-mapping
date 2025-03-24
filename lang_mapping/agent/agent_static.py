@@ -95,7 +95,7 @@ class Agent_static(nn.Module):
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
 
-    def forward_mapping(self, observations, object_labels, step_nums):
+    def forward_mapping(self, observations):
         """
         Stage 1: Learn voxel and implicit decoder only. Returns total_cos_loss.
         CLIP is frozen (with torch.no_grad).
@@ -166,14 +166,14 @@ class Agent_static(nn.Module):
         )
 
         # Implicit decoding and cosine loss
-        dec_hand_feat, dec_hand_final = self.implicit_decoder(
-            voxel_feat_for_points_hand, hand_coords_world_flat, return_intermediate=True
+        dec_hand_final = self.implicit_decoder(
+            voxel_feat_for_points_hand, hand_coords_world_flat, return_intermediate=False
         )
         cos_sim_hand = F.cosine_similarity(dec_hand_final, feats_hand_flat, dim=-1)
         cos_loss_hand = 1.0 - cos_sim_hand.mean()
 
-        dec_head_feat, dec_head_final = self.implicit_decoder(
-            voxel_feat_for_points_head, head_coords_world_flat, return_intermediate=True
+        dec_head_final = self.implicit_decoder(
+            voxel_feat_for_points_head, head_coords_world_flat, return_intermediate=False
         )
         cos_sim_head = F.cosine_similarity(dec_head_final, feats_head_flat, dim=-1)
         cos_loss_head = 1.0 - cos_sim_head.mean()
