@@ -281,3 +281,55 @@ class ImplicitDecoder(nn.Module):
             return x1, out
         else:
             return out
+        
+class FlowTimeAggregator(nn.Module):
+    """
+    feats + positional_encoding(flow) → MLP → residual(feats + mlp_out)
+    """
+    def __init__(self, feat_dim=768,  hidden_dim=768, L=10):
+        super().__init__()
+        self.feat_dim = feat_dim
+        self.hidden_dim = hidden_dim
+        self.L = L
+
+        # flow용 PE 차원 = 2 * L * 3
+        self.flow_pe_dim = 2 * self.L * 3
+        self.mlp_in_dim = self.feat_dim + self.flow_pe_dim
+
+        self.mlp = nn.Sequential(
+            nn.Linear(self.mlp_in_dim, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.hidden_dim, self.feat_dim),
+            nn.LayerNorm(self.feat_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.feat_dim, self.feat_dim)
+        )
+    
+    def positional_encoding_3d(self, flow_3d):
+        # flow_3d: [N, 3]
+        # output: [N, 2*L*3]
+        N = flow_3d.shape[0]
+        pe_list = []
+        # 주파수 2^0, 2^1, ..., 2^(L-1)
+        freqs = 2.0 ** torch.arange(self.L, device=flow_3d.device)
+        for i in range(3):
+            v = flow_3d[:, i]  # shape: [N]
+            for f in freqs:
+                pe_list.append(torch.sin(f*v))
+                pe_list.append(torch.cos(f*v))
+        # 쌓은 뒤 [N, 2*L*3]
+        pe = torch.stack(pe_list, dim=1)
+        return pe
+
+    def forward(self, feats, flow_3d):
+        """
+        feats: [N, feat_dim]
+        flow_3d: [N, 3]
+        out: feats + mlp(feats||PE(flow))
+        """
+        pe_flow = self.positional_encoding_3d(flow_3d)  # [N, 2*L*3]
+        x = torch.cat([feats, pe_flow], dim=-1)         # [N, feat_dim + 2*L*3]
+        mlp_out = self.mlp(x)                           # [N, feat_dim]
+        out = feats + mlp_out                           # residual
+        return out

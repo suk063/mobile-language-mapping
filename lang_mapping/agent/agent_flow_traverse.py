@@ -6,7 +6,7 @@ from typing import Dict
 from scipy.optimize import linear_sum_assignment
 
 # Local imports
-from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder, LocalSelfAttentionFusionMulti
+from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder, LocalSelfAttentionFusionMulti, FlowTimeAggregator
 from ..mapper.mapper import VoxelHashTable
 from ..utils import positional_encoding, get_3d_coordinates, get_visual_features, chamfer_3d_weighted, transform
 
@@ -101,10 +101,16 @@ class Agent_point_flow_traverse(nn.Module):
         self.time_aggregation = LocalSelfAttentionFusionMulti(feat_dim=voxel_feature_dim)
         self.feature_fusion = LocalSelfAttentionFusion(feat_dim=hidden_dim)
         
-        self.flow_time_mlp = nn.Sequential(
-            nn.Linear(voxel_feature_dim + self.pe_dim, voxel_feature_dim),
-            nn.ReLU(),
-            nn.Linear(voxel_feature_dim, voxel_feature_dim),
+        # self.flow_time_mlp = nn.Sequential(
+        #     nn.Linear(voxel_feature_dim + self.pe_dim, voxel_feature_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(voxel_feature_dim, voxel_feature_dim),
+        # ).to(self.device)
+        
+        self.flow_time_agg = FlowTimeAggregator(
+            feat_dim=voxel_feature_dim,
+            hidden_dim=voxel_feature_dim,
+            L=self.L
         ).to(self.device)
 
         # Camera intrinsics
@@ -472,26 +478,31 @@ class Agent_point_flow_traverse(nn.Module):
         # Reshape flows to (B_*N, 3)
         flow_hand_fw_t_reshaped = flow_hand_fw_t.view(B_ * N, 3)  # forward flow
         flow_hand_bw_t_reshaped = flow_hand_bw_t.view(B_ * N, 3)  # backward flow
+        
+        # (a) 현재 시점(t): flow=0
+        zero_flow_hand = torch.zeros_like(flow_hand_fw_t_reshaped)
+        enc_hand_t  = self.flow_time_agg(voxel_feat_for_points_hand_reshaped, zero_flow_hand)
+
+        # (b) t+1
+        enc_hand_tp1 = self.flow_time_agg(voxel_feat_tp1_pred_hand_reshaped, flow_hand_fw_t_reshaped)
+        # (c) t-1
+        enc_hand_tm1 = self.flow_time_agg(voxel_feat_tm1_pred_hand_reshaped, -flow_hand_bw_t_reshaped)
 
         # Compute sinusoidal positional encoding for flows
         # For backward flow (t->t-1), we apply a negative sign
-        posenc_fw_hand = positional_encoding(flow_hand_fw_t_reshaped, L=self.L)
-        posenc_bw_hand = positional_encoding(-flow_hand_bw_t_reshaped, L=self.L)
+        # posenc_fw_hand = positional_encoding(flow_hand_fw_t_reshaped, L=self.L)
+        # posenc_bw_hand = positional_encoding(-flow_hand_bw_t_reshaped, L=self.L)
 
         # Concat voxel feature + flow encoding
-        fw_hand_cat = torch.cat([voxel_feat_tp1_pred_hand_reshaped, posenc_fw_hand], dim=-1)
-        bw_hand_cat = torch.cat([voxel_feat_tm1_pred_hand_reshaped, posenc_bw_hand], dim=-1)
+        # fw_hand_cat = torch.cat([voxel_feat_tp1_pred_hand_reshaped, posenc_fw_hand], dim=-1)
+        # bw_hand_cat = torch.cat([voxel_feat_tm1_pred_hand_reshaped, posenc_bw_hand], dim=-1)
 
         # Pass each concatenated feature through the 2-layer MLP
-        fw_hand_enc = self.flow_time_mlp(fw_hand_cat)
-        bw_hand_enc = self.flow_time_mlp(bw_hand_cat)
+        # fw_hand_enc = self.flow_time_mlp(fw_hand_cat)
+        # bw_hand_enc = self.flow_time_mlp(bw_hand_cat)
 
         # Combine original voxel_feat_for_points_hand + two new features (0.5 : 0.25 : 0.25)
-        voxel_feat_aggregated_hand = (
-            0.5 * voxel_feat_for_points_hand_reshaped +
-            0.25 * fw_hand_enc +
-            0.25 * bw_hand_enc
-        )
+        voxel_feat_aggregated_hand = 0.5 * enc_hand_t + 0.25 * enc_hand_tp1 + 0.25 * enc_hand_tm1
 
         voxel_feat_for_points_head_reshaped = voxel_feat_for_points_head.view(B_ * N, -1)
         voxel_feat_tp1_pred_head_reshaped   = voxel_feat_tp1_pred_head.view(B_ * N, -1)
@@ -499,21 +510,29 @@ class Agent_point_flow_traverse(nn.Module):
 
         flow_head_fw_t_reshaped = flow_head_fw_t.view(B_ * N, 3)
         flow_head_bw_t_reshaped = flow_head_bw_t.view(B_ * N, 3)
+        
+        zero_flow_head = torch.zeros_like(flow_head_fw_t_reshaped)
+        enc_head_t  = self.flow_time_agg(voxel_feat_for_points_head_reshaped, zero_flow_head)
+        enc_head_tp1 = self.flow_time_agg(voxel_feat_tp1_pred_head_reshaped, flow_head_fw_t_reshaped)
+        enc_head_tm1 = self.flow_time_agg(voxel_feat_tm1_pred_head_reshaped, -flow_head_bw_t_reshaped)
 
-        posenc_fw_head = positional_encoding(flow_head_fw_t_reshaped, L=self.L)
-        posenc_bw_head = positional_encoding(-flow_head_bw_t_reshaped, L=self.L)
+        voxel_feat_aggregated_head = 0.5 * enc_head_t + 0.25 * enc_head_tp1 + 0.25 * enc_head_tm1
 
-        fw_head_cat = torch.cat([voxel_feat_tp1_pred_head_reshaped, posenc_fw_head], dim=-1)
-        bw_head_cat = torch.cat([voxel_feat_tm1_pred_head_reshaped, posenc_bw_head], dim=-1)
+        # posenc_fw_head = positional_encoding(flow_head_fw_t_reshaped, L=self.L)
+        # posenc_bw_head = positional_encoding(-flow_head_bw_t_reshaped, L=self.L)
 
-        fw_head_enc = self.flow_time_mlp(fw_head_cat)
-        bw_head_enc = self.flow_time_mlp(bw_head_cat)
+        # fw_head_cat = torch.cat([voxel_feat_tp1_pred_head_reshaped, posenc_fw_head], dim=-1)
+        # bw_head_cat = torch.cat([voxel_feat_tm1_pred_head_reshaped, posenc_bw_head], dim=-1)
 
-        voxel_feat_aggregated_head = (
-            0.5 * voxel_feat_for_points_head_reshaped +
-            0.25 * fw_head_enc +
-            0.25 * bw_head_enc
-        )
+        # fw_head_enc = self.flow_time_mlp(fw_head_cat)
+        # bw_head_enc = self.flow_time_mlp(bw_head_cat)
+
+        # voxel_feat_aggregated_head = (
+        #     0.5 * voxel_feat_for_points_head_reshaped +
+        #     0.25 * fw_head_enc +
+        #     0.25 * bw_head_enc
+        # )
+        
         
         # ------------------------------------------------------
         # Decoder at time t for cos_loss
@@ -709,21 +728,28 @@ class Agent_point_flow_traverse(nn.Module):
 
         flow_hand_fw_t_reshaped = flow_hand_fw_t.view(B_ * N, 3)
         flow_hand_bw_t_reshaped = flow_hand_bw_t.view(B_ * N, 3)
+        
+        zero_flow_hand = torch.zeros_like(flow_hand_fw_t_reshaped)
+        enc_hand_t = self.flow_time_agg(voxel_feat_for_points_hand_reshaped, zero_flow_hand)
+        enc_hand_tp1 = self.flow_time_agg(voxel_feat_tp1_pred_hand_reshaped, flow_hand_fw_t_reshaped)
+        enc_hand_tm1 = self.flow_time_agg(voxel_feat_tm1_pred_hand_reshaped, -flow_hand_bw_t_reshaped)
+        
+        voxel_feat_aggregated_hand = 0.5 * enc_hand_t + 0.25 * enc_hand_tp1 + 0.25 * enc_hand_tm1
 
-        posenc_fw_hand = positional_encoding(flow_hand_fw_t_reshaped, L=self.L)
-        posenc_bw_hand = positional_encoding(-flow_hand_bw_t_reshaped, L=self.L)
+        # posenc_fw_hand = positional_encoding(flow_hand_fw_t_reshaped, L=self.L)
+        # posenc_bw_hand = positional_encoding(-flow_hand_bw_t_reshaped, L=self.L)
 
-        fw_hand_cat = torch.cat([voxel_feat_tp1_pred_hand_reshaped, posenc_fw_hand], dim=-1)
-        bw_hand_cat = torch.cat([voxel_feat_tm1_pred_hand_reshaped, posenc_bw_hand], dim=-1)
+        # fw_hand_cat = torch.cat([voxel_feat_tp1_pred_hand_reshaped, posenc_fw_hand], dim=-1)
+        # bw_hand_cat = torch.cat([voxel_feat_tm1_pred_hand_reshaped, posenc_bw_hand], dim=-1)
 
-        fw_hand_enc = self.flow_time_mlp(fw_hand_cat)
-        bw_hand_enc = self.flow_time_mlp(bw_hand_cat)
+        # fw_hand_enc = self.flow_time_mlp(fw_hand_cat)
+        # bw_hand_enc = self.flow_time_mlp(bw_hand_cat)
 
-        voxel_feat_aggregated_hand = (
-            0.5 * voxel_feat_for_points_hand_reshaped +
-            0.25 * fw_hand_enc +
-            0.25 * bw_hand_enc
-        )
+        # voxel_feat_aggregated_hand = (
+        #     0.5 * voxel_feat_for_points_hand_reshaped +
+        #     0.25 * fw_hand_enc +
+        #     0.25 * bw_hand_enc
+        # )
 
         # Reshape for the head
         voxel_feat_for_points_head_reshaped = voxel_feat_for_points_head.view(B_ * N, -1)
@@ -732,21 +758,29 @@ class Agent_point_flow_traverse(nn.Module):
 
         flow_head_fw_t_reshaped = flow_head_fw_t.view(B_ * N, 3)
         flow_head_bw_t_reshaped = flow_head_bw_t.view(B_ * N, 3)
+        
+        zero_flow_head = torch.zeros_like(flow_head_fw_t_reshaped)
 
-        posenc_fw_head = positional_encoding(flow_head_fw_t_reshaped, L=self.L)
-        posenc_bw_head = positional_encoding(-flow_head_bw_t_reshaped, L=self.L)
+        enc_head_t = self.flow_time_agg(voxel_feat_for_points_head_reshaped, zero_flow_head)
+        enc_head_tp1 = self.flow_time_agg(voxel_feat_tp1_pred_head_reshaped, flow_head_fw_t_reshaped)
+        enc_head_tm1 = self.flow_time_agg(voxel_feat_tm1_pred_head_reshaped, -flow_head_bw_t_reshaped)
+        
+        voxel_feat_aggregated_head = 0.5 * enc_head_t + 0.25 * enc_head_tp1 + 0.25 * enc_head_tm1
 
-        fw_head_cat = torch.cat([voxel_feat_tp1_pred_head_reshaped, posenc_fw_head], dim=-1)
-        bw_head_cat = torch.cat([voxel_feat_tm1_pred_head_reshaped, posenc_bw_head], dim=-1)
+        # posenc_fw_head = positional_encoding(flow_head_fw_t_reshaped, L=self.L)
+        # posenc_bw_head = positional_encoding(-flow_head_bw_t_reshaped, L=self.L)
 
-        fw_head_enc = self.flow_time_mlp(fw_head_cat)
-        bw_head_enc = self.flow_time_mlp(bw_head_cat)
+        # fw_head_cat = torch.cat([voxel_feat_tp1_pred_head_reshaped, posenc_fw_head], dim=-1)
+        # bw_head_cat = torch.cat([voxel_feat_tm1_pred_head_reshaped, posenc_bw_head], dim=-1)
 
-        voxel_feat_aggregated_head = (
-            0.5 * voxel_feat_for_points_head_reshaped +
-            0.25 * fw_head_enc +
-            0.25 * bw_head_enc
-        )
+        # fw_head_enc = self.flow_time_mlp(fw_head_cat)
+        # bw_head_enc = self.flow_time_mlp(bw_head_cat)
+
+        # voxel_feat_aggregated_head = (
+        #     0.5 * voxel_feat_for_points_head_reshaped +
+        #     0.25 * fw_head_enc +
+        #     0.25 * bw_head_enc
+        # )
         
         # ------------------------------------------------------
         # 7. Implicit Decoder

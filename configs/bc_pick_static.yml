@@ -4,7 +4,7 @@ eval_env:
   make_env: True
 
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 1
+  num_envs: 63
   max_episode_steps: 500
  
   continuous_task: True
@@ -16,6 +16,9 @@ eval_env:
   stationary_base: False
   stationary_torso: False
   stationary_head: True
+
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all.json
+  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt"
 
   record_video: False
   info_on_video: True
@@ -31,11 +34,10 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 16
+  batch_size: 4
 
-  stage1_epochs: 1
+  stage1_epochs: 3
   stage2_epochs: 15
-  stage3_epochs: 0
 
   eval_freq: 1
   log_freq: 1
@@ -57,31 +59,22 @@ algo:
   scene_bound_min: [-2.6, -8.1, 0.0]
   scene_bound_max: [4.6, 4.7, 3.1]
   mod_time: 201
-  trilinear_feat: False
-  trilinear_flow: True
-  threshold_dist: 0.25
 
   # CLIP / Agent Settings
   clip_input_dim: 768
   open_clip_model_name: "EVA02-L-14"
   open_clip_model_pretrained: "merged2b_s4b_b131k"
   text_input: ["bowl", "apple"]
-  # text_input: ["apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   state_mlp_dim: 1024
   temporal_emb_dim: 120
-  scene_flow_loss_weight: 0.1
   cos_loss_weight: 0.02
-  flow_cos_loss_weight: 0.2
-  flow_reg_loss_weight: 0.01
-  bc_loss_weight: 2
-  hidden_dim: 240
 
   # Pre-trained Weights
-  pretrained_agent_path:  "mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_agent.pt"
-  pretrained_voxel_path: "mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_voxel.pt"
-  pretrained_implicit_path: "mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_implicit.pt"
-  pretrained_optimizer_path:  "mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-flow-pick/bc-pick-all-local-trajs_per_obj=1000/models/latest_optimizer.pt"
+  # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage1-final_agent.pt"
+  # pretrained_voxel_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1/models/stage1-final_voxel.pt"
+  # pretrained_implicit_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1/models/stage1-final_implicit.pt"
+  # pretrained_optimizer_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1/models/stage1-final_optimizer.pt"
 
 
 logger:

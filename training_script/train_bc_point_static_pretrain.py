@@ -4,7 +4,7 @@ import random
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import h5py
 from dacite import from_dict
@@ -16,16 +16,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-import plotly.graph_objects as go
-
 
 # ManiSkill imports
 import mani_skill.envs
 from mani_skill.utils import common
 
-from lang_mapping.agent.agent_flow_traverse import Agent_point_flow_traverse
+from lang_mapping.agent.agent_static import Agent_static
 from lang_mapping.module import ImplicitDecoder
-from lang_mapping.mapper.mapper_flow_traverse import VoxelHashTableFlowTraverse
+from lang_mapping.mapper.mapper import VoxelHashTable
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
@@ -33,560 +31,7 @@ from mshab.utils.dataset import ClosableDataLoader, ClosableDataset
 from mshab.utils.logger import Logger, LoggerConfig
 from mshab.utils.time import NonOverlappingTimeProfiler
 
-def visualize_scene_flow_plotly(
-    agent,
-    dataset,
-    device,
-    max_frames=50,
-    out_html="scene_flow_viz.html",
-    flow_threshold=0.01
-):
-    """
-    Hand + Head 각각의 RGB/Depth/Pose를 이용해 3D 좌표를 생성하고,
-    원본 RGB 색상으로 (모든) point를 표시하며,
-    flow 벡터가 특정 threshold 이상일 때만 rainbow 라인으로 그린다.
 
-    - (중요) RGB는 224x224 모든 점 시각화
-    - scene flow는 stride로 downsample된 점만 시각화
-
-    scene_bound_min / scene_bound_max를 이용해
-    (1) 점을 클리핑(범위 밖 제외)
-    (2) Plotly 3D 축 범위를 고정 + 실제 길이 비율로 스케일링
-    (x,y,z 축 중 가장 긴 축은 실제로 더 크게 그림)
-    """
-    from lang_mapping.utils import get_3d_coordinates, transform, get_visual_features
-    import numpy as np
-    import plotly.graph_objects as go
-    import torch
-    import torch.nn.functional as F
-
-    # scene bound (np.array)
-    bound_min = np.array([-2.6, -8.1, 0.0])  
-    bound_max = np.array([4.6, 4.7, 3.1])   
-
-    frames_data = []
-    frame_names = []
-
-    # for frame_idx, (obs, act, subtask_uid, step_num) in enumerate(dataset):
-    #     if frame_idx >= max_frames:
-    #         break
-
-    #     #### 1) Hand + Head 각각 RGB/Depth/Pose 읽기 ####
-    #     # batch=1 가정
-    #     hand_rgb_raw = obs["pixels"]["fetch_hand_rgb"]  # [1,224,224,3]
-    #     head_rgb_raw = obs["pixels"]["fetch_head_rgb"]  # [1,224,224,3]
-
-    #     hand_depth = obs["pixels"]["fetch_hand_depth"].float().to(device)  # [1,224,224]
-    #     head_depth = obs["pixels"]["fetch_head_depth"].float().to(device)
-
-    #     hand_pose = obs["pixels"]["fetch_hand_pose"].float().to(device)    # [1,4,4]
-    #     head_pose = obs["pixels"]["fetch_head_pose"].float().to(device)
-
-    #     # 카메라 파라미터
-    #     fx, fy, cx, cy = agent.fx, agent.fy, agent.cx, agent.cy
-
-    #     # ---- RGB / Depth 전처리 ----
-    #     # (B=1, H=224, W=224, C=3) -> (B=1, C=3, H=224, W=224)
-    #     hand_rgb = hand_rgb_raw.permute(0,3,1,2).float().to(device)
-    #     head_rgb = head_rgb_raw.permute(0,3,1,2).float().to(device)
-
-    #     # depth: mm->m 후 [1,1,224,224] 로 reshape
-    #     hand_depth = (hand_depth / 1000.0).unsqueeze(1)
-    #     head_depth = (head_depth / 1000.0).unsqueeze(1)
-
-    #     # downsample은 scene flow 계산을 위해 (예: 16×16)만 사용
-    #     hand_depth_small = F.interpolate(hand_depth, (16,16), mode="nearest")
-    #     head_depth_small = F.interpolate(head_depth, (16,16), mode="nearest")
-
-    #     # transform (clip)
-    #     from lang_mapping.utils import transform
-    #     hand_rgb = transform(hand_rgb / 255.0)
-    #     head_rgb = transform(head_rgb / 255.0)
-
-    #     # 로봇 state
-    #     state = obs["state"].float().to(device)
-
-    #     # 2) CLIP feature 추출
-    #     with torch.no_grad():
-    #         hand_visfeat = get_visual_features(agent.clip_model, hand_rgb)  # [1, clip_dim, Hf, Wf]
-    #         head_visfeat = get_visual_features(agent.clip_model, head_rgb)
-
-    #     # 3) 3D 좌표 계산 (downsample된 depth 사용)
-    #     from lang_mapping.utils import get_3d_coordinates
-    #     hand_coords_world, _ = get_3d_coordinates(
-    #         hand_visfeat, hand_depth_small, hand_pose, fx, fy, cx, cy
-    #     )  # [1, 3, Hf, Wf]
-    #     head_coords_world, _ = get_3d_coordinates(
-    #         head_visfeat, head_depth_small, head_pose, fx, fy, cx, cy
-    #     )
-
-    #     # ---- Flatten (scene flow 계산용) ----
-    #     B_, clip_dim, Hf, Wf = hand_visfeat.shape
-    #     N = Hf * Wf
-
-    #     coords_world_hand = hand_coords_world.permute(0,2,3,1).reshape(N,3)  
-    #     coords_world_head = head_coords_world.permute(0,2,3,1).reshape(N,3)
-
-    #     feats_hand = hand_visfeat.permute(0,2,3,1).reshape(N, clip_dim)
-    #     feats_head = head_visfeat.permute(0,2,3,1).reshape(N, clip_dim)
-
-    #     # time step + state
-    #     t_t = torch.tensor([step_num]*N, dtype=torch.long, device=device)
-    #     expanded_state = state.unsqueeze(1).expand(-1,N).reshape(N, -1)  # (N, state_dim)
-
-    #     # 4) scene flow query (stride 적용 예정)
-    #     flow_hand_t = agent.hash_voxel.query_scene_flow_forward(
-    #         query_pts=coords_world_hand,
-    #         query_times=t_t,
-    #         feats=feats_hand,
-    #         state=expanded_state
-    #     )
-    #     flow_head_t = agent.hash_voxel.query_scene_flow_forward(
-    #         query_pts=coords_world_head,
-    #         query_times=t_t,
-    #         feats=feats_head,
-    #         state=expanded_state
-    #     )
-
-    #     flow_hand = flow_hand_t.detach().cpu().numpy()  # (N,3)
-    #     flow_head = flow_head_t.detach().cpu().numpy()  # (N,3)
-
-    #     coords_hand_np = coords_world_hand.detach().cpu().numpy()  # (N,3)
-    #     coords_head_np = coords_world_head.detach().cpu().numpy()
-
-    #     # ---- (A) 모든 픽셀에 대한 3D coords + rgb ----
-    #     #    여기서 depth는 원본 [224,224], rgb는 원본(224x224)
-    #     #    get_3d_coordinates()를 224x224 전부 계산해도 되지만,
-    #     #    이미 small depth로 coords를 구했으므로, "색을 표시할 점"은
-    #     #    실제로는 성능상 크게 문제 없다면 한 번 더 구해도 됩니다.
-    #     #    여기서는 "coords_world_hand"가 low-res니까,
-    #     #    224×224 전체를 다시 구하려면 get_3d_coordinates() 재호출해야 함.
-    #     #    간단히 "시각화 시에는, color용 점 클라우드를 high-res depth로 계산" 
-    #     #    로직을 별도로 추가하는 방식을 예시로 보여드립니다.
-
-    #     # (A-1) high-res depth -> get_3d_coordinates
-    #     #       -> size=(1,3,224,224)
-    #     with torch.no_grad():
-    #         dummy_clip = torch.ones((1,1,224,224), device=device)
-    #         hand_coords_world_high, _ = get_3d_coordinates(
-    #             dummy_clip, hand_depth, hand_pose, fx, fy, cx, cy
-    #         )
-    #         head_coords_world_high, _ = get_3d_coordinates(
-    #             dummy_clip, head_depth, head_pose, fx, fy, cx, cy
-    #         )
-    #     hand_coords_world_high = (
-    #         hand_coords_world_high
-    #         .squeeze(0)
-    #         .permute(1,2,0)
-    #         .reshape(-1,3)
-    #         .detach()
-    #         .cpu()
-    #         .numpy()   # <-- 여기가 핵심
-    #     )
-    #     head_coords_world_high = (
-    #         head_coords_world_high
-    #         .squeeze(0)
-    #         .permute(1,2,0)
-    #         .reshape(-1,3)
-    #         .detach()
-    #         .cpu()
-    #         .numpy()
-    #     )
-
-    #     # (A-2) RGB flatten
-    #     rgb_hand_np = hand_rgb_raw[0].cpu().numpy()  # shape (224,224,3)
-    #     rgb_hand_flat = rgb_hand_np.reshape(-1,3)     # (224*224, 3)
-    #     rgb_head_np = head_rgb_raw[0].cpu().numpy()
-    #     rgb_head_flat = rgb_head_np.reshape(-1,3)
-
-    #     # 컬러 문자열
-    #     phand_colors = [
-    #         f"rgb({int(r)},{int(g)},{int(b)})"
-    #         for (r,g,b) in rgb_hand_flat
-    #     ]
-    #     phead_colors = [
-    #         f"rgb({int(r)},{int(g)},{int(b)})"
-    #         for (r,g,b) in rgb_head_flat
-    #     ]
-
-    #     # (A-3) Plotly scatter3d (모든 점)
-    #     scatter_hand = go.Scatter3d(
-    #         x=hand_coords_world_high[:,0],
-    #         y=hand_coords_world_high[:,1],
-    #         z=hand_coords_world_high[:,2],
-    #         mode='markers',
-    #         marker=dict(size=2, color=phand_colors),
-    #         name="Hand Points(All)"
-    #     )
-    #     scatter_head = go.Scatter3d(
-    #         x=head_coords_world_high[:,0],
-    #         y=head_coords_world_high[:,1],
-    #         z=head_coords_world_high[:,2],
-    #         mode='markers',
-    #         marker=dict(size=2, color=phead_colors),
-    #         name="Head Points(All)"
-    #     )
-
-    #     # ---- (B) Scene flow (stride 샘플링) ----
-
-    #     # Hand flow
-    #     xh, yh, zh = [], [], []
-    #     col_h = []
-    #     flow_scale = 3.0
-
-    #     for i in range(coords_hand_np.shape[0]):
-    #         vx, vy, vz = flow_hand[i]
-    #         length = np.sqrt(vx**2 + vy**2 + vz**2)
-    #         if length < flow_threshold:
-    #             continue
-
-    #         # start
-    #         xh.append(coords_hand_np[i,0])
-    #         yh.append(coords_hand_np[i,1])
-    #         zh.append(coords_hand_np[i,2])
-    #         col_h.append(i)
-
-    #         # end
-    #         xh.append(coords_hand_np[i,0] + flow_scale*vx)
-    #         yh.append(coords_hand_np[i,1] + flow_scale*vy)
-    #         zh.append(coords_hand_np[i,2] + flow_scale*vz)
-    #         col_h.append(i)
-
-    #         # break
-    #         xh.append(None)
-    #         yh.append(None)
-    #         zh.append(None)
-    #         col_h.append(i)
-
-    #     flow_hand_trace = go.Scatter3d(
-    #         x=xh, y=yh, z=zh,
-    #         mode='lines',
-    #         line=dict(width=5, color=col_h, colorscale='Rainbow',
-    #                   cmin=0, cmax=max(1, coords_hand_np.shape[0])),
-    #         name="Hand Flow", showlegend=False
-    #     )
-
-    #     # Head flow
-    #     xhd, yhd, zhd = [], [], []
-    #     col_hd = []
-    #     for i in range(coords_head_np.shape[0]):
-    #         vx, vy, vz = flow_head[i]
-    #         length = np.sqrt(vx**2 + vy**2 + vz**2)
-    #         if length < flow_threshold:
-    #             continue
-
-    #         xhd.append(coords_head_np[i,0])
-    #         yhd.append(coords_head_np[i,1])
-    #         zhd.append(coords_head_np[i,2])
-    #         col_hd.append(i)
-
-    #         xhd.append(coords_head_np[i,0] + flow_scale*vx)
-    #         yhd.append(coords_head_np[i,1] + flow_scale*vy)
-    #         zhd.append(coords_head_np[i,2] + flow_scale*vz)
-    #         col_hd.append(i)
-
-    #         xhd.append(None)
-    #         yhd.append(None)
-    #         zhd.append(None)
-    #         col_hd.append(i)
-
-    #     flow_head_trace = go.Scatter3d(
-    #         x=xhd, y=yhd, z=zhd,
-    #         mode='lines',
-    #         line=dict(width=10, color=col_hd, colorscale='Rainbow',
-    #                   cmin=0, cmax=max(1, coords_head_np.shape[0])),
-    #         name="Head Flow", showlegend=False
-    #     )
-
-    #     frames_data.append(go.Frame(
-    #         data=[scatter_hand, scatter_head, flow_hand_trace, flow_head_trace],
-    #         name=f"frame_{frame_idx}"
-    #     ))
-    #     frame_names.append(f"frame_{frame_idx}")
-
-    # if not frames_data:
-    #     print("No frames to visualize.")
-    #     return
-    for frame_idx, (obs, act, subtask_uid, step_num) in enumerate(dataset):
-        if frame_idx >= max_frames:
-            break
-
-        #### 1) Hand + Head 각각 RGB/Depth/Pose 읽기 ####
-        # batch=1 가정
-        hand_rgb_raw = obs["pixels"]["fetch_hand_rgb"]  # [1,224,224,3]
-        head_rgb_raw = obs["pixels"]["fetch_head_rgb"]  # [1,224,224,3]
-
-        hand_depth = obs["pixels"]["fetch_hand_depth"].float().to(device)  # [1,224,224]
-        head_depth = obs["pixels"]["fetch_head_depth"].float().to(device)
-
-        hand_pose = obs["pixels"]["fetch_hand_pose"].float().to(device)    # [1,4,4]
-        head_pose = obs["pixels"]["fetch_head_pose"].float().to(device)
-
-        # 카메라 파라미터
-        fx, fy, cx, cy = agent.fx, agent.fy, agent.cx, agent.cy
-
-        # ---- RGB / Depth 전처리 ----
-        # (B=1, H=224, W=224, C=3) -> (B=1, C=3, H=224, W=224)
-        hand_rgb = hand_rgb_raw.permute(0,3,1,2).float().to(device)
-        head_rgb = head_rgb_raw.permute(0,3,1,2).float().to(device)
-
-        # depth: mm->m 후 [1,1,224,224] 로 reshape
-        hand_depth = (hand_depth / 1000.0).unsqueeze(1)
-        head_depth = (head_depth / 1000.0).unsqueeze(1)
-
-        # downsample은 scene flow 계산을 위해 (예: 16×16)만 사용
-        hand_depth_small = F.interpolate(hand_depth, (16,16), mode="nearest")
-        head_depth_small = F.interpolate(head_depth, (16,16), mode="nearest")
-
-        # transform (clip)
-        from lang_mapping.utils import transform
-        hand_rgb = transform(hand_rgb / 255.0)
-        head_rgb = transform(head_rgb / 255.0)
-
-        # 로봇 state
-        state = obs["state"].float().to(device)
-
-        # 2) CLIP feature 추출 (현재 해시 구조에는 feats 전달이 필요 없으나, 여기서는 시각화용으로 추출)
-        with torch.no_grad():
-            hand_visfeat = get_visual_features(agent.clip_model, hand_rgb)  # [1, clip_dim, Hf, Wf]
-            head_visfeat = get_visual_features(agent.clip_model, head_rgb)
-
-        # 3) 3D 좌표 계산 (downsample된 depth 사용)
-        from lang_mapping.utils import get_3d_coordinates
-        hand_coords_world, _ = get_3d_coordinates(
-            hand_visfeat, hand_depth_small, hand_pose, fx, fy, cx, cy
-        )  # [1, 3, Hf, Wf]
-        head_coords_world, _ = get_3d_coordinates(
-            head_visfeat, head_depth_small, head_pose, fx, fy, cx, cy
-        )
-
-        # ---- Flatten (scene flow 계산용) ----
-        B_, clip_dim, Hf, Wf = hand_visfeat.shape
-        N = Hf * Wf
-
-        coords_world_hand = hand_coords_world.permute(0,2,3,1).reshape(N,3)
-        coords_world_head = head_coords_world.permute(0,2,3,1).reshape(N,3)
-
-        # time step + state (현재 해시 구조에는 state 전달 X)
-        t_t = torch.tensor([step_num]*N, dtype=torch.long, device=device)
-
-        # 4) scene flow query (stride 적용 예정)
-        # 최신 구조에서는 feats, state 인자를 넘기지 않음
-        flow_hand_t = agent.hash_voxel.query_scene_flow_forward(
-            query_pts=coords_world_hand,
-            query_times=t_t
-        )
-        flow_head_t = agent.hash_voxel.query_scene_flow_forward(
-            query_pts=coords_world_head,
-            query_times=t_t
-        )
-
-        flow_hand = flow_hand_t.detach().cpu().numpy()  # (N,3)
-        flow_head = flow_head_t.detach().cpu().numpy()  # (N,3)
-
-        coords_hand_np = coords_world_hand.detach().cpu().numpy()  # (N,3)
-        coords_head_np = coords_world_head.detach().cpu().numpy()
-
-        # ---- (A) 모든 픽셀에 대한 3D coords + rgb ----
-        #    여기서는 depth를 원본 [224,224]로 다시 구해서 색상을 입힘
-        with torch.no_grad():
-            dummy_clip = torch.ones((1,1,224,224), device=device)
-            hand_coords_world_high, _ = get_3d_coordinates(
-                dummy_clip, hand_depth, hand_pose, fx, fy, cx, cy
-            )
-            head_coords_world_high, _ = get_3d_coordinates(
-                dummy_clip, head_depth, head_pose, fx, fy, cx, cy
-            )
-        hand_coords_world_high = (
-            hand_coords_world_high
-            .squeeze(0)
-            .permute(1,2,0)
-            .reshape(-1,3)
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        head_coords_world_high = (
-            head_coords_world_high
-            .squeeze(0)
-            .permute(1,2,0)
-            .reshape(-1,3)
-            .detach()
-            .cpu()
-            .numpy()
-        )
-
-        rgb_hand_np = hand_rgb_raw[0].cpu().numpy()  # shape (224,224,3)
-        rgb_hand_flat = rgb_hand_np.reshape(-1,3)     # (224*224, 3)
-        rgb_head_np = head_rgb_raw[0].cpu().numpy()
-        rgb_head_flat = rgb_head_np.reshape(-1,3)
-
-        phand_colors = [
-            f"rgb({int(r)},{int(g)},{int(b)})"
-            for (r,g,b) in rgb_hand_flat
-        ]
-        phead_colors = [
-            f"rgb({int(r)},{int(g)},{int(b)})"
-            for (r,g,b) in rgb_head_flat
-        ]
-
-        scatter_hand = go.Scatter3d(
-            x=hand_coords_world_high[:,0],
-            y=hand_coords_world_high[:,1],
-            z=hand_coords_world_high[:,2],
-            mode='markers',
-            marker=dict(size=2, color=phand_colors),
-            name="Hand Points(All)"
-        )
-        scatter_head = go.Scatter3d(
-            x=head_coords_world_high[:,0],
-            y=head_coords_world_high[:,1],
-            z=head_coords_world_high[:,2],
-            mode='markers',
-            marker=dict(size=2, color=phead_colors),
-            name="Head Points(All)"
-        )
-
-        # ---- (B) Scene flow (stride 샘플링) ----
-        xh, yh, zh = [], [], []
-        col_h = []
-        flow_scale = 3.0
-
-        for i in range(coords_hand_np.shape[0]):
-            vx, vy, vz = flow_hand[i]
-            length = np.sqrt(vx**2 + vy**2 + vz**2)
-            if length < flow_threshold:
-                continue
-
-            # start
-            xh.append(coords_hand_np[i,0])
-            yh.append(coords_hand_np[i,1])
-            zh.append(coords_hand_np[i,2])
-            col_h.append(i)
-
-            # end
-            xh.append(coords_hand_np[i,0] + flow_scale*vx)
-            yh.append(coords_hand_np[i,1] + flow_scale*vy)
-            zh.append(coords_hand_np[i,2] + flow_scale*vz)
-            col_h.append(i)
-
-            xh.append(None)
-            yh.append(None)
-            zh.append(None)
-            col_h.append(i)
-
-        flow_hand_trace = go.Scatter3d(
-            x=xh, y=yh, z=zh,
-            mode='lines',
-            line=dict(width=5, color=col_h, colorscale='Rainbow',
-                      cmin=0, cmax=max(1, coords_hand_np.shape[0])),
-            name="Hand Flow", showlegend=False
-        )
-
-        xhd, yhd, zhd = [], [], []
-        col_hd = []
-        for i in range(coords_head_np.shape[0]):
-            vx, vy, vz = flow_head[i]
-            length = np.sqrt(vx**2 + vy**2 + vz**2)
-            if length < flow_threshold:
-                continue
-
-            xhd.append(coords_head_np[i,0])
-            yhd.append(coords_head_np[i,1])
-            zhd.append(coords_head_np[i,2])
-            col_hd.append(i)
-
-            xhd.append(coords_head_np[i,0] + flow_scale*vx)
-            yhd.append(coords_head_np[i,1] + flow_scale*vy)
-            zhd.append(coords_head_np[i,2] + flow_scale*vz)
-            col_hd.append(i)
-
-            xhd.append(None)
-            yhd.append(None)
-            zhd.append(None)
-            col_hd.append(i)
-
-        flow_head_trace = go.Scatter3d(
-            x=xhd, y=yhd, z=zhd,
-            mode='lines',
-            line=dict(width=10, color=col_hd, colorscale='Rainbow',
-                      cmin=0, cmax=max(1, coords_head_np.shape[0])),
-            name="Head Flow", showlegend=False
-        )
-
-        frames_data.append(go.Frame(
-            data=[scatter_hand, scatter_head, flow_hand_trace, flow_head_trace],
-            name=f"frame_{frame_idx}"
-        ))
-        frame_names.append(f"frame_{frame_idx}")
-
-    if not frames_data:
-        print("No frames to visualize.")
-        return
-
-    # bounding box
-    x_min, y_min, z_min = bound_min
-    x_max, y_max, z_max = bound_max
-
-    # 실제 길이
-    dx = x_max - x_min
-    dy = y_max - y_min
-    dz = z_max - z_min
-
-    # Plotly figure
-    fig = go.Figure(
-        data=frames_data[0].data,
-        layout=go.Layout(
-            scene=dict(
-                xaxis=dict(range=[x_min, x_max], title="X"),
-                yaxis=dict(range=[y_min, y_max], title="Y"),
-                zaxis=dict(range=[z_min, z_max], title="Z"),
-                aspectmode="manual",
-                aspectratio=dict(x=dx, y=dy, z=dz),
-            )
-        ),
-        frames=frames_data
-    )
-
-    fig.update_layout(
-        updatemenus=[dict(
-            type="buttons",
-            showactive=False,
-            buttons=[
-                dict(label="Play",
-                     method="animate",
-                     args=[None, {
-                         "frame": {"duration": 500, "redraw": True},
-                         "fromcurrent": True,
-                         "transition": {"duration": 300, "easing": "linear"}
-                     }]),
-                dict(label="Pause",
-                     method="animate",
-                     args=[[None], {
-                         "frame": {"duration": 0, "redraw": False},
-                         "mode": "immediate",
-                         "transition": {"duration": 0}
-                     }])
-            ],
-        )],
-        sliders=[dict(
-            active=0,
-            steps=[
-                dict(
-                    method="animate",
-                    args=[[frame_names[k]], {
-                        "frame": {"duration": 0, "redraw": True},
-                        "mode": "immediate"
-                    }],
-                    label=f"{k}"
-                ) for k in range(len(frame_names))
-            ]
-        )]
-    )
-
-    fig.write_html(out_html)
-    print(f"[INFO] Visualization saved to {out_html}")
-    
 def build_object_map(json_file_path: str, object_names: List[str]) -> Dict[str, torch.Tensor]:
     """
     Build a label map from subtask_uid to object label. 
@@ -640,16 +85,16 @@ class BCConfig:
     name: str = "bc"
     lr: float = 3e-4               # learning rate
     batch_size: int = 256          # batch size
-    stage1_epochs: int = 2         # stage 1 epochs
-    stage2_epochs: int = 6        # stage 2 epochs
-    stage3_epochs: int = 2        # stage 3 epochs
+    stage1_epochs: int = 1         # stage 1 epochs
+    stage2_epochs: int = 10        # stage 2 epochs
+
     eval_freq: int = 1
     log_freq: int = 1
     save_freq: int = 1
     save_backup_ckpts: bool = False
 
     data_dir_fp: str = None        # path to data .h5 files
-    max_cache_size: Union[int, Literal["all"]] = 0        # max data points to cache
+    max_cache_size: int = 0        # max data points to cache
     trajs_per_obj: Union[str, int] = "all"
     torch_deterministic: bool = True
 
@@ -659,10 +104,6 @@ class BCConfig:
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
     scene_bound_max: List[float] = field(default_factory=lambda: [4.6, 4.7, 3.1])
-    mod_time: int = 201
-    trilinear_feat: bool = True
-    trilinear_flow: bool = True
-    threshold_dist: float = 1.0
 
     # CLIP / Agent Settings
     clip_input_dim: int = 768
@@ -671,11 +112,8 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    cos_loss_weight: float = 0.01
-    flow_cos_loss_weight: float = 0.01
-    scene_flow_loss_weight: float = 0.1
-    flow_reg_loss_weight: float = 0.02
     hidden_dim: int = 240
+    cos_loss_weight: float = 0.1
 
     num_eval_envs: int = field(init=False)
 
@@ -684,7 +122,6 @@ class BCConfig:
     pretrained_voxel_path:str = None
     pretrained_implicit_path: str = None
     pretrained_optimizer_path: str = None
-
 
     def _additional_processing(self):
         assert self.name == "bc"
@@ -742,7 +179,6 @@ class TrainConfig:
 def get_mshab_train_cfg(cfg: TrainConfig) -> TrainConfig:
     return from_dict(data_class=TrainConfig, data=OmegaConf.to_container(cfg))
 
-
 def recursive_h5py_to_numpy(h5py_obs, slice=None):
     if isinstance(h5py_obs, h5py.Group) or isinstance(h5py_obs, dict):
         return dict(
@@ -755,7 +191,6 @@ def recursive_h5py_to_numpy(h5py_obs, slice=None):
     if slice is not None:
         return h5py_obs[slice]
     return h5py_obs[:]
-
 
 class DPDataset(ClosableDataset):
     def __init__(
@@ -1007,7 +442,6 @@ class TempTranslateToPointDataset(DPDataset):
 
         return (obs, act, subtask_uid, step_num)
 
-
 def train(cfg: TrainConfig):
     # Seed
     random.seed(cfg.seed)
@@ -1029,15 +463,12 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     # VoxelHashTable and ImplicitDecoder
-    hash_voxel = VoxelHashTableFlowTraverse(
+    hash_voxel = VoxelHashTable(
         resolution=cfg.algo.resolution,
         hash_table_size=cfg.algo.hash_table_size,
         feature_dim=cfg.algo.voxel_feature_dim,
         scene_bound_min=tuple(cfg.algo.scene_bound_min),
         scene_bound_max=tuple(cfg.algo.scene_bound_max),
-        mod_time= cfg.algo.mod_time,
-        trilinear_feat = cfg.algo.trilinear_feat,
-        trilinear_flow = cfg.algo.trilinear_flow,
         device=device
     ).to(device)
 
@@ -1049,7 +480,7 @@ def train(cfg: TrainConfig):
     ).to(device)
 
     # Agent
-    agent = Agent_point_flow_traverse(
+    agent = Agent_static(
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
@@ -1058,10 +489,7 @@ def train(cfg: TrainConfig):
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
         state_mlp_dim=cfg.algo.state_mlp_dim,
-        hidden_dim=cfg.algo.hidden_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        max_time_steps=eval_envs.max_episode_steps + 1,
-        threshold_dist=cfg.algo.threshold_dist,
         hash_voxel=hash_voxel,
         implicit_decoder=implicit_decoder
     ).to(device)
@@ -1076,19 +504,20 @@ def train(cfg: TrainConfig):
 
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
         print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
-        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device), strict=False)
+        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
 
     if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
         print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
-        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
+        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device))
 
     if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
         print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
-        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=False)
+        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device))
 
     if cfg.algo.pretrained_optimizer_path is not None and os.path.exists(cfg.algo.pretrained_optimizer_path):
         print(f"[INFO] Loading pretrained optimizer state from {cfg.algo.pretrained_optimizer_path}")
         optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device))
+
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -1107,14 +536,7 @@ def train(cfg: TrainConfig):
         torch.save(implicit_decoder.state_dict(), decoder_path)
         torch.save(optimizer.state_dict(), optim_path)
 
-    # Create BC dataset and dataloader
-    # bc_dataset = BCDataset(
-    #     cfg.algo.data_dir_fp,
-    #     cfg.algo.max_cache_size,
-    #     cat_state=cfg.eval_env.cat_state,
-    #     cat_pixels=cfg.eval_env.cat_pixels,
-    #     trajs_per_obj=cfg.algo.trajs_per_obj,
-    # )
+    
     # logger.print(
     #     f"BC Dataset: {len(bc_dataset)} samples "
     #     f"({cfg.algo.trajs_per_obj} trajs/obj) for "
@@ -1122,6 +544,8 @@ def train(cfg: TrainConfig):
     #     flush=True,
     # )
     assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
+    
+    # Create BC dataset and dataloader
     bc_dataset = TempTranslateToPointDataset(
         cfg.algo.data_dir_fp,
         obs_horizon=2,
@@ -1129,32 +553,13 @@ def train(cfg: TrainConfig):
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
-        truncate_trajectories_at_success=False,
+        truncate_trajectories_at_success=True,
         cat_state=cfg.eval_env.cat_state,
         cat_pixels=cfg.eval_env.cat_pixels,
     )
 
     bc_dataloader = ClosableDataLoader(
         bc_dataset, batch_size=cfg.algo.batch_size, shuffle=True, num_workers=0
-    )
-    
-    bc_dataset_vis = TempTranslateToPointDataset(
-        cfg.algo.data_dir_fp,
-        obs_horizon=2,
-        pred_horizon=2,
-        control_mode=eval_envs.unwrapped.control_mode,
-        trajs_per_obj=1,
-        max_image_cache_size=cfg.algo.max_cache_size,
-        truncate_trajectories_at_success=False,
-        cat_state=cfg.eval_env.cat_state,
-        cat_pixels=cfg.eval_env.cat_pixels,
-    )
-    
-    bc_dataloader_vis = ClosableDataLoader(
-        bc_dataset,
-        batch_size=1,   # 보통 시각화는 batch=1이 깔끔
-        shuffle=False,  # <--- Shuffle OFF for visualization
-        num_workers=0
     )
 
     global_step = 0
@@ -1190,18 +595,20 @@ def train(cfg: TrainConfig):
         logger.print(f"[Stage 1] Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
         agent.epoch = epoch
+        
         agent.train()
         hash_voxel.train()
+        implicit_decoder.train()
+        
+        for p in agent.clip_model.parameters():
+            p.requires_grad = False
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss, flow_consistency_loss, flow_reg_loss = agent.forward_train(obs, subtask_labels, step_nums)
-            cos_loss = cfg.algo.cos_loss_weight * cos_loss
-            scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
-            flow_reg_loss = cfg.algo.flow_reg_loss_weight * flow_reg_loss
-            loss = cos_loss + scene_flow_loss + flow_consistency_loss + flow_reg_loss
+            total_cos_loss = agent.forward_mapping(obs, subtask_labels, step_nums)
+            loss = cfg.algo.cos_loss_weight * total_cos_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -1212,12 +619,8 @@ def train(cfg: TrainConfig):
             global_step += 1
 
             # Write to TensorBoard
-            writer.add_scalar("Loss/Iteration", loss.item(), global_step)
-            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
-            writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
-            writer.add_scalar("Flow Consistency Loss/Iteration", flow_consistency_loss.item(), global_step)
-            writer.add_scalar("Flow Regularization Loss/Iteration", flow_reg_loss.item(), global_step)
-        
+            writer.add_scalar("Cosine Loss/Iteration", total_cos_loss.item(), global_step)
+
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
         timer.end(key="train")
@@ -1229,24 +632,6 @@ def train(cfg: TrainConfig):
                 logger.store("time", **timer.get_time_logs(epoch))
             logger.log(global_epoch)
             timer.end(key="log")
-
-        # Evaluation
-        if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
-            agent.eval()
-            eval_obs, _ = eval_envs.reset()
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
-            B = eval_subtask_labels.size()
-
-            for t in range(eval_envs.max_episode_steps):
-                with torch.no_grad():
-                    time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
-                eval_obs, _, _, _, _ = eval_envs.step(action)
-
-            if len(eval_envs.return_queue) > 0:
-                store_env_stats("eval")
-            logger.log(global_epoch)
-            timer.end(key="eval")
 
         # Saving
         if check_freq(cfg.algo.save_freq, epoch):
@@ -1255,42 +640,44 @@ def train(cfg: TrainConfig):
 
     save_checkpoint(name="stage1-final")
 
-    # ----------------------------
-    # Stage 2: Mapping + Policy Learning
-    # ----------------------------
+    # ------------------------------------------------
+    # Stage 2: Freeze mapping + Policy only (BC loss)
+    # ------------------------------------------------
+    # 1) Freeze mapping modules
+    for param in hash_voxel.parameters():
+        param.requires_grad = False
+    for param in implicit_decoder.parameters():
+        param.requires_grad = False
+        
+    for p in agent.clip_model.parameters():
+        p.requires_grad = True
+
     for epoch in range(cfg.algo.stage2_epochs):
         global_epoch = logger_start_log_step + cfg.algo.stage1_epochs + epoch
+        
         logger.print(f"[Stage 2] Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
-        agent.epoch = epoch
         agent.train()
-        hash_voxel.train()
+        # hash_voxel & implicit_decoder remain in eval/frozen
+        hash_voxel.eval()
+        implicit_decoder.eval()
 
-        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
+        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage3-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss, flow_consistency_loss, flow_reg_loss = agent.forward_train(obs, subtask_labels, step_nums)
-            cos_loss = cfg.algo.cos_loss_weight * cos_loss
-            scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
-            flow_reg_loss = cfg.algo.flow_reg_loss_weight * flow_reg_loss
+            pi = agent.forward_policy(obs, subtask_labels, step_nums)
             bc_loss = F.mse_loss(pi, act)
-            loss = cos_loss  + scene_flow_loss + bc_loss + flow_consistency_loss + flow_reg_loss# Stage 2 uses both
 
             optimizer.zero_grad()
-            loss.backward()
+            bc_loss.backward()
             optimizer.step()
 
-            tot_loss += loss.item()
+            tot_loss += bc_loss.item()
             n_samples += act.size(0)
             global_step += 1
 
-            writer.add_scalar("Loss/Iteration", loss.item(), global_step)
-            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
-            writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
-            writer.add_scalar("Flow Consistency Loss/Iteration", flow_consistency_loss.item(), global_step)
-            writer.add_scalar("Flow Regularization Loss/Iteration", flow_reg_loss.item(), global_step)
-            writer.add_scalar("Behavior Cloning Loss/Iteration", bc_loss.item(), global_step)
+            writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
@@ -1307,6 +694,9 @@ def train(cfg: TrainConfig):
         # Evaluation
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
+            hash_voxel.eval()
+            implicit_decoder.eval()
+
             eval_obs, _ = eval_envs.reset()
             eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
             B = eval_subtask_labels.size()
@@ -1314,9 +704,9 @@ def train(cfg: TrainConfig):
             for t in range(eval_envs.max_episode_steps):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
+                    action = agent.forward_policy(eval_obs, eval_subtask_labels, time_step)
+                # Stub environment step
                 eval_obs, _, _, _, _ = eval_envs.step(action)
-
             if len(eval_envs.return_queue) > 0:
                 store_env_stats("eval")
             logger.log(global_epoch)
@@ -1329,16 +719,12 @@ def train(cfg: TrainConfig):
 
     # Final save
     save_checkpoint(name="stage2-final")
-    
-    print("Start Plotly scene flow visualization...")
-    visualize_scene_flow_plotly(
-        agent=agent,
-        dataset=bc_dataloader_vis.dataset,  # 혹은 bc_dataset
-        device=device,
-        max_frames=50,    # 원하는 만큼 조정
-        out_html="scene_flow_viz.html"
-    )
-    print("HTML saved. Open scene_flow_viz.html in browser to view.")
+
+    bc_dataloader.close()
+    eval_envs.close()
+    logger.close()
+    writer.close()
+
 
 if __name__ == "__main__":
     PASSED_CONFIG_PATH = sys.argv[1]
