@@ -227,7 +227,6 @@ class ImplicitDecoder(nn.Module):
         self.L = L
         self.pe_dim = 2 * self.L * 3  # 2*L for sine/cosine, times 3 for x, y, z
 
-        # 첫 레이어 input: voxel_feature_dim + pe_dim
         self.input_dim = self.voxel_feature_dim + self.pe_dim
         self.output_dim = output_dim
 
@@ -237,14 +236,12 @@ class ImplicitDecoder(nn.Module):
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.ln2 = nn.LayerNorm(self.hidden_dim)
 
-        # 세 번째 레이어는 positional encoding 재결합
         self.fc3 = nn.Linear(self.hidden_dim + self.pe_dim, self.hidden_dim)
         self.ln3 = nn.LayerNorm(self.hidden_dim)
 
         self.fc4 = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.ln4 = nn.LayerNorm(self.hidden_dim)
 
-        # 최종 출력
         self.fc5 = nn.Linear(self.hidden_dim, self.output_dim)
 
     def forward(self, voxel_features, coords_3d, return_intermediate=False):
@@ -311,14 +308,12 @@ class FlowTimeAggregator(nn.Module):
         # output: [N, 2*L*3]
         N = flow_3d.shape[0]
         pe_list = []
-        # 주파수 2^0, 2^1, ..., 2^(L-1)
         freqs = 2.0 ** torch.arange(self.L, device=flow_3d.device)
         for i in range(3):
             v = flow_3d[:, i]  # shape: [N]
             for f in freqs:
                 pe_list.append(torch.sin(f*v))
                 pe_list.append(torch.cos(f*v))
-        # 쌓은 뒤 [N, 2*L*3]
         pe = torch.stack(pe_list, dim=1)
         return pe
 
@@ -333,3 +328,43 @@ class FlowTimeAggregator(nn.Module):
         mlp_out = self.mlp(x)                           # [N, feat_dim]
         out = feats + mlp_out                           # residual
         return out
+    
+class LoRALinear(nn.Module):
+    def __init__(self, 
+                 linear_layer: nn.Linear,
+                 rank: int = 4,
+                 alpha: float = 1.0,
+                 dropout: float = 0.0):
+        super().__init__()
+
+        self.in_features = linear_layer.in_features
+        self.out_features = linear_layer.out_features
+        self.original_weight = linear_layer.weight
+        self.original_bias = linear_layer.bias
+        
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+
+        self.lora_A = nn.Parameter(torch.zeros((rank, self.in_features)))
+        self.lora_B = nn.Parameter(torch.zeros((self.out_features, rank)))
+        
+        self.dropout = nn.Dropout(p=dropout)
+
+        nn.init.normal_(self.lora_A, std=0.02)
+        nn.init.normal_(self.lora_B, std=0.02)
+
+        self.original_weight.requires_grad_(False)
+        if self.original_bias is not None:
+            self.original_bias.requires_grad_(False)
+
+    def forward(self, x: torch.Tensor):
+        result = torch.matmul(x, self.original_weight.T)
+        if self.original_bias is not None:
+            result = result + self.original_bias
+
+        lora_out = torch.matmul(self.dropout(x), self.lora_A.T)  # (batch, rank)
+        lora_out = torch.matmul(lora_out, self.lora_B.T)         # (batch, out_features)
+        result += self.scaling * lora_out
+
+        return result

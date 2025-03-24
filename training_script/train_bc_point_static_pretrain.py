@@ -14,6 +14,7 @@ from tqdm import tqdm
 import gymnasium as gym
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
@@ -22,7 +23,7 @@ import mani_skill.envs
 from mani_skill.utils import common
 
 from lang_mapping.agent.agent_static import Agent_static
-from lang_mapping.module import ImplicitDecoder
+from lang_mapping.module import ImplicitDecoder, LoRALinear
 from lang_mapping.mapper.mapper import VoxelHashTable
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
@@ -79,7 +80,21 @@ def get_object_labels_batch(
             labels.append(object_map[uid])
     return torch.stack(labels, dim=0)
 
+def apply_lora_to_clip(clip_model: nn.Module, 
+                            rank: int = 4, 
+                            alpha: float = 1.0,
+                            dropout: float = 0.0):
 
+    for module_name, module in clip_model.named_modules():
+        if isinstance(module, nn.MultiheadAttention):
+            if hasattr(module, 'q_proj') and isinstance(module.q_proj, nn.Linear):
+                module.q_proj = LoRALinear(module.q_proj, rank=rank, alpha=alpha, dropout=dropout)
+            if hasattr(module, 'k_proj') and isinstance(module.k_proj, nn.Linear):
+                module.k_proj = LoRALinear(module.k_proj, rank=rank, alpha=alpha, dropout=dropout)
+            if hasattr(module, 'v_proj') and isinstance(module.v_proj, nn.Linear):
+                module.v_proj = LoRALinear(module.v_proj, rank=rank, alpha=alpha, dropout=dropout)
+            if hasattr(module, 'out_proj') and isinstance(module.out_proj, nn.Linear):
+                module.out_proj = LoRALinear(module.out_proj, rank=rank, alpha=alpha, dropout=dropout)
 @dataclass
 class BCConfig:
     name: str = "bc"
@@ -494,14 +509,6 @@ def train(cfg: TrainConfig):
         implicit_decoder=implicit_decoder
     ).to(device)
 
-    # Combine parameters
-    params_to_optimize = (
-        list(agent.parameters())
-        + list(hash_voxel.parameters())
-        + list(implicit_decoder.parameters())
-    )
-    optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
-
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
         print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
         agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
@@ -513,10 +520,6 @@ def train(cfg: TrainConfig):
     if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
         print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
         implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device))
-
-    if cfg.algo.pretrained_optimizer_path is not None and os.path.exists(cfg.algo.pretrained_optimizer_path):
-        print(f"[INFO] Loading pretrained optimizer state from {cfg.algo.pretrained_optimizer_path}")
-        optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device))
 
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
@@ -587,6 +590,16 @@ def train(cfg: TrainConfig):
         )
         log_env.reset_queues()
 
+    # Combine parameters
+    params_to_optimize = (
+        list(hash_voxel.parameters())
+        + list(implicit_decoder.parameters())
+    )
+    optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
+
+    for p in agent.clip_model.parameters():
+        p.requires_grad = False
+
     # -------------------------
     # Stage 1: Only Mapping
     # -------------------------
@@ -599,9 +612,6 @@ def train(cfg: TrainConfig):
         agent.train()
         hash_voxel.train()
         implicit_decoder.train()
-        
-        for p in agent.clip_model.parameters():
-            p.requires_grad = False
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
@@ -642,14 +652,21 @@ def train(cfg: TrainConfig):
     # ------------------------------------------------
     # Stage 2: Freeze mapping + Policy only (BC loss)
     # ------------------------------------------------
+    
     # 1) Freeze mapping modules
     for param in hash_voxel.parameters():
         param.requires_grad = False
     for param in implicit_decoder.parameters():
         param.requires_grad = False
         
-    for p in agent.clip_model.parameters():
-        p.requires_grad = True
+    apply_lora_to_clip(agent.clip_model, rank=8, alpha=16, dropout=0.0)
+    
+    params_to_optimize = (
+        list(agent.parameters())
+    )
+    optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
+    
+    agent.to(device)
 
     for epoch in range(cfg.algo.stage2_epochs):
         global_epoch = logger_start_log_step + cfg.algo.stage1_epochs + epoch

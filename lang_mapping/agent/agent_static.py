@@ -89,6 +89,8 @@ class Agent_static(nn.Module):
         self.hash_voxel = hash_voxel
         self.implicit_decoder = implicit_decoder
 
+        self.voxel_proj = nn.Linear(voxel_feature_dim, voxel_feature_dim).to(self.device)
+
         # Local self-attention fusion
         self.feature_fusion = LocalSelfAttentionFusion(feat_dim=voxel_feature_dim)
 
@@ -254,6 +256,9 @@ class Agent_static(nn.Module):
             voxel_feat_for_points_head, _ = self.hash_voxel.query_voxel_feature(
                 head_coords_world_flat, return_indices=False
             )
+
+        voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand)
+        voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head)
 
         voxel_feat_for_points_hand_batched = voxel_feat_for_points_hand.view(B_, N, -1)
         voxel_feat_for_points_head_batched = voxel_feat_for_points_head.view(B_, N, -1)
