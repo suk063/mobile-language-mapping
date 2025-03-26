@@ -89,7 +89,13 @@ class Agent_static(nn.Module):
         self.hash_voxel = hash_voxel
         self.implicit_decoder = implicit_decoder
 
-        self.voxel_proj = nn.Linear(voxel_feature_dim, voxel_feature_dim).to(self.device)
+        self.voxel_proj = nn.Sequential(
+            nn.Linear(voxel_feature_dim, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, voxel_feature_dim),
+            nn.LayerNorm(voxel_feature_dim),
+        ).to(self.device)
 
         # Local self-attention fusion
         self.feature_fusion = LocalSelfAttentionFusion(feat_dim=voxel_feature_dim)

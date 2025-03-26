@@ -85,16 +85,33 @@ def apply_lora_to_clip(clip_model: nn.Module,
                             alpha: float = 1.0,
                             dropout: float = 0.0):
 
-    for module_name, module in clip_model.named_modules():
-        if isinstance(module, nn.MultiheadAttention):
-            if hasattr(module, 'q_proj') and isinstance(module.q_proj, nn.Linear):
-                module.q_proj = LoRALinear(module.q_proj, rank=rank, alpha=alpha, dropout=dropout)
-            if hasattr(module, 'k_proj') and isinstance(module.k_proj, nn.Linear):
-                module.k_proj = LoRALinear(module.k_proj, rank=rank, alpha=alpha, dropout=dropout)
-            if hasattr(module, 'v_proj') and isinstance(module.v_proj, nn.Linear):
-                module.v_proj = LoRALinear(module.v_proj, rank=rank, alpha=alpha, dropout=dropout)
-            if hasattr(module, 'out_proj') and isinstance(module.out_proj, nn.Linear):
-                module.out_proj = LoRALinear(module.out_proj, rank=rank, alpha=alpha, dropout=dropout)
+    for i, block in enumerate(clip_model.visual.trunk.blocks):
+        attn = block.attn  # EvaAttention
+        # q_proj
+        if hasattr(attn, 'q_proj') and isinstance(attn.q_proj, nn.Linear):
+            attn.q_proj = LoRALinear(attn.q_proj, rank=rank, alpha=alpha, dropout=dropout)
+        # k_proj
+        # if hasattr(attn, 'k_proj') and isinstance(attn.k_proj, nn.Linear):
+        #     attn.k_proj = LoRALinear(attn.k_proj, rank=rank, alpha=alpha, dropout=dropout)
+        # v_proj
+        if hasattr(attn, 'v_proj') and isinstance(attn.v_proj, nn.Linear):
+            attn.v_proj = LoRALinear(attn.v_proj, rank=rank, alpha=alpha, dropout=dropout)
+        # out_proj
+        # if hasattr(attn, 'proj') and isinstance(attn.proj, nn.Linear):
+        #     attn.proj = LoRALinear(attn.proj, rank=rank, alpha=alpha, dropout=dropout)
+
+        # mlp = block.mlp  # SwiGLU
+        # # fc1_g
+        # if hasattr(mlp, 'fc1_g') and isinstance(mlp.fc1_g, nn.Linear):
+        #     mlp.fc1_g = LoRALinear(mlp.fc1_g, rank=rank, alpha=alpha, dropout=dropout)
+        # # fc1_x
+        # if hasattr(mlp, 'fc1_x') and isinstance(mlp.fc1_x, nn.Linear):
+        #     mlp.fc1_x = LoRALinear(mlp.fc1_x, rank=rank, alpha=alpha, dropout=dropout)
+        # # fc2
+        # if hasattr(mlp, 'fc2') and isinstance(mlp.fc2, nn.Linear):
+        #     mlp.fc2 = LoRALinear(mlp.fc2, rank=rank, alpha=alpha, dropout=dropout)
+            
+                    
 @dataclass
 class BCConfig:
     name: str = "bc"
@@ -253,7 +270,8 @@ class DPDataset(ClosableDataset):
                     success_cutoff = min(success.index(True) + 1, len(success))
                     del success
                 else:
-                    success_cutoff = len(act)
+                    # success_cutoff = len(act)
+                    success_cutoff = 100
 
                 # NOTE (arth): we always cache state obs and actions because they take up very little memory.
                 #       mostly constraints are on images, since those take up much more memory
@@ -556,7 +574,7 @@ def train(cfg: TrainConfig):
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
-        truncate_trajectories_at_success=True,
+        truncate_trajectories_at_success=False,
         cat_state=cfg.eval_env.cat_state,
         cat_pixels=cfg.eval_env.cat_pixels,
     )
@@ -661,9 +679,15 @@ def train(cfg: TrainConfig):
         
     apply_lora_to_clip(agent.clip_model, rank=8, alpha=16, dropout=0.0)
     
-    params_to_optimize = (
-        list(agent.parameters())
-    )
+    for name, param in agent.clip_model.named_parameters():
+        param.requires_grad = False 
+    
+    for module in agent.clip_model.modules():
+        if isinstance(module, LoRALinear):
+            for param in module.parameters():
+                param.requires_grad = True
+    
+    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)
