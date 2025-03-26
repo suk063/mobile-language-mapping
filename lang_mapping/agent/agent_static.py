@@ -271,10 +271,10 @@ class Agent_static(nn.Module):
 
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(
-            voxel_feat_for_points_hand_batched, feats_hand_reduced
+            feats_hand_reduced, voxel_feat_for_points_hand_batched
         )
         fused_head = self.feature_fusion(
-            voxel_feat_for_points_head_batched, feats_head_reduced
+            feats_head_reduced, voxel_feat_for_points_head_batched
         )
 
         # Get text embeddings (projected)

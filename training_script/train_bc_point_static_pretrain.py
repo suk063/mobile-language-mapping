@@ -270,8 +270,8 @@ class DPDataset(ClosableDataset):
                     success_cutoff = min(success.index(True) + 1, len(success))
                     del success
                 else:
-                    # success_cutoff = len(act)
-                    success_cutoff = 100
+                    success_cutoff = len(act)
+                    # success_cutoff = 100
 
                 # NOTE (arth): we always cache state obs and actions because they take up very little memory.
                 #       mostly constraints are on images, since those take up much more memory
@@ -574,7 +574,7 @@ def train(cfg: TrainConfig):
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
-        truncate_trajectories_at_success=False,
+        truncate_trajectories_at_success=True,
         cat_state=cfg.eval_env.cat_state,
         cat_pixels=cfg.eval_env.cat_pixels,
     )
@@ -614,9 +614,6 @@ def train(cfg: TrainConfig):
         + list(implicit_decoder.parameters())
     )
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
-
-    for p in agent.clip_model.parameters():
-        p.requires_grad = False
 
     # -------------------------
     # Stage 1: Only Mapping
@@ -677,20 +674,31 @@ def train(cfg: TrainConfig):
     for param in implicit_decoder.parameters():
         param.requires_grad = False
         
-    apply_lora_to_clip(agent.clip_model, rank=8, alpha=16, dropout=0.0)
+    # LoRA    
+    # apply_lora_to_clip(agent.clip_model, rank=16, alpha=16, dropout=0.0)
     
-    for name, param in agent.clip_model.named_parameters():
-        param.requires_grad = False 
+    # for name, param in agent.clip_model.named_parameters():
+    #     param.requires_grad = False 
     
-    for module in agent.clip_model.modules():
-        if isinstance(module, LoRALinear):
-            for param in module.parameters():
-                param.requires_grad = True
+    # for module in agent.clip_model.modules():
+    #     if isinstance(module, LoRALinear):
+    #         for param in module.parameters():
+    #             param.requires_grad = True
     
-    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
+    # params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
+    # optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
+
+
+    for param in agent.parameters():
+        param.requires_grad = True
+        
+    params_to_optimize = (
+        list(agent.parameters())
+    )
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)
+
 
     for epoch in range(cfg.algo.stage2_epochs):
         global_epoch = logger_start_log_step + cfg.algo.stage1_epochs + epoch

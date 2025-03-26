@@ -141,7 +141,9 @@ class LocalSelfAttentionFusion(nn.Module):
         y = self.layernorm(y)  # (B*N, 2, D)
 
         # Average the 2 tokens to get a single feature vector
-        fused = y.mean(dim=1).view(B, N, D)
+        # fused = y.mean(dim=1).view(B, N, D)
+        fused = y[:, 0, :].view(B, N, D)
+        
         return fused
 
 class LocalSelfAttentionFusionMulti(nn.Module):
