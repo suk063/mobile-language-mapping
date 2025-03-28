@@ -16,17 +16,22 @@ class DP3Encoder(nn.Module):
     - Input  : (B, N, in_dim) 
     - Output : (B, out_dim) 
     """
-    def __init__(self, in_dim=3, hidden_dim=128, out_dim=64):
+    def __init__(self, in_dim=3, out_dim=64):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+            nn.Linear(in_dim, 64),
+            nn.LayerNorm(64),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+            nn.Linear(64, 128),
+            nn.LayerNorm(128),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, out_dim),
+            nn.Linear(128, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(inplace=True),
         )
+        
+        self.proj = nn.Linear(256, out_dim)
+        self.ln = nn.LayerNorm(out_dim)
 
     def forward(self, pts: torch.Tensor) -> torch.Tensor:
         """
@@ -34,8 +39,9 @@ class DP3Encoder(nn.Module):
         return: (B, out_dim)
         """
         feats = self.mlp(pts)                 # (B, N, out_dim)
-        feats_pooled = feats.max(dim=1)[0]    # (B, out_dim)
-        return feats_pooled
+        feats_out = self.ln(self.proj(feats.max(dim=1)[0]))    # (B, out_dim)
+        
+        return feats_out
 
 class Agent_3dencoder(nn.Module):
     def __init__(
@@ -61,7 +67,7 @@ class Agent_3dencoder(nn.Module):
 
         # MLP for raw state
         self.state_mlp = nn.Linear(state_dim, state_mlp_dim).to(self.device)
-        self.dp3_encoder = DP3Encoder(in_dim=3, hidden_dim=128, out_dim=512).to(self.device)
+        self.dp3_encoder = DP3Encoder(in_dim=3, out_dim=state_mlp_dim // 2).to(self.device)
 
         # Action MLP
         action_dim = np.prod(single_act_shape)
