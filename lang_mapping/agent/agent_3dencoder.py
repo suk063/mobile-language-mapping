@@ -86,11 +86,14 @@ class Agent_3dencoder(nn.Module):
             head_depth = head_depth.view(b2, fs2 * d2, h2, w2)
             hand_depth = F.interpolate(hand_depth, (16, 16), mode="nearest")
             head_depth = F.interpolate(head_depth, (16, 16), mode="nearest")
+            
+        else:
+            b2, _, _, _ = hand_depth.shape
 
         hand_pose = pixels["fetch_hand_pose"]
         head_pose = pixels["fetch_head_pose"]
 
-        hand_visfeat = head_visfeat = torch.randn(8, 768, 16, 16).cuda()
+        hand_visfeat = head_visfeat = torch.randn(b2, 768, 16, 16).cuda()
 
         # Compute 3D coords
         hand_coords_world, _ = get_3d_coordinates(
@@ -110,8 +113,8 @@ class Agent_3dencoder(nn.Module):
         batch_hand_coords = hand_coords_world_flat.view(B_, N, 3)
         batch_head_coords = head_coords_world_flat.view(B_, N, 3)
 
-        hand_dp3_feat = self.dp3_encoder(batch_hand_coords)  # (B_, 64)
-        head_dp3_feat = self.dp3_encoder(batch_head_coords)  # (B_, 64)
+        hand_dp3_feat = self.dp3_encoder(batch_hand_coords) 
+        head_dp3_feat = self.dp3_encoder(batch_head_coords) 
 
         visual_token = torch.cat([hand_dp3_feat, head_dp3_feat], dim=1)
 
