@@ -464,10 +464,6 @@ def train(cfg: TrainConfig):
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
-        voxel_feature_dim=cfg.algo.voxel_feature_dim,
-        open_clip_model=(cfg.algo.open_clip_model_name, cfg.algo.open_clip_model_pretrained),
-        text_input=cfg.algo.text_input,
-        clip_input_dim=cfg.algo.clip_input_dim,
         state_mlp_dim=cfg.algo.state_mlp_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
     ).to(device)
@@ -546,9 +542,6 @@ def train(cfg: TrainConfig):
     
     for name, param in agent.named_parameters():
         param.requires_grad = True 
-    
-    for name, param in agent.clip_model.named_parameters():
-        param.requires_grad = False 
     
     params_to_optimize = agent.parameters()
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)

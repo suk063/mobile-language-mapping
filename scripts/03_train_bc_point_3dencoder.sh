@@ -67,7 +67,7 @@ if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.03_train_bc_point_3dencoder configs/02_bc_pick_uplift.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.03_train_bc_point_3dencoder configs/03_bc_pick_3dencoder.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"

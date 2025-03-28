@@ -42,10 +42,6 @@ class Agent_3dencoder(nn.Module):
         self,
         sample_obs,
         single_act_shape,
-        open_clip_model: tuple = ("EVA02-L-14", "merged2b_s4b_b131k"),
-        text_input: list = ["bowl", "apple"],
-        clip_input_dim: int = 768,
-        voxel_feature_dim: int = 120,
         state_mlp_dim: int = 1024,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
@@ -65,42 +61,7 @@ class Agent_3dencoder(nn.Module):
 
         # MLP for raw state
         self.state_mlp = nn.Linear(state_dim, state_mlp_dim).to(self.device)
-
-        # Load CLIP model
-        clip_model, _, _ = open_clip.create_model_and_transforms(
-            open_clip_model[0], pretrained=open_clip_model[1]
-        )
-        self.clip_model = clip_model.to(self.device)
-
-        self.tokenizer = open_clip.get_tokenizer(open_clip_model[0])
-
-        # Text embeddings and projection
-        # if text_input:
-        #     text_input += [""]
-        
-        text_tokens = self.tokenizer(text_input).to(self.device)
-        self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
-        with torch.no_grad():
-            text_embeddings = self.clip_model.encode_text(text_tokens)
-            self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
-            # Remove the last embedding (blank token) to avoid repetition
-            # text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
-            # text_embeddings = text_embeddings - redundant_emb
-            # self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
-
-        # Reduce CLIP feature dimension
-        self.clip_dim_reducer = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
-
         self.dp3_encoder = DP3Encoder(in_dim=3, hidden_dim=128, out_dim=512).to(self.device)
-
-        # Transformer for feature fusion
-        self.transformer = TransformerEncoder(
-            input_dim=voxel_feature_dim,
-            hidden_dim=256,
-            num_layers=2,
-            num_heads=8,
-            output_dim=state_mlp_dim
-        )
 
         # Action MLP
         action_dim = np.prod(single_act_shape)
@@ -116,19 +77,6 @@ class Agent_3dencoder(nn.Module):
         pixels: Dict[str, torch.Tensor] = observations["pixels"]
         state: torch.Tensor = observations["state"]
 
-        # Reshape RGB
-        hand_rgb = pixels["fetch_hand_rgb"]
-        head_rgb = pixels["fetch_head_rgb"]
-        if hand_rgb.shape[2] != 3:
-            hand_rgb = hand_rgb.permute(0, 1, 4, 2, 3)
-            head_rgb = head_rgb.permute(0, 1, 4, 2, 3)
-        B, fs, d, H, W = hand_rgb.shape
-        hand_rgb = hand_rgb.reshape(B, fs * d, H, W)
-        head_rgb = head_rgb.reshape(B, fs * d, H, W)
-
-        hand_rgb = transform(hand_rgb.float() / 255.0)
-        head_rgb = transform(head_rgb.float() / 255.0)
-
         # Depth resizing
         hand_depth = pixels["fetch_hand_depth"] / 1000.0
         head_depth = pixels["fetch_head_depth"] / 1000.0
@@ -142,7 +90,7 @@ class Agent_3dencoder(nn.Module):
         hand_pose = pixels["fetch_hand_pose"]
         head_pose = pixels["fetch_head_pose"]
 
-        hand_visfeat = head_visfeat = torch.randn(B, 768, 16, 16).cuda()
+        hand_visfeat = head_visfeat = torch.randn(8, 768, 16, 16).cuda()
 
         # Compute 3D coords
         hand_coords_world, _ = get_3d_coordinates(
