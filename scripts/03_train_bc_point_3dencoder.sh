@@ -15,7 +15,7 @@ WORKSPACE="mshab_exps"
 GROUP=$TASK-rcad-bc-point-$SUBTASK
 EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-local-trajs_per_obj=$TRAJS_PER_OBJ"
 # shellcheck disable=SC2001
-PROJECT_NAME="MS-HAB-RCAD-bc-point-static"
+PROJECT_NAME="MS-HAB-RCAD-bc-point-uplift"
 
 WANDB=True
 TENSORBOARD=True
@@ -60,14 +60,14 @@ args=(
 
 if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
     echo "RESUMING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.01_train_bc_point_static_pretrain "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.03_train_bc_point_3dencoder "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
         logger.clear_out="False" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.01_train_bc_point_static_pretrain configs/01_bc_pick_static.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.03_train_bc_point_3dencoder configs/02_bc_pick_uplift.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
