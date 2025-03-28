@@ -34,10 +34,10 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 4
-
+  batch_size: 8
+  
   stage1_epochs: 0
-  stage2_epochs: 15
+  stage2_epochs: 20
 
   eval_freq: 1
   log_freq: 1

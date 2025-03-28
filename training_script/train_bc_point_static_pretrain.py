@@ -80,27 +80,32 @@ def get_object_labels_batch(
             labels.append(object_map[uid])
     return torch.stack(labels, dim=0)
 
-def apply_lora_to_clip(clip_model: nn.Module, 
-                            rank: int = 4, 
-                            alpha: float = 1.0,
-                            dropout: float = 0.0):
+def apply_lora_to_clip(
+    clip_model: nn.Module,
+    rank: int = 4,
+    alpha: float = 1.0,
+    dropout: float = 0.0,
+    target_blocks: Optional[List[int]] = None
+):
 
     for i, block in enumerate(clip_model.visual.trunk.blocks):
+        if target_blocks is not None and i not in target_blocks:
+            continue
         attn = block.attn  # EvaAttention
         # q_proj
-        if hasattr(attn, 'q_proj') and isinstance(attn.q_proj, nn.Linear):
-            attn.q_proj = LoRALinear(attn.q_proj, rank=rank, alpha=alpha, dropout=dropout)
+        # if hasattr(attn, 'q_proj') and isinstance(attn.q_proj, nn.Linear):
+        #     attn.q_proj = LoRALinear(attn.q_proj, rank=rank, alpha=alpha, dropout=dropout)
         # k_proj
         # if hasattr(attn, 'k_proj') and isinstance(attn.k_proj, nn.Linear):
         #     attn.k_proj = LoRALinear(attn.k_proj, rank=rank, alpha=alpha, dropout=dropout)
         # v_proj
-        if hasattr(attn, 'v_proj') and isinstance(attn.v_proj, nn.Linear):
-            attn.v_proj = LoRALinear(attn.v_proj, rank=rank, alpha=alpha, dropout=dropout)
+        # if hasattr(attn, 'v_proj') and isinstance(attn.v_proj, nn.Linear):
+        #     attn.v_proj = LoRALinear(attn.v_proj, rank=rank, alpha=alpha, dropout=dropout)
         # out_proj
         # if hasattr(attn, 'proj') and isinstance(attn.proj, nn.Linear):
         #     attn.proj = LoRALinear(attn.proj, rank=rank, alpha=alpha, dropout=dropout)
 
-        # mlp = block.mlp  # SwiGLU
+        mlp = block.mlp  # SwiGLU
         # # fc1_g
         # if hasattr(mlp, 'fc1_g') and isinstance(mlp.fc1_g, nn.Linear):
         #     mlp.fc1_g = LoRALinear(mlp.fc1_g, rank=rank, alpha=alpha, dropout=dropout)
@@ -108,8 +113,8 @@ def apply_lora_to_clip(clip_model: nn.Module,
         # if hasattr(mlp, 'fc1_x') and isinstance(mlp.fc1_x, nn.Linear):
         #     mlp.fc1_x = LoRALinear(mlp.fc1_x, rank=rank, alpha=alpha, dropout=dropout)
         # # fc2
-        # if hasattr(mlp, 'fc2') and isinstance(mlp.fc2, nn.Linear):
-        #     mlp.fc2 = LoRALinear(mlp.fc2, rank=rank, alpha=alpha, dropout=dropout)
+        if hasattr(mlp, 'fc2') and isinstance(mlp.fc2, nn.Linear):
+            mlp.fc2 = LoRALinear(mlp.fc2, rank=rank, alpha=alpha, dropout=dropout)
             
                     
 @dataclass
@@ -267,11 +272,11 @@ class DPDataset(ClosableDataset):
 
                 if truncate_trajectories_at_success:
                     success: List[bool] = f[k]["success"][:].tolist()
-                    success_cutoff = min(success.index(True) + 1, len(success))
+                    success_cutoff = min(success.index(True) + 5, len(success))
                     del success
                 else:
-                    success_cutoff = len(act)
-                    # success_cutoff = 100
+                    # success_cutoff = len(act)
+                    success_cutoff = 100
 
                 # NOTE (arth): we always cache state obs and actions because they take up very little memory.
                 #       mostly constraints are on images, since those take up much more memory
@@ -675,27 +680,29 @@ def train(cfg: TrainConfig):
         param.requires_grad = False
         
     # LoRA    
-    # apply_lora_to_clip(agent.clip_model, rank=16, alpha=16, dropout=0.0)
+    apply_lora_to_clip(agent.clip_model, rank=16, alpha=8, dropout=0.0)
     
-    # for name, param in agent.clip_model.named_parameters():
-    #     param.requires_grad = False 
+    for name, param in agent.named_parameters():
+        param.requires_grad = True 
     
-    # for module in agent.clip_model.modules():
-    #     if isinstance(module, LoRALinear):
-    #         for param in module.parameters():
-    #             param.requires_grad = True
+    for name, param in agent.clip_model.named_parameters():
+        param.requires_grad = False 
     
-    # params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
-    # optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
-
-
-    for param in agent.parameters():
-        param.requires_grad = True
-        
-    params_to_optimize = (
-        list(agent.parameters())
-    )
+    for module in agent.clip_model.modules():
+        if isinstance(module, LoRALinear):
+            for param in module.parameters():
+                param.requires_grad = True
+    
+    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
+
+    # for param in agent.parameters():
+    #     param.requires_grad = True
+        
+    # params_to_optimize = (
+    #     list(agent.parameters())
+    # )
+    # optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)
 

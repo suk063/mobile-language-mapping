@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder
+from ..module import *
 from ..mapper.mapper import VoxelHashTable
 from ..utils import get_3d_coordinates, get_visual_features, transform
 
@@ -32,10 +32,6 @@ class Agent_static(nn.Module):
         """
         super().__init__()
 
-        # Optionally append a blank text token
-        if text_input:
-            text_input += [""]
-
         self.device = device
         self.epoch = 0
 
@@ -51,20 +47,22 @@ class Agent_static(nn.Module):
             open_clip_model[0], pretrained=open_clip_model[1]
         )
         self.clip_model = clip_model.to(self.device)
-        self.clip_model.eval()  # initially no fine-tuning
 
         self.tokenizer = open_clip.get_tokenizer(open_clip_model[0])
 
         # Text embeddings and projection
+        # if text_input:
+        #     text_input += [""]
+        
         text_tokens = self.tokenizer(text_input).to(self.device)
         self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
         with torch.no_grad():
             text_embeddings = self.clip_model.encode_text(text_tokens)
-            text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
-            # Remove the last embedding (blank token) to avoid repetition
-            text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
-            text_embeddings = text_embeddings - redundant_emb
             self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
+            # Remove the last embedding (blank token) to avoid repetition
+            # text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
+            # text_embeddings = text_embeddings - redundant_emb
+            # self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
 
         # Reduce CLIP feature dimension
         self.clip_dim_reducer = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
@@ -73,7 +71,7 @@ class Agent_static(nn.Module):
         self.transformer = TransformerEncoder(
             input_dim=voxel_feature_dim,
             hidden_dim=256,
-            num_layers=4,
+            num_layers=2,
             num_heads=8,
             output_dim=state_mlp_dim
         )
@@ -89,16 +87,10 @@ class Agent_static(nn.Module):
         self.hash_voxel = hash_voxel
         self.implicit_decoder = implicit_decoder
 
-        self.voxel_proj = nn.Sequential(
-            nn.Linear(voxel_feature_dim, 256),
-            nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Linear(256, voxel_feature_dim),
-            nn.LayerNorm(voxel_feature_dim),
-        ).to(self.device)
+        # self.voxel_proj = nn.Linear(voxel_feature_dim, voxel_feature_dim).to(self.device)
 
-        # Local self-attention fusion
-        self.feature_fusion = LocalSelfAttentionFusion(feat_dim=voxel_feature_dim)
+        # Local feature fusion
+        self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim)
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
@@ -158,7 +150,7 @@ class Agent_static(nn.Module):
         hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
         head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
 
-        # Flatten CLIP features (still no grad)
+        # Flatten CLIP features 
         with torch.no_grad():
             hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
             head_visfeat = head_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
@@ -247,14 +239,11 @@ class Agent_static(nn.Module):
         feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
 
-        # Reduce CLIP dimension (grad enabled)
+        # Reduce CLIP dimension 
         feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat)
         feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat)
 
-        feats_hand_reduced = feats_hand_flat_reduced.view(B_, N, -1)
-        feats_head_reduced = feats_head_flat_reduced.view(B_, N, -1)
-
-        # Query voxel features in no-grad mode
+        # Query voxel features 
         with torch.no_grad():
             voxel_feat_for_points_hand, _ = self.hash_voxel.query_voxel_feature(
                 hand_coords_world_flat, return_indices=False
@@ -263,18 +252,19 @@ class Agent_static(nn.Module):
                 head_coords_world_flat, return_indices=False
             )
 
-        voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand)
-        voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head)
-
-        voxel_feat_for_points_hand_batched = voxel_feat_for_points_hand.view(B_, N, -1)
-        voxel_feat_for_points_head_batched = voxel_feat_for_points_head.view(B_, N, -1)
+        # voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand)
+        # voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head)
 
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(
-            feats_hand_reduced, voxel_feat_for_points_hand_batched
+            feats_hand_flat_reduced,
+            voxel_feat_for_points_hand,
+            hand_coords_world_flat
         )
         fused_head = self.feature_fusion(
-            feats_head_reduced, voxel_feat_for_points_head_batched
+            feats_head_flat_reduced,
+            voxel_feat_for_points_head,
+            head_coords_world_flat
         )
 
         # Get text embeddings (projected)
@@ -285,10 +275,13 @@ class Agent_static(nn.Module):
         batch_hand_coords = hand_coords_world_flat.view(B_, N, 3)
         batch_head_coords = head_coords_world_flat.view(B_, N, 3)
 
+        batch_fused_hand = fused_hand.view(B_, N, -1)
+        batch_fused_head = fused_head.view(B_, N, -1)
+
         # Transformer
         visual_token = self.transformer(
-            hand=fused_hand,
-            head=fused_head,
+            hand=batch_fused_hand,
+            head=batch_fused_head,
             coords_hand=batch_hand_coords,
             coords_head=batch_head_coords,
             state=state,
