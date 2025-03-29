@@ -39,7 +39,7 @@ class DP3Encoder(nn.Module):
         return: (B, out_dim)
         """
         feats = self.mlp(pts)                 # (B, N, out_dim)
-        feats_out = self.ln(self.proj(feats.max(dim=1)[0]))    # (B, out_dim)
+        feats_out = self.ln(self.proj(feats))    # (B, out_dim)
         
         return feats_out
 
@@ -48,6 +48,10 @@ class Agent_3dencoder(nn.Module):
         self,
         sample_obs,
         single_act_shape,
+        open_clip_model: tuple = ("EVA02-L-14", "merged2b_s4b_b131k"),
+        text_input: list = ["bowl", "apple"],
+        clip_input_dim: int = 768,
+        voxel_feature_dim: int = 120,
         state_mlp_dim: int = 1024,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
@@ -67,7 +71,29 @@ class Agent_3dencoder(nn.Module):
 
         # MLP for raw state
         self.state_mlp = nn.Linear(state_dim, state_mlp_dim).to(self.device)
-        self.dp3_encoder = DP3Encoder(in_dim=3, out_dim=state_mlp_dim // 2).to(self.device)
+        self.dp3_encoder = DP3Encoder(in_dim=3, out_dim=voxel_feature_dim).to(self.device)
+
+        # Load CLIP model
+        clip_model, _, _ = open_clip.create_model_and_transforms(
+            open_clip_model[0], pretrained=open_clip_model[1]
+        )
+        self.clip_model = clip_model.to(self.device)
+
+        self.tokenizer = open_clip.get_tokenizer(open_clip_model[0])
+        
+        text_tokens = self.tokenizer(text_input).to(self.device)
+        self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
+        with torch.no_grad():
+            text_embeddings = self.clip_model.encode_text(text_tokens)
+            self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
+
+        self.transformer = TransformerEncoder(
+            input_dim=voxel_feature_dim,
+            hidden_dim=256,
+            num_layers=4,
+            num_heads=8,
+            output_dim=state_mlp_dim
+        )
 
         # Action MLP
         action_dim = np.prod(single_act_shape)
@@ -115,14 +141,29 @@ class Agent_3dencoder(nn.Module):
         hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
         head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
 
+        # Get text embeddings (projected)
+        text_embeddings_reduced = self.text_proj(self.text_embeddings)
+        selected_text_reduced = text_embeddings_reduced[object_labels, :]
+
+
         # Prepare coords for transformer
         batch_hand_coords = hand_coords_world_flat.view(B_, N, 3)
         batch_head_coords = head_coords_world_flat.view(B_, N, 3)
 
         hand_dp3_feat = self.dp3_encoder(batch_hand_coords) 
         head_dp3_feat = self.dp3_encoder(batch_head_coords) 
+        
+        # Transformer
+        visual_token = self.transformer(
+            hand=hand_dp3_feat,
+            head=head_dp3_feat,
+            coords_hand=batch_hand_coords,
+            coords_head=batch_head_coords,
+            state=state,
+            text_embeddings=selected_text_reduced
+        )
 
-        visual_token = torch.cat([hand_dp3_feat, head_dp3_feat], dim=1)
+        # visual_token = torch.cat([hand_dp3_feat, head_dp3_feat], dim=1)
 
         # Final action
         state_token = self.state_mlp(state)

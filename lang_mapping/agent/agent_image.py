@@ -6,12 +6,11 @@ from typing import Dict
 
 # Local imports
 from ..module import *
-from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, positional_encoding, transform
+from ..utils import get_3d_coordinates, get_visual_features, transform
 
 import open_clip
 
-class Agent_static(nn.Module):
+class Agent_image(nn.Module):
     def __init__(
         self,
         sample_obs,
@@ -23,8 +22,6 @@ class Agent_static(nn.Module):
         state_mlp_dim: int = 1024,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
-        hash_voxel: VoxelHashTable = None,
-        implicit_decoder: ImplicitDecoder = None,
     ):
         """
         Maintains a voxel-hash representation for 3D scenes and uses a CLIP-based
@@ -83,109 +80,10 @@ class Agent_static(nn.Module):
             action_dim=action_dim
         ).to(self.device)
 
-        # Voxel hashing and implicit decoder
-        self.hash_voxel = hash_voxel
-        self.implicit_decoder = implicit_decoder
-
-        self.voxel_proj = VoxelProj(voxel_feature_dim=voxel_feature_dim).to(self.device)
-
-        # Local feature fusion
-        self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim)
-
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
 
-    def forward_mapping(self, observations):
-        """
-        Stage 1: Learn voxel and implicit decoder only. Returns total_cos_loss.
-        CLIP is frozen (with torch.no_grad).
-        """
-        pixels: Dict[str, torch.Tensor] = observations["pixels"]
-        state: torch.Tensor = observations["state"]
-
-        # Extract CLIP features without gradient
-        with torch.no_grad():
-            hand_rgb = pixels["fetch_hand_rgb"]
-            head_rgb = pixels["fetch_head_rgb"]
-            # Reshape to (B, C, H, W)
-            if hand_rgb.shape[2] != 3:
-                hand_rgb = hand_rgb.permute(0, 1, 4, 2, 3)
-                head_rgb = head_rgb.permute(0, 1, 4, 2, 3)
-            B, fs, d, H, W = hand_rgb.shape
-            hand_rgb = hand_rgb.reshape(B, fs * d, H, W)
-            head_rgb = head_rgb.reshape(B, fs * d, H, W)
-
-            # Normalize RGB
-            hand_rgb = transform(hand_rgb.float() / 255.0)
-            head_rgb = transform(head_rgb.float() / 255.0)
-
-            # Depth resizing
-            hand_depth = pixels["fetch_hand_depth"] / 1000.0
-            head_depth = pixels["fetch_head_depth"] / 1000.0
-            if hand_depth.dim() == 5:
-                b2, fs2, d2, h2, w2 = hand_depth.shape
-                hand_depth = hand_depth.view(b2, fs2 * d2, h2, w2)
-                head_depth = head_depth.view(b2, fs2 * d2, h2, w2)
-                hand_depth = F.interpolate(hand_depth, (16, 16), mode="nearest")
-                head_depth = F.interpolate(head_depth, (16, 16), mode="nearest")
-
-            hand_pose = pixels["fetch_hand_pose"]
-            head_pose = pixels["fetch_head_pose"]
-
-            hand_visfeat = get_visual_features(self.clip_model, hand_rgb)
-            head_visfeat = get_visual_features(self.clip_model, head_rgb)
-
-        # Compute 3D world coordinates
-        hand_coords_world, _ = get_3d_coordinates(
-            hand_visfeat, hand_depth, hand_pose, self.fx, self.fy, self.cx, self.cy
-        )
-        head_coords_world, _ = get_3d_coordinates(
-            head_visfeat, head_depth, head_pose, self.fx, self.fy, self.cx, self.cy
-        )
-
-        B_, C_, Hf, Wf = hand_coords_world.shape
-        N = Hf * Wf
-
-        # Flatten coordinates
-        hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
-        head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
-
-        # Flatten CLIP features 
-        with torch.no_grad():
-            hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
-            head_visfeat = head_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
-        feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
-        feats_head_flat = head_visfeat.reshape(B_ * N, -1)
-
-        # Voxel features
-        voxel_feat_for_points_hand, _ = self.hash_voxel.query_voxel_feature(
-            hand_coords_world_flat, return_indices=False
-        )
-        voxel_feat_for_points_head, _ = self.hash_voxel.query_voxel_feature(
-            head_coords_world_flat, return_indices=False
-        )
-
-        # Implicit decoding and cosine loss
-        dec_hand_final = self.implicit_decoder(
-            voxel_feat_for_points_hand, hand_coords_world_flat, return_intermediate=False
-        )
-        cos_sim_hand = F.cosine_similarity(dec_hand_final, feats_hand_flat, dim=-1)
-        cos_loss_hand = 1.0 - cos_sim_hand.mean()
-
-        dec_head_final = self.implicit_decoder(
-            voxel_feat_for_points_head, head_coords_world_flat, return_intermediate=False
-        )
-        cos_sim_head = F.cosine_similarity(dec_head_final, feats_head_flat, dim=-1)
-        cos_loss_head = 1.0 - cos_sim_head.mean()
-
-        total_cos_loss = cos_loss_hand + cos_loss_head
-        return total_cos_loss
-
     def forward_policy(self, observations, object_labels, step_nums):
-        """
-        Stage 2: Use frozen voxel/implicit decoder and fine-tuned CLIP
-        to predict actions (for BC loss).
-        """
         pixels: Dict[str, torch.Tensor] = observations["pixels"]
         state: torch.Tensor = observations["state"]
 
@@ -243,30 +141,6 @@ class Agent_static(nn.Module):
         feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat)
         feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat)
 
-        # Query voxel features 
-        with torch.no_grad():
-            voxel_feat_for_points_hand, _ = self.hash_voxel.query_voxel_feature(
-                hand_coords_world_flat, return_indices=False
-            )
-            voxel_feat_for_points_head, _ = self.hash_voxel.query_voxel_feature(
-                head_coords_world_flat, return_indices=False
-            )
-
-        voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand, hand_coords_world_flat)
-        voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head, head_coords_world_flat)
-
-        # Fuse voxel and CLIP features
-        fused_hand = self.feature_fusion(
-            feats_hand_flat_reduced,
-            voxel_feat_for_points_hand,
-            hand_coords_world_flat
-        )
-        fused_head = self.feature_fusion(
-            feats_head_flat_reduced,
-            voxel_feat_for_points_head,
-            head_coords_world_flat
-        )
-
         # Get text embeddings (projected)
         text_embeddings_reduced = self.text_proj(self.text_embeddings)
         selected_text_reduced = text_embeddings_reduced[object_labels, :]
@@ -275,15 +149,15 @@ class Agent_static(nn.Module):
         batch_hand_coords = hand_coords_world_flat.view(B_, N, 3)
         batch_head_coords = head_coords_world_flat.view(B_, N, 3)
 
-        batch_fused_hand = fused_hand.view(B_, N, -1)
-        batch_fused_head = fused_head.view(B_, N, -1)
+        batch_feats_hand_flat_reduced = feats_hand_flat_reduced.view(B_, N, -1)
+        batch_feats_head_flat_reduced = feats_head_flat_reduced.view(B_, N, -1)
 
         # Transformer
         visual_token = self.transformer(
-            hand=batch_fused_hand,
-            head=batch_fused_head,
-            coords_hand=batch_hand_coords,
-            coords_head=batch_head_coords,
+            hand=batch_feats_hand_flat_reduced,
+            head=batch_feats_head_flat_reduced,
+            # coords_hand=batch_hand_coords,
+            # coords_head=batch_head_coords,
             state=state,
             text_embeddings=selected_text_reduced
         )

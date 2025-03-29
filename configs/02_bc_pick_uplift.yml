@@ -34,7 +34,7 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 64
+  batch_size: 32
   
   stage1_epochs: 20
 
