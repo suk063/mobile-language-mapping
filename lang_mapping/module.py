@@ -73,10 +73,7 @@ class TransformerEncoder(nn.Module):
             ) for _ in range(num_layers)
         ])
         self.post_fusion_mlp = nn.Sequential(
-            nn.Linear(input_dim * 2 * 256, 8192),
-            nn.LayerNorm(8192),
-            nn.ReLU(inplace=True),
-            nn.Linear(8192, 4096),
+            nn.Linear(input_dim * 2 * 256, 4096),
             nn.LayerNorm(4096),
             nn.ReLU(inplace=True),
             nn.Linear(4096, 2048),
@@ -90,7 +87,7 @@ class TransformerEncoder(nn.Module):
         hand, head: [B, N, input_dim]
         coords_hand, coords_head: [B, N, 3]
         state: [B, 42]
-        text_embeddings: [B, T, input_dim]
+        text_embeddings: [B, input_dim]
         """
         B, N, D = hand.shape
 
