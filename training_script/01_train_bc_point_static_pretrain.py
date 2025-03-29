@@ -272,7 +272,7 @@ class DPDataset(ClosableDataset):
 
                 if truncate_trajectories_at_success:
                     success: List[bool] = f[k]["success"][:].tolist()
-                    success_cutoff = min(success.index(True) + 5, len(success))
+                    success_cutoff = min(success.index(True) + 10, len(success))
                     del success
                 else:
                     # success_cutoff = len(act)
@@ -680,7 +680,7 @@ def train(cfg: TrainConfig):
         param.requires_grad = False
         
     # LoRA    
-    apply_lora_to_clip(agent.clip_model, rank=16, alpha=8, dropout=0.0)
+    # apply_lora_to_clip(agent.clip_model, rank=16, alpha=8, dropout=0.0)
     
     for name, param in agent.named_parameters():
         param.requires_grad = True 
@@ -688,21 +688,13 @@ def train(cfg: TrainConfig):
     for name, param in agent.clip_model.named_parameters():
         param.requires_grad = False 
     
-    for module in agent.clip_model.modules():
-        if isinstance(module, LoRALinear):
-            for param in module.parameters():
-                param.requires_grad = True
+    # for module in agent.clip_model.modules():
+    #     if isinstance(module, LoRALinear):
+    #         for param in module.parameters():
+    #             param.requires_grad = True
     
     params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
-
-    # for param in agent.parameters():
-    #     param.requires_grad = True
-        
-    # params_to_optimize = (
-    #     list(agent.parameters())
-    # )
-    # optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)
 

@@ -7,7 +7,7 @@ from typing import Dict
 # Local imports
 from ..module import *
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, transform
+from ..utils import get_3d_coordinates, get_visual_features, positional_encoding, transform
 
 import open_clip
 
@@ -87,7 +87,7 @@ class Agent_static(nn.Module):
         self.hash_voxel = hash_voxel
         self.implicit_decoder = implicit_decoder
 
-        # self.voxel_proj = nn.Linear(voxel_feature_dim, voxel_feature_dim).to(self.device)
+        self.voxel_proj = VoxelProj(voxel_feature_dim=voxel_feature_dim).to(self.device)
 
         # Local feature fusion
         self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim)
@@ -252,8 +252,8 @@ class Agent_static(nn.Module):
                 head_coords_world_flat, return_indices=False
             )
 
-        # voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand)
-        # voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head)
+        voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand, hand_coords_world_flat)
+        voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head, head_coords_world_flat)
 
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(

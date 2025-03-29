@@ -73,12 +73,15 @@ class TransformerEncoder(nn.Module):
             ) for _ in range(num_layers)
         ])
         self.post_fusion_mlp = nn.Sequential(
-            nn.Linear(input_dim * 2 * 256, 4096),
+            nn.Linear(input_dim * 2 * 256, 8192),
+            nn.LayerNorm(8192),
+            nn.ReLU(inplace=True),
+            nn.Linear(8192, 4096),
             nn.LayerNorm(4096),
-            nn.GELU(),
+            nn.ReLU(inplace=True),
             nn.Linear(4096, 2048),
             nn.LayerNorm(2048),
-            nn.GELU(),
+            nn.ReLU(inplace=True),
             nn.Linear(2048, output_dim)
         )
 
@@ -260,6 +263,34 @@ class ImplicitDecoder(nn.Module):
             return x1, out
         else:
             return out
+
+
+class VoxelProj(nn.Module):
+    def __init__(self, voxel_feature_dim=120, L=6):
+        super().__init__()
+        self.L = L
+        self.pos_enc_dim = 2 * self.L * 3
+
+        self.mlp = nn.Sequential(
+            nn.Linear(voxel_feature_dim + self.pos_enc_dim, voxel_feature_dim),
+            nn.ReLU(),
+            nn.LayerNorm(voxel_feature_dim),
+            nn.Linear(voxel_feature_dim, voxel_feature_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, voxel_feat, coords_3d):
+        """
+        Args:
+            voxel_feat: (N, voxel_feature_dim)
+            coords_3d:  (N, 3)
+        Returns:
+            projected:  (N, voxel_feature_dim)
+        """
+        pe = positional_encoding(coords_3d, L=self.L)  # (N, 2*L*3)
+        x = torch.cat([voxel_feat, pe], dim=-1)
+        out = self.mlp(x)
+        return out
 
 class LoRALinear(nn.Module):
     def __init__(self, 
