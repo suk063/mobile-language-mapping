@@ -23,8 +23,7 @@ import mani_skill.envs
 from mani_skill.utils import common
 
 from lang_mapping.agent.agent_static_dino import Agent_static_dino
-from lang_mapping.module import ImplicitDecoder, LoRALinear
-from lang_mapping.dino_module import ImplicitDecoderDINO
+from lang_mapping.module import ImplicitDecoderDINO, LoRALinear
 from lang_mapping.mapper.mapper import VoxelHashTable
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
