@@ -112,7 +112,7 @@ class Agent_static_dino(nn.Module):
         self.voxel_proj = VoxelProj(voxel_feature_dim=voxel_feature_dim).to(self.device)
 
         # Local feature fusion
-        self.feature_fusion = ConcatMLPFusionDINO(feat_dim=voxel_feature_dim)
+        self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim)
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
@@ -155,8 +155,8 @@ class Agent_static_dino(nn.Module):
             head_pose = pixels["fetch_head_pose"]
 
             # CLIP feature
-            hand_visfeat_clip = get_visual_features(self.clip_model, hand_rgb)
-            head_visfeat_clip = get_visual_features(self.clip_model, head_rgb)
+            # hand_visfeat_clip = get_visual_features(self.clip_model, hand_rgb)
+            # head_visfeat_clip = get_visual_features(self.clip_model, head_rgb)
 
             # DINO feature
             hand_visfeat_dino = get_visual_features_dino(self.dino_model, hand_rgb)
@@ -164,10 +164,10 @@ class Agent_static_dino(nn.Module):
 
         # Compute 3D world coordinates
         hand_coords_world, _ = get_3d_coordinates(
-            hand_visfeat_clip, hand_depth, hand_pose, self.fx, self.fy, self.cx, self.cy
+            hand_visfeat_dino, hand_depth, hand_pose, self.fx, self.fy, self.cx, self.cy
         )
         head_coords_world, _ = get_3d_coordinates(
-            head_visfeat_clip, head_depth, head_pose, self.fx, self.fy, self.cx, self.cy
+            head_visfeat_dino, head_depth, head_pose, self.fx, self.fy, self.cx, self.cy
         )
 
         B_, C_, Hf, Wf = hand_coords_world.shape
@@ -178,11 +178,11 @@ class Agent_static_dino(nn.Module):
         head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
 
         # ========== CLIP feats (flatten) ==========
-        with torch.no_grad():
-            hand_visfeat_clip = hand_visfeat_clip.permute(0, 2, 3, 1).reshape(B_, N, -1)
-            head_visfeat_clip = head_visfeat_clip.permute(0, 2, 3, 1).reshape(B_, N, -1)
-        feats_hand_clip_flat = hand_visfeat_clip.reshape(B_ * N, -1)  # (B*N, 768)
-        feats_head_clip_flat = head_visfeat_clip.reshape(B_ * N, -1)
+        # with torch.no_grad():
+        #     hand_visfeat_clip = hand_visfeat_clip.permute(0, 2, 3, 1).reshape(B_, N, -1)
+        #     head_visfeat_clip = head_visfeat_clip.permute(0, 2, 3, 1).reshape(B_, N, -1)
+        # feats_hand_clip_flat = hand_visfeat_clip.reshape(B_ * N, -1)  # (B*N, 768)
+        # feats_head_clip_flat = head_visfeat_clip.reshape(B_ * N, -1)
 
         # ========== DINO feats (flatten) ==========
         with torch.no_grad():
@@ -203,17 +203,17 @@ class Agent_static_dino(nn.Module):
         dec_hand_clip, dec_hand_dino = self.implicit_decoder(voxel_feat_for_points_hand, hand_coords_world_flat)
         dec_head_clip, dec_head_dino = self.implicit_decoder(voxel_feat_for_points_head, head_coords_world_flat)
 
-        cos_sim_hand_clip = F.cosine_similarity(dec_hand_clip, feats_hand_clip_flat, dim=-1).mean()
+        # cos_sim_hand_clip = F.cosine_similarity(dec_hand_clip, feats_hand_clip_flat, dim=-1).mean()
         cos_sim_hand_dino = F.cosine_similarity(dec_hand_dino, feats_hand_dino_flat, dim=-1).mean()
-        cos_sim_head_clip = F.cosine_similarity(dec_head_clip, feats_head_clip_flat, dim=-1).mean()
+        # cos_sim_head_clip = F.cosine_similarity(dec_head_clip, feats_head_clip_flat, dim=-1).mean()
         cos_sim_head_dino = F.cosine_similarity(dec_head_dino, feats_head_dino_flat, dim=-1).mean()
 
-        cos_loss_hand_clip = 1.0 - cos_sim_hand_clip
+        # cos_loss_hand_clip = 1.0 - cos_sim_hand_clip
         cos_loss_hand_dino = 1.0 - cos_sim_hand_dino
-        cos_loss_head_clip = 1.0 - cos_sim_head_clip
+        # cos_loss_head_clip = 1.0 - cos_sim_head_clip
         cos_loss_head_dino = 1.0 - cos_sim_head_dino
 
-        total_cos_loss = cos_loss_hand_clip + cos_loss_hand_dino + cos_loss_head_clip + cos_loss_head_dino
+        total_cos_loss = cos_loss_hand_dino + cos_loss_head_dino
         return total_cos_loss
 
     def forward_policy(self, observations, object_labels, step_nums):
@@ -251,8 +251,8 @@ class Agent_static_dino(nn.Module):
         head_pose = pixels["fetch_head_pose"]
 
         # ------------------ CLIP Feature ------------------
-        hand_visfeat_clip = get_visual_features(self.clip_model, hand_rgb)
-        head_visfeat_clip = get_visual_features(self.clip_model, head_rgb)
+        # hand_visfeat_clip = get_visual_features(self.clip_model, hand_rgb)
+        # head_visfeat_clip = get_visual_features(self.clip_model, head_rgb)
 
         # ------------------ DINO Feature ------------------
         hand_visfeat_dino = get_visual_features_dino(self.dino_model, hand_rgb)
@@ -260,10 +260,10 @@ class Agent_static_dino(nn.Module):
 
         # Compute 3D coords
         hand_coords_world, _ = get_3d_coordinates(
-            hand_visfeat_clip, hand_depth, hand_pose, self.fx, self.fy, self.cx, self.cy
+            hand_visfeat_dino, hand_depth, hand_pose, self.fx, self.fy, self.cx, self.cy
         )
         head_coords_world, _ = get_3d_coordinates(
-            head_visfeat_clip, head_depth, head_pose, self.fx, self.fy, self.cx, self.cy
+            head_visfeat_dino, head_depth, head_pose, self.fx, self.fy, self.cx, self.cy
         )
 
         B_, C_, Hf, Wf = hand_coords_world.shape
@@ -273,10 +273,10 @@ class Agent_static_dino(nn.Module):
         head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
 
         # Flatten CLIP feats
-        hand_visfeat_clip = hand_visfeat_clip.permute(0, 2, 3, 1).reshape(B_, N, -1)
-        head_visfeat_clip = head_visfeat_clip.permute(0, 2, 3, 1).reshape(B_, N, -1)
-        feats_hand_clip_flat = hand_visfeat_clip.reshape(B_ * N, -1)
-        feats_head_clip_flat = head_visfeat_clip.reshape(B_ * N, -1)
+        # hand_visfeat_clip = hand_visfeat_clip.permute(0, 2, 3, 1).reshape(B_, N, -1)
+        # head_visfeat_clip = head_visfeat_clip.permute(0, 2, 3, 1).reshape(B_, N, -1)
+        # feats_hand_clip_flat = hand_visfeat_clip.reshape(B_ * N, -1)
+        # feats_head_clip_flat = head_visfeat_clip.reshape(B_ * N, -1)
 
         # Flatten DINO feats
         hand_visfeat_dino = hand_visfeat_dino.permute(0, 2, 3, 1).reshape(B_, N, -1)
@@ -285,8 +285,8 @@ class Agent_static_dino(nn.Module):
         feats_head_dino_flat = head_visfeat_dino.reshape(B_ * N, -1)
 
         # Reduce dimension
-        feats_hand_clip_reduced = self.clip_dim_reducer(feats_hand_clip_flat)
-        feats_head_clip_reduced = self.clip_dim_reducer(feats_head_clip_flat)
+        # feats_hand_clip_reduced = self.clip_dim_reducer(feats_hand_clip_flat)
+        # feats_head_clip_reduced = self.clip_dim_reducer(feats_head_clip_flat)
 
         feats_hand_dino_reduced = self.dino_dim_reducer(feats_hand_dino_flat)
         feats_head_dino_reduced = self.dino_dim_reducer(feats_head_dino_flat)
@@ -306,13 +306,13 @@ class Agent_static_dino(nn.Module):
          # ------------------ Fuse (CLIP + Voxel + DINO) ------------------
         fused_hand = self.feature_fusion(
             voxel_feat_for_points_hand,
-            feats_hand_clip_reduced,
+            # feats_hand_clip_reduced,
             feats_hand_dino_reduced,
             hand_coords_world_flat
         )
         fused_head = self.feature_fusion(
             voxel_feat_for_points_head,
-            feats_head_clip_reduced,
+            # feats_head_clip_reduced,
             feats_head_dino_reduced,
             head_coords_world_flat
         )
