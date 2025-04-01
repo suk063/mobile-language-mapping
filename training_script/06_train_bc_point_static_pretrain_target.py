@@ -842,12 +842,17 @@ def train(cfg: TrainConfig):
 
             eval_obs, _ = eval_envs.reset()
             eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
+            targets_pos, rigid_objs_pos = get_translation_from_subtask_poses(subtask_poses, eval_envs.unwrapped.task_plan[0].composite_subtask_uids)
+            
+            targets_pos = targets_pos.to(device)
+            rigid_objs_pos = rigid_objs_pos.to(device)    
+            
             B = eval_subtask_labels.size()
 
             for t in range(eval_envs.max_episode_steps):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_policy(eval_obs, eval_subtask_labels, time_step)
+                    action = agent.forward_policy(eval_obs, eval_subtask_labels, time_step, targets_pos, rigid_objs_pos)
                 # Stub environment step
                 eval_obs, _, _, _, _ = eval_envs.step(action)
             if len(eval_envs.return_queue) > 0:
