@@ -13,9 +13,9 @@ OBJ=all
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
 WORKSPACE="mshab_exps"
 GROUP=$TASK-rcad-bc-point-$SUBTASK
-EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-local-trajs_per_obj=$TRAJS_PER_OBJ"
+EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-static-dino-local-trajs_per_obj=$TRAJS_PER_OBJ"
 # shellcheck disable=SC2001
-PROJECT_NAME="MS-HAB-RCAD-bc-point"
+PROJECT_NAME="MS-HAB-RCAD-bc-point-static-dino"
 
 WANDB=True
 TENSORBOARD=True
@@ -60,14 +60,14 @@ args=(
 
 if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
     echo "RESUMING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.train_bc_point "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.05_train_bc_point_static_pretrain_dino "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
         logger.clear_out="False" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.train_bc_point configs/bc_pick.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.05_train_bc_point_static_pretrain_dino configs/05_bc_pick_static_dino.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"

@@ -21,9 +21,9 @@ from torch.utils.tensorboard import SummaryWriter
 import mani_skill.envs
 from mani_skill.utils import common
 
-from lang_mapping.agent.agent_dynamic import Agent_point_dynamic
+from lang_mapping.agent.agent_point import Agent_point
 from lang_mapping.module import ImplicitDecoder
-from lang_mapping.mapper.mapper_dynamic import VoxelHashTableDynamic
+from lang_mapping.mapper.mapper import VoxelHashTable
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
@@ -85,9 +85,10 @@ class BCConfig:
     name: str = "bc"
     lr: float = 3e-4               # learning rate
     batch_size: int = 256          # batch size
-    stage1_epochs: int = 2         # stage 1 epochs
-    stage2_epochs: int = 6        # stage 2 epochs
-    stage3_epochs: int = 2        # stage 3 epochs
+    stage1_epochs: int = 1         # stage 1 epochs
+    stage2_epochs: int = 10        # stage 2 epochs
+    stage3_epochs: int = 1        # stage 2 epochs
+
     eval_freq: int = 1
     log_freq: int = 1
     save_freq: int = 1
@@ -104,7 +105,6 @@ class BCConfig:
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
     scene_bound_max: List[float] = field(default_factory=lambda: [4.6, 4.7, 3.1])
-    mod_time: int = 10
 
     # CLIP / Agent Settings
     clip_input_dim: int = 768
@@ -113,10 +113,8 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    stage1_cos_loss_weight: float = 0.5
-    stage2_cos_loss_weight: float = 0.005
-    stage2_linear_scheduling: bool = True
-    dynamic_only: bool = True
+    hidden_dim: int = 240
+    cos_loss_weight: float = 0.1
 
     num_eval_envs: int = field(init=False)
 
@@ -125,7 +123,6 @@ class BCConfig:
     pretrained_voxel_path:str = None
     pretrained_implicit_path: str = None
     pretrained_optimizer_path: str = None
-
 
     def _additional_processing(self):
         assert self.name == "bc"
@@ -371,26 +368,24 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     # VoxelHashTable and ImplicitDecoder
-    hash_voxel = VoxelHashTableDynamic(
+    hash_voxel = VoxelHashTable(
         resolution=cfg.algo.resolution,
         hash_table_size=cfg.algo.hash_table_size,
         feature_dim=cfg.algo.voxel_feature_dim,
         scene_bound_min=tuple(cfg.algo.scene_bound_min),
         scene_bound_max=tuple(cfg.algo.scene_bound_max),
-        mod_time= cfg.algo.mod_time,
-        dynamaic_only=cfg.algo.dynamic_only,
         device=device
     ).to(device)
 
     implicit_decoder = ImplicitDecoder(
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
-        hidden_dim=256,
+        hidden_dim=cfg.algo.hidden_dim,
         output_dim=cfg.algo.clip_input_dim,
         L=10
     ).to(device)
 
     # Agent
-    agent = Agent_point_dynamic(
+    agent = Agent_point(
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
@@ -399,8 +394,8 @@ def train(cfg: TrainConfig):
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
         state_mlp_dim=cfg.algo.state_mlp_dim,
+        hidden_dim=cfg.algo.hidden_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        max_time_steps=eval_envs.max_episode_steps + 1,
         hash_voxel=hash_voxel,
         implicit_decoder=implicit_decoder
     ).to(device)
@@ -428,6 +423,7 @@ def train(cfg: TrainConfig):
     if cfg.algo.pretrained_optimizer_path is not None and os.path.exists(cfg.algo.pretrained_optimizer_path):
         print(f"[INFO] Loading pretrained optimizer state from {cfg.algo.pretrained_optimizer_path}")
         optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device))
+
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -506,7 +502,7 @@ def train(cfg: TrainConfig):
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
             pi, cos_loss = agent(obs, subtask_labels, step_nums)
-            cos_loss = cfg.algo.stage1_cos_loss_weight * cos_loss
+            cos_loss = cfg.algo.cos_loss_weight * cos_loss
             loss = cos_loss  # Stage 1 uses only cos_loss
 
             optimizer.zero_grad()
@@ -569,18 +565,12 @@ def train(cfg: TrainConfig):
         agent.train()
         hash_voxel.train()
 
-        if cfg.algo.stage2_linear_scheduling:
-            linear_scale = 1.0 - epoch / cfg.algo.stage2_epochs
-            cos_loss_weight =  cfg.algo.stage2_cos_loss_weight * linear_scale
-        else:
-            cos_loss_weight =  cfg.algo.stage2_cos_loss_weight
-
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
             pi, cos_loss = agent(obs, subtask_labels, step_nums)
-            cos_loss = cos_loss_weight * cos_loss
+            cos_loss = cfg.algo.cos_loss_weight * cos_loss
             bc_loss = F.mse_loss(pi, act)
             loss = cos_loss + bc_loss  # Stage 2 uses both
 

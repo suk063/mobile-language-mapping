@@ -2,7 +2,7 @@
 
 SEED=1
 
-TRAJS_PER_OBJ=1
+TRAJS_PER_OBJ=1000
 
 TASK=set_table
 SUBTASK=pick
@@ -12,10 +12,10 @@ OBJ=all
 # shellcheck disable=SC2001
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
 WORKSPACE="mshab_exps"
-GROUP=$TASK-rcad-bc-point-flow-$SUBTASK
+GROUP=$TASK-rcad-bc-point-$SUBTASK
 EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-local-trajs_per_obj=$TRAJS_PER_OBJ"
 # shellcheck disable=SC2001
-PROJECT_NAME="MS-HAB-RCAD-bc-point-flow"
+PROJECT_NAME="MS-HAB-RCAD-bc-point-time"
 
 WANDB=True
 TENSORBOARD=True
@@ -43,11 +43,11 @@ args=(
     "algo.trajs_per_obj=$TRAJS_PER_OBJ"
     "algo.data_dir_fp=$data_dir_fp"
     "algo.max_cache_size=$MAX_CACHE_SIZE"
-    "algo.eval_freq=0"
+    "algo.eval_freq=1"
     "algo.log_freq=1"
     "algo.save_freq=1"
     "eval_env.make_env=True"
-    "eval_env.num_envs=1"
+    "eval_env.num_envs=30"
     "eval_env.max_episode_steps=200"
     "eval_env.record_video=True"
     "eval_env.info_on_video=True"
@@ -60,14 +60,14 @@ args=(
 
 if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
     echo "RESUMING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.train_bc_point_flow_traverse_vis "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.train_bc_point_dynamic "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
         logger.clear_out="False" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.train_bc_point_flow_traverse_vis configs/bc_pick_flow.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.train_bc_point_dynamic configs/bc_pick.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"

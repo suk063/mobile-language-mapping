@@ -11,7 +11,7 @@ conda activate mshab
 Proceed with the following steps to install
 
 ```bash
-git clone https://github.com/haosulab/ManiSkill.git -b mshab_b10 --single-branch
+git clone https://github.com/haosulab/ManiSkill.git -b mshab --single-branch
 pip install -e ManiSkill
 ```
 (temporary) In [ManiSkill](https://github.com/haosulab/ManiSkill/blob/mshab/mani_skill/agents/robots/fetch/fetch.py#L70-L92), lines 75-76, 85-86, you need to change 128 to 224.

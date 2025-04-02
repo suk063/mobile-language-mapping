@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder, ImplicitDecoder
+from ..module import TransformerEncoder, LocalSelfAttentionFusion, ActionMLP, ImplicitDecoder
 from ..mapper.mapper import VoxelHashTable
 from ..utils import get_3d_coordinates, get_visual_features, transform
 
@@ -20,12 +20,11 @@ class Agent_point(nn.Module):
         open_clip_model: tuple = ("EVA02-L-14", "merged2b_s4b_b131k"),
         text_input: list = ["bowl", "apple"],
         clip_input_dim: int = 768,
-        state_mlp_dim: int = 1024,
+        hidden_dim=240,
         voxel_feature_dim: int = 120,
+        state_mlp_dim: int = 1024,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
-        max_time_steps: int = 201,
-        temporal_emb_dim: int = 12,
         hash_voxel: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
     ):
@@ -59,7 +58,7 @@ class Agent_point(nn.Module):
 
         # Text
         text_tokens = self.tokenizer(text_input).to(self.device)
-        self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
+        self.text_proj = nn.Linear(clip_input_dim, hidden_dim).to(self.device)
         with torch.no_grad():
             text_embeddings = self.clip_model.encode_text(text_tokens)
             text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
@@ -69,10 +68,10 @@ class Agent_point(nn.Module):
             self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
 
         # Projection to reduce CLIP feature dim
-        self.clip_dim_reducer = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
+        self.clip_dim_reducer = nn.Linear(clip_input_dim, hidden_dim).to(self.device)
 
         # Transformer
-        self.transformer = TransformerEncoder(input_dim=voxel_feature_dim, hidden_dim=256, num_layers=2, num_heads=8, output_dim=state_mlp_dim)  
+        self.transformer = TransformerEncoder(input_dim=hidden_dim, hidden_dim=256, num_layers=4, num_heads=8, output_dim=state_mlp_dim)  
 
         # Action MLP is now a separate class
         action_dim = np.prod(single_act_shape)
@@ -89,17 +88,12 @@ class Agent_point(nn.Module):
         self.voxel_grid = None
         self.voxel_points_dict = None
 
-        # Time embeddings
-        self.temporal_emb_table_hand = nn.Parameter(
-            torch.randn(max_time_steps, temporal_emb_dim, device=self.device) * 0.01
-        )
-        self.temporal_emb_table_head = nn.Parameter(
-            torch.randn(max_time_steps, temporal_emb_dim, device=self.device) * 0.01
-        )
-
         # Additional transforms for voxel features
-        self.voxel_proj = nn.Linear(voxel_feature_dim, voxel_feature_dim).to(self.device)
-        self.feature_fusion = LocalSelfAttentionFusion(feat_dim=voxel_feature_dim)
+        self.L = 10
+        self.pe_dim = 2 * self.L * 3
+        
+        # self.voxel_proj = nn.Linear(voxel_feature_dim, voxel_feature_dim).to(self.device)
+        self.feature_fusion = LocalSelfAttentionFusion(feat_dim=hidden_dim)
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
@@ -202,10 +196,10 @@ class Agent_point(nn.Module):
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
 
         # Reduce feature dim
-        feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat)  # [B*N, voxel_feature_dim]
+        feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat)  # [B*N, 240]
         feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat)
 
-        feats_hand_reduced = feats_hand_flat_reduced.reshape(B_, N, -1)  # [B, N, voxel_feature_dim]
+        feats_hand_reduced = feats_hand_flat_reduced.reshape(B_, N, -1)  # [B, N, 240]
         feats_head_reduced = feats_head_flat_reduced.reshape(B_, N, -1)
 
         # Voxel lookup
@@ -217,19 +211,19 @@ class Agent_point(nn.Module):
             head_coords_world_flat, return_indices=return_indices
         )
 
-        # Temporal embeddings
-        temporal_emb_hand = self.temporal_emb_table_hand[step_nums]  # [B, temporal_emb_dim]
-        temporal_emb_head = self.temporal_emb_table_head[step_nums]
-        temporal_emb_hand = temporal_emb_hand.unsqueeze(1).expand(B, N, -1).reshape(B * N, -1)
-        temporal_emb_head = temporal_emb_head.unsqueeze(1).expand(B, N, -1).reshape(B * N, -1)
-
         # Decoder for loss (cosine similarity)
-        dec_hand = self.implicit_decoder(voxel_feat_for_points_hand, hand_coords_world_flat)
-        cos_sim_hand = F.cosine_similarity(dec_hand, feats_hand_flat, dim=-1)
+        dec_hand_feat, dec_hand_final = self.implicit_decoder(
+            voxel_feat_for_points_hand, hand_coords_world_flat, return_intermediate=True
+        )
+        
+        cos_sim_hand = F.cosine_similarity(dec_hand_final, feats_hand_flat, dim=-1)
         cos_loss_hand = 1.0 - cos_sim_hand.mean()
+        
+        dec_head_feat, dec_head_final = self.implicit_decoder(
+            voxel_feat_for_points_head, head_coords_world_flat, return_intermediate=True
+        )
 
-        dec_head = self.implicit_decoder(voxel_feat_for_points_head, head_coords_world_flat)
-        cos_sim_head = F.cosine_similarity(dec_head, feats_head_flat, dim=-1)
+        cos_sim_head = F.cosine_similarity(dec_head_final, feats_head_flat, dim=-1)
         cos_loss_head = 1.0 - cos_sim_head.mean()
 
         total_cos_loss = cos_loss_hand + cos_loss_head
@@ -255,15 +249,12 @@ class Agent_point(nn.Module):
                     self.used_voxel_idx_set.add(int(idx))
 
         # Transformer input
-        voxel_feat_for_points_hand_proj = self.voxel_proj(voxel_feat_for_points_hand)
-        voxel_feat_for_points_head_proj = self.voxel_proj(voxel_feat_for_points_head)
-
-        voxel_feat_for_points_hand_batched = voxel_feat_for_points_hand_proj.view(B, N, -1)
-        voxel_feat_for_points_head_batched = voxel_feat_for_points_head_proj.view(B, N, -1)
+        dec_hand_feat_batched = dec_hand_feat.view(B_, N, -1)  # [B, N, 240]
+        dec_head_feat_batched = dec_head_feat.view(B_, N, -1)
 
         # Fuse voxel features and reduced CLIP features
-        fused_hand = self.feature_fusion(voxel_feat_for_points_hand_batched, feats_hand_reduced)
-        fused_head = self.feature_fusion(voxel_feat_for_points_head_batched, feats_head_reduced)
+        fused_hand = self.feature_fusion(dec_hand_feat_batched, feats_hand_reduced)
+        fused_head = self.feature_fusion(dec_head_feat_batched, feats_head_reduced)
 
         # Select text embedding
         text_embeddings_reduced = self.text_proj(self.text_embeddings)

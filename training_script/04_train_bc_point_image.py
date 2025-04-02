@@ -4,7 +4,7 @@ import random
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import h5py
 from dacite import from_dict
@@ -14,6 +14,7 @@ from tqdm import tqdm
 import gymnasium as gym
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
@@ -21,9 +22,8 @@ from torch.utils.tensorboard import SummaryWriter
 import mani_skill.envs
 from mani_skill.utils import common
 
-from lang_mapping.agent.agent_flow_traverse import Agent_point_flow_traverse
-from lang_mapping.module import ImplicitDecoder
-from lang_mapping.mapper.mapper_flow_traverse import VoxelHashTableFlowTraverse
+from lang_mapping.agent.agent_image import Agent_image
+from lang_mapping.module import LoRALinear
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
@@ -31,6 +31,42 @@ from mshab.utils.dataset import ClosableDataLoader, ClosableDataset
 from mshab.utils.logger import Logger, LoggerConfig
 from mshab.utils.time import NonOverlappingTimeProfiler
 
+def apply_lora_to_clip(
+    clip_model: nn.Module,
+    rank: int = 4,
+    alpha: float = 1.0,
+    dropout: float = 0.0,
+    target_blocks: Optional[List[int]] = None
+):
+
+    for i, block in enumerate(clip_model.visual.trunk.blocks):
+        if target_blocks is not None and i not in target_blocks:
+            continue
+        attn = block.attn  # EvaAttention
+        # q_proj
+        # if hasattr(attn, 'q_proj') and isinstance(attn.q_proj, nn.Linear):
+        #     attn.q_proj = LoRALinear(attn.q_proj, rank=rank, alpha=alpha, dropout=dropout)
+        # k_proj
+        # if hasattr(attn, 'k_proj') and isinstance(attn.k_proj, nn.Linear):
+        #     attn.k_proj = LoRALinear(attn.k_proj, rank=rank, alpha=alpha, dropout=dropout)
+        # v_proj
+        # if hasattr(attn, 'v_proj') and isinstance(attn.v_proj, nn.Linear):
+        #     attn.v_proj = LoRALinear(attn.v_proj, rank=rank, alpha=alpha, dropout=dropout)
+        # out_proj
+        # if hasattr(attn, 'proj') and isinstance(attn.proj, nn.Linear):
+        #     attn.proj = LoRALinear(attn.proj, rank=rank, alpha=alpha, dropout=dropout)
+
+        mlp = block.mlp  # SwiGLU
+        # # fc1_g
+        # if hasattr(mlp, 'fc1_g') and isinstance(mlp.fc1_g, nn.Linear):
+        #     mlp.fc1_g = LoRALinear(mlp.fc1_g, rank=rank, alpha=alpha, dropout=dropout)
+        # # fc1_x
+        # if hasattr(mlp, 'fc1_x') and isinstance(mlp.fc1_x, nn.Linear):
+        #     mlp.fc1_x = LoRALinear(mlp.fc1_x, rank=rank, alpha=alpha, dropout=dropout)
+        # # fc2
+        if hasattr(mlp, 'fc2') and isinstance(mlp.fc2, nn.Linear):
+            mlp.fc2 = LoRALinear(mlp.fc2, rank=rank, alpha=alpha, dropout=dropout)
+            
 
 def build_object_map(json_file_path: str, object_names: List[str]) -> Dict[str, torch.Tensor]:
     """
@@ -78,23 +114,22 @@ def get_object_labels_batch(
         else:
             labels.append(object_map[uid])
     return torch.stack(labels, dim=0)
-
-
+                    
 @dataclass
 class BCConfig:
     name: str = "bc"
     lr: float = 3e-4               # learning rate
     batch_size: int = 256          # batch size
-    stage1_epochs: int = 2         # stage 1 epochs
-    stage2_epochs: int = 6        # stage 2 epochs
-    stage3_epochs: int = 2        # stage 3 epochs
+    stage1_epochs: int = 1         # stage 1 epochs
+    stage2_epochs: int = 10        # stage 2 epochs
+
     eval_freq: int = 1
     log_freq: int = 1
     save_freq: int = 1
     save_backup_ckpts: bool = False
 
     data_dir_fp: str = None        # path to data .h5 files
-    max_cache_size: Union[int, Literal["all"]] = 0        # max data points to cache
+    max_cache_size: int = 0        # max data points to cache
     trajs_per_obj: Union[str, int] = "all"
     torch_deterministic: bool = True
 
@@ -104,9 +139,6 @@ class BCConfig:
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
     scene_bound_max: List[float] = field(default_factory=lambda: [4.6, 4.7, 3.1])
-    mod_time: int = 201
-    trilinear_feat: bool = True
-    trilinear_flow: bool = True
 
     # CLIP / Agent Settings
     clip_input_dim: int = 768
@@ -115,21 +147,14 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    cos_loss_weight: float = 0.01
-    flow_cos_loss_weight: float = 0.01
-    scene_flow_loss_weight: float = 0.1
     hidden_dim: int = 240
-    flow_reg_loss_weight: float = 0.02
-    bc_loss_weight: float = 2
+    cos_loss_weight: float = 0.1
 
     num_eval_envs: int = field(init=False)
 
     # Pre-trained weights
     pretrained_agent_path: str = None
-    pretrained_voxel_path:str = None
-    pretrained_implicit_path: str = None
     pretrained_optimizer_path: str = None
-
 
     def _additional_processing(self):
         assert self.name == "bc"
@@ -187,7 +212,6 @@ class TrainConfig:
 def get_mshab_train_cfg(cfg: TrainConfig) -> TrainConfig:
     return from_dict(data_class=TrainConfig, data=OmegaConf.to_container(cfg))
 
-
 def recursive_h5py_to_numpy(h5py_obs, slice=None):
     if isinstance(h5py_obs, h5py.Group) or isinstance(h5py_obs, dict):
         return dict(
@@ -200,7 +224,6 @@ def recursive_h5py_to_numpy(h5py_obs, slice=None):
     if slice is not None:
         return h5py_obs[slice]
     return h5py_obs[:]
-
 
 class DPDataset(ClosableDataset):
     def __init__(
@@ -245,7 +268,7 @@ class DPDataset(ClosableDataset):
 
                 if truncate_trajectories_at_success:
                     success: List[bool] = f[k]["success"][:].tolist()
-                    success_cutoff = min(success.index(True) + 1, len(success))
+                    success_cutoff = min(success.index(True) + 5, len(success))
                     del success
                 else:
                     # success_cutoff = len(act)
@@ -453,7 +476,6 @@ class TempTranslateToPointDataset(DPDataset):
 
         return (obs, act, subtask_uid, step_num)
 
-
 def train(cfg: TrainConfig):
     # Seed
     random.seed(cfg.seed)
@@ -474,28 +496,8 @@ def train(cfg: TrainConfig):
     eval_envs.action_space.seed(cfg.seed + 1_000_000)
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
-    # VoxelHashTable and ImplicitDecoder
-    hash_voxel = VoxelHashTableFlowTraverse(
-        resolution=cfg.algo.resolution,
-        hash_table_size=cfg.algo.hash_table_size,
-        feature_dim=cfg.algo.voxel_feature_dim,
-        scene_bound_min=tuple(cfg.algo.scene_bound_min),
-        scene_bound_max=tuple(cfg.algo.scene_bound_max),
-        mod_time= cfg.algo.mod_time,
-        trilinear_feat = cfg.algo.trilinear_feat,
-        trilinear_flow = cfg.algo.trilinear_flow,
-        device=device
-    ).to(device)
-
-    implicit_decoder = ImplicitDecoder(
-        voxel_feature_dim=cfg.algo.voxel_feature_dim,
-        hidden_dim=cfg.algo.hidden_dim,
-        output_dim=cfg.algo.clip_input_dim,
-        L=10
-    ).to(device)
-
     # Agent
-    agent = Agent_point_flow_traverse(
+    agent = Agent_image(
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
@@ -504,36 +506,12 @@ def train(cfg: TrainConfig):
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
         state_mlp_dim=cfg.algo.state_mlp_dim,
-        hidden_dim=cfg.algo.hidden_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        max_time_steps=eval_envs.max_episode_steps + 1,
-        hash_voxel=hash_voxel,
-        implicit_decoder=implicit_decoder
     ).to(device)
-
-    # Combine parameters
-    params_to_optimize = (
-        list(agent.parameters())
-        + list(hash_voxel.parameters())
-        + list(implicit_decoder.parameters())
-    )
-    optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
 
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
         print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
-        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device), strict=False)
-
-    if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
-        print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
-        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
-
-    if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
-        print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
-        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=False)
-
-    if cfg.algo.pretrained_optimizer_path is not None and os.path.exists(cfg.algo.pretrained_optimizer_path):
-        print(f"[INFO] Loading pretrained optimizer state from {cfg.algo.pretrained_optimizer_path}")
-        optimizer.load_state_dict(torch.load(cfg.algo.pretrained_optimizer_path, map_location=device))
+        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -543,23 +521,12 @@ def train(cfg: TrainConfig):
         Save the agent, voxel table, decoder, and optimizer states.
         """
         agent_path = logger.model_path / f"{name}_agent.pt"
-        voxel_path = logger.model_path / f"{name}_voxel.pt"
-        decoder_path = logger.model_path / f"{name}_implicit.pt"
         optim_path = logger.model_path / f"{name}_optimizer.pt"
 
         torch.save(agent.state_dict(), agent_path)
-        torch.save(hash_voxel.state_dict(), voxel_path)
-        torch.save(implicit_decoder.state_dict(), decoder_path)
         torch.save(optimizer.state_dict(), optim_path)
 
-    # Create BC dataset and dataloader
-    # bc_dataset = BCDataset(
-    #     cfg.algo.data_dir_fp,
-    #     cfg.algo.max_cache_size,
-    #     cat_state=cfg.eval_env.cat_state,
-    #     cat_pixels=cfg.eval_env.cat_pixels,
-    #     trajs_per_obj=cfg.algo.trajs_per_obj,
-    # )
+    
     # logger.print(
     #     f"BC Dataset: {len(bc_dataset)} samples "
     #     f"({cfg.algo.trajs_per_obj} trajs/obj) for "
@@ -567,6 +534,8 @@ def train(cfg: TrainConfig):
     #     flush=True,
     # )
     assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
+    
+    # Create BC dataset and dataloader
     bc_dataset = TempTranslateToPointDataset(
         cfg.algo.data_dir_fp,
         obs_horizon=2,
@@ -574,7 +543,7 @@ def train(cfg: TrainConfig):
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
-        truncate_trajectories_at_success=False,
+        truncate_trajectories_at_success=True,
         cat_state=cfg.eval_env.cat_state,
         cat_pixels=cfg.eval_env.cat_pixels,
     )
@@ -608,115 +577,50 @@ def train(cfg: TrainConfig):
         )
         log_env.reset_queues()
 
-    # -------------------------
-    # Stage 1: Only Mapping
-    # -------------------------
+    # ------------------------------------------------
+    # Stage 1:  Policy only (BC loss)
+    # ------------------------------------------------
+    # apply_lora_to_clip(agent.clip_model, rank=16, alpha=8, dropout=0.0)
+    
+    for name, param in agent.named_parameters():
+        param.requires_grad = True 
+    
+    for name, param in agent.clip_model.named_parameters():
+        param.requires_grad = False 
+    
+    # for module in agent.clip_model.modules():
+    #     if isinstance(module, LoRALinear):
+    #         for param in module.parameters():
+    #             param.requires_grad = True
+    
+    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
+    optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
+    
+    agent.to(device)
+
     for epoch in range(cfg.algo.stage1_epochs):
         global_epoch = logger_start_log_step + epoch
+        
         logger.print(f"[Stage 1] Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
-        agent.epoch = epoch
         agent.train()
-        hash_voxel.train()
 
         for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, cos_loss, scene_flow_loss, flow_consistency_loss, flow_reg_loss = agent.forward_train(obs, subtask_labels, step_nums)
-            cos_loss = cfg.algo.cos_loss_weight * cos_loss
-            scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
-            flow_reg_loss = cfg.algo.flow_reg_loss_weight * flow_reg_loss
-            loss = cos_loss + scene_flow_loss + flow_consistency_loss + flow_reg_loss
+            pi = agent.forward_policy(obs, subtask_labels, step_nums)
+            bc_loss = F.mse_loss(pi, act)
 
             optimizer.zero_grad()
-            loss.backward()
+            bc_loss.backward()
             optimizer.step()
 
-            tot_loss += loss.item()
+            tot_loss += bc_loss.item()
             n_samples += act.size(0)
             global_step += 1
 
-            # Write to TensorBoard
-            writer.add_scalar("Loss/Iteration", loss.item(), global_step)
-            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
-            writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
-            writer.add_scalar("Flow Consistency Loss/Iteration", flow_consistency_loss.item(), global_step)
-            writer.add_scalar("Flow Regularization Loss/Iteration", flow_reg_loss.item(), global_step)
-        
-        avg_loss = tot_loss / n_samples
-        loss_logs = dict(loss=avg_loss)
-        timer.end(key="train")
-
-        # Logging
-        if check_freq(cfg.algo.log_freq, epoch):
-            logger.store(tag="losses", **loss_logs)
-            if epoch > 0:
-                logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(global_epoch)
-            timer.end(key="log")
-
-        # Evaluation
-        if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
-            agent.eval()
-            eval_obs, _ = eval_envs.reset()
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
-            B = eval_subtask_labels.size()
-
-            for t in range(eval_envs.max_episode_steps):
-                with torch.no_grad():
-                    time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
-                eval_obs, _, _, _, _ = eval_envs.step(action)
-
-            if len(eval_envs.return_queue) > 0:
-                store_env_stats("eval")
-            logger.log(global_epoch)
-            timer.end(key="eval")
-
-        # Saving
-        if check_freq(cfg.algo.save_freq, epoch):
-            save_checkpoint(name="latest")
-            timer.end(key="checkpoint")
-
-    save_checkpoint(name="stage1-final")
-
-    # ----------------------------
-    # Stage 2: Mapping + Policy Learning
-    # ----------------------------
-    for epoch in range(cfg.algo.stage2_epochs):
-        global_epoch = logger_start_log_step + cfg.algo.stage1_epochs + epoch
-        logger.print(f"[Stage 2] Epoch: {global_epoch}")
-        tot_loss, n_samples = 0, 0
-        agent.epoch = epoch
-        agent.train()
-        hash_voxel.train()
-
-        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
-            subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
-            obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
-
-            pi, cos_loss, scene_flow_loss, flow_consistency_loss, flow_reg_loss = agent.forward_train(obs, subtask_labels, step_nums)
-            cos_loss = cfg.algo.cos_loss_weight * cos_loss
-            scene_flow_loss = cfg.algo.scene_flow_loss_weight * scene_flow_loss
-            flow_reg_loss = cfg.algo.flow_reg_loss_weight * flow_reg_loss
-            bc_loss = cfg.algo.bc_loss_weight * F.mse_loss(pi, act)
-            loss = cos_loss  + scene_flow_loss + bc_loss + flow_consistency_loss + flow_reg_loss# Stage 2 uses both
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            tot_loss += loss.item()
-            n_samples += act.size(0)
-            global_step += 1
-
-            writer.add_scalar("Loss/Iteration", loss.item(), global_step)
-            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
-            writer.add_scalar("Scene Flow Loss/Iteration", scene_flow_loss.item(), global_step)
-            writer.add_scalar("Flow Consistency Loss/Iteration", flow_consistency_loss.item(), global_step)
-            writer.add_scalar("Flow Regularization Loss/Iteration", flow_reg_loss.item(), global_step)
-            writer.add_scalar("Behavior Cloning Loss/Iteration", bc_loss.item(), global_step)
+            writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
@@ -733,90 +637,6 @@ def train(cfg: TrainConfig):
         # Evaluation
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
-            eval_obs, _ = eval_envs.reset()
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
-            B = eval_subtask_labels.size()
-
-            for t in range(eval_envs.max_episode_steps):
-                with torch.no_grad():
-                    time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
-                eval_obs, _, _, _, _ = eval_envs.step(action)
-
-            if len(eval_envs.return_queue) > 0:
-                store_env_stats("eval")
-            logger.log(global_epoch)
-            timer.end(key="eval")
-
-        # Saving
-        if check_freq(cfg.algo.save_freq, epoch):
-            save_checkpoint(name="latest")
-            timer.end(key="checkpoint")
-
-    # Final save
-    save_checkpoint(name="stage2-final")
-
-    # ------------------------------------------------
-    # Stage 3: Freeze mapping + Policy only (BC loss)
-    # ------------------------------------------------
-    # 1) Freeze mapping modules
-    for param in hash_voxel.parameters():
-        param.requires_grad = False
-    for param in implicit_decoder.parameters():
-        param.requires_grad = False
-
-    for epoch in range(cfg.algo.stage3_epochs):
-        global_epoch = (
-            logger_start_log_step
-            + cfg.algo.stage1_epochs
-            + cfg.algo.stage2_epochs
-            + epoch
-        )
-        logger.print(f"[Stage 3] Epoch: {global_epoch}")
-        tot_loss, n_samples = 0, 0
-        agent.train()
-        # hash_voxel & implicit_decoder remain in eval/frozen
-        hash_voxel.eval()
-        implicit_decoder.eval()
-
-        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage3-Batch", unit="batch"):
-            subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
-            obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
-
-            pi, cos_loss, scene_flow_loss, flow_reg_loss = agent.forward_train(obs, subtask_labels, step_nums)
-            # We ignore cos_loss now (mapping is frozen)
-            bc_loss = cfg.algo.bc_loss_weight * F.mse_loss(pi, act)
-            loss = bc_loss  # Stage 3 uses only BC
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            tot_loss += loss.item()
-            n_samples += act.size(0)
-            global_step += 1
-
-            writer.add_scalar("Loss/Iteration", loss.item(), global_step)
-            writer.add_scalar("Behavior Cloning Loss/Iteration", bc_loss.item(), global_step)
-
-        avg_loss = tot_loss / n_samples
-        loss_logs = dict(loss=avg_loss)
-        timer.end(key="train")
-
-        # Logging
-        if check_freq(cfg.algo.log_freq, epoch):
-            logger.store(tag="losses", **loss_logs)
-            if epoch > 0:
-                logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(global_epoch)
-            timer.end(key="log")
-
-        # Evaluation
-        if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
-            agent.eval()
-            # Mapping modules remain frozen
-            hash_voxel.eval()
-            implicit_decoder.eval()
 
             eval_obs, _ = eval_envs.reset()
             eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
@@ -825,7 +645,7 @@ def train(cfg: TrainConfig):
             for t in range(eval_envs.max_episode_steps):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_eval(eval_obs, eval_subtask_labels, time_step)
+                    action = agent.forward_policy(eval_obs, eval_subtask_labels, time_step)
                 # Stub environment step
                 eval_obs, _, _, _, _ = eval_envs.step(action)
             if len(eval_envs.return_queue) > 0:
@@ -839,7 +659,7 @@ def train(cfg: TrainConfig):
             timer.end(key="checkpoint")
 
     # Final save
-    save_checkpoint(name="stage3-final")
+    save_checkpoint(name="stage1-final")
 
     bc_dataloader.close()
     eval_envs.close()
