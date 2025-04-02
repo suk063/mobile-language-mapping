@@ -57,65 +57,6 @@ class TransformerCrossAttentionLayer(nn.Module):
         src = self.norm3(src + self.dropout3(src2))
         return src
 
-class TransformerLayer(nn.Module):
-    """
-    A single Transformer layer with self-attention (optionally uses rotary PE).
-    There is NO cross-attention here. We assume text embeddings are appended 
-    as tokens within `src`.
-    """
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
-        super().__init__()
-        self.self_attn1 = nn.MultiheadAttention(
-            d_model, nhead, dropout=dropout, batch_first=True
-        )
-
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
-
-    def forward(self, src, coords_src=None):
-        """
-        Args:
-            src: [B, T, d_model] tokens for (state, text, hand, head, etc.)
-            coords_src: [B, T, 3] if we want to apply rotary PE; else None.
-        """
-        # Optionally apply rotary position encoding
-        if coords_src is not None:
-            q_rot = rotary_pe_3d(src, coords_src)
-            k_rot = rotary_pe_3d(src, coords_src)
-            v_ = src
-        else:
-            q_rot = k_rot = v_ = src
-
-        # Self-attention
-        src2, _ = self.self_attn(query=q_rot, key=k_rot, value=v_)
-        src = self.norm1(src + self.dropout1(src2))
-
-        # Feed-forward
-        src2 = self.linear2(self.dropout(F.gelu(self.linear1(src))))
-        src = self.norm2(src + self.dropout2(src2))
-
-        return src
-
 class TransformerEncoder(nn.Module):
     """
     Stacks multiple TransformerCrossAttentionLayers to fuse
@@ -123,7 +64,7 @@ class TransformerEncoder(nn.Module):
     """
     def __init__(self, input_dim=120, hidden_dim=256, num_layers=2, num_heads=8, output_dim=1024):
         super().__init__()
-        self.state_projection = nn.Linear(42, input_dim)
+        # self.state_projection = nn.Linear(42, input_dim)
         self.layers = nn.ModuleList([
             TransformerCrossAttentionLayer(
                 d_model=input_dim,
@@ -132,10 +73,7 @@ class TransformerEncoder(nn.Module):
             ) for _ in range(num_layers)
         ])
         self.post_fusion_mlp = nn.Sequential(
-            nn.Linear(input_dim * 2 * 256, 4096),
-            nn.LayerNorm(4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, 2048),
+            nn.Linear(input_dim, 2048),
             nn.LayerNorm(2048),
             nn.ReLU(inplace=True),
             nn.Linear(2048, output_dim)
@@ -151,7 +89,7 @@ class TransformerEncoder(nn.Module):
         B, N, D = hand.shape
 
         # Project state into a single token
-        state_token = self.state_projection(state).unsqueeze(1)
+        state_token = state.unsqueeze(1)
         coords_state = torch.zeros(B, 1, 3, device=state.device)
 
         text_embeddings = text_embeddings.unsqueeze(1)
@@ -169,9 +107,9 @@ class TransformerEncoder(nn.Module):
             src = layer(src=src, text=text_embeddings, coords_src=coords_src)
 
         # Post-fusion MLP
-        data = src[:, 2:, :].reshape(B, -1)
+        pooled = torch.max(src[:, 2:, :], dim=1)[0]
         
-        out = self.post_fusion_mlp(data)
+        out = self.post_fusion_mlp(pooled)
         return out
     
 class ConcatMLPFusion(nn.Module):
