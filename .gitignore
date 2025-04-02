@@ -1,3 +1,7 @@
+.idea
+Pipfile.lock
+mani_skill2_ycb.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

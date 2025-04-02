@@ -22,7 +22,14 @@ pip install open_clip_torch omegaconf wandb tensorboard tensorboardX  msgpack to
 
 The ReplicaCAD dataset necessary for low-level manipulation, which can be downloaded with ManiSkill's download utils. This may take some time:
 ```bash
-python -m mani_skill.utils.download_asset ycb ReplicaCAD ReplicaCADRearrange
+python -m mani_skill.utils.download_asset ycb
+python -m mani_skill.utils.download_asset ReplicaCAD
+python -m mani_skill.utils.download_asset ReplicaCADRearrange
+```
+The above command may not work due to checksum mismatch. We need to update the checksum at L46 in [ManiSkill/mani_skill/utils/assets/data.py](ManiSkill/mani_skill/utils/assets/data.py):
+```bash
+wget https://huggingface.co/datasets/haosulab/ManiSkill2/resolve/main/data/mani_skill2_ycb.zip
+sha256sum mani_skill2_ycb.zip  # eb6f30642c90203715c178f67bf2288887ef6e7d05a9f3f1e713efcf7c2a541c
 ```
 
 ## Dataset Download
@@ -49,5 +56,3 @@ To begin training, run the following script:
 ```bash
 bash scripts/train_bc_point.sh
 ```
-
-
