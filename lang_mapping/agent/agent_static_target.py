@@ -7,14 +7,120 @@ from typing import Dict
 # Local imports
 from ..module import *
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, positional_encoding, transform
+from ..utils import get_3d_coordinates, get_visual_features, positional_encoding, transform, rotary_pe_3d
 
 import open_clip
 
+class TransformerCrossAttentionLayer(nn.Module):
+    """
+    요청사항:
+    1) Self-Attention (rotary PE 가능)
+    2) Cross-Attention #1 (Q=src, K=V=text)
+    3) Cross-Attention #2 (Q=src, K=V=target+initial)
+    4) FeedForward
+    """
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+        super().__init__()
+        # 1) Self-Attention
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+
+        # 2) Cross-Attention (with text)
+        self.cross_attn_text = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+
+        # 3) Cross-Attention (with target+initial)
+        self.cross_attn_ti = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+
+        # 4) FeedForward
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout_ff = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        # LayerNorm + Dropout for each sub-block
+        self.norm1 = nn.LayerNorm(d_model)  # after self-attn
+        self.norm2 = nn.LayerNorm(d_model)  # after cross-attn text
+        self.norm3 = nn.LayerNorm(d_model)  # after cross-attn target+initial
+        self.norm4 = nn.LayerNorm(d_model)  # after feedforward
+
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+        self.dropout4 = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        src,
+        text,
+        target,
+        initial,
+        coords_src=None,
+        coords_text=None,
+        coords_target=None,
+        coords_initial=None
+    ):
+        """
+        Args:
+            src: [B, N, d_model], query (self-attn용, 이후 cross-attn query)
+            text: [B, N_text, d_model], cross-attn #1에서 key/value
+            target: [B, N_t, d_model]
+            initial: [B, N_i, d_model]
+            coords_src: [B, N, 3], src용 3D 좌표(있으면 rotary PE)
+            coords_text: [B, N_text, 3], text용 3D 좌표(있으면 rotary PE)
+            coords_target: [B, N_t, 3]
+            coords_initial: [B, N_i, 3]
+        """
+        # ------------------------------------------------------------------
+        # 1) Self-Attention (+ rotary PE)
+        # ------------------------------------------------------------------
+        if coords_src is not None:
+            q_rot = rotary_pe_3d(src, coords_src)
+            k_rot = rotary_pe_3d(src, coords_src)
+            v_ = src
+        else:
+            q_rot = k_rot = v_ = src
+
+        src2, _ = self.self_attn(query=q_rot, key=k_rot, value=v_)
+        src = self.norm1(src + self.dropout1(src2))
+
+        # ------------------------------------------------------------------
+        # 2) Cross-Attention with text (+ rotary PE in key/value)
+        # ------------------------------------------------------------------
+        if coords_text is not None:
+            text_rot = rotary_pe_3d(text, coords_text)
+        else:
+            text_rot = text
+
+        src2, _ = self.cross_attn_text(query=src, key=text_rot, value=text)
+        src = self.norm2(src + self.dropout2(src2))
+
+        # ------------------------------------------------------------------
+        # 3) Cross-Attention with target + initial
+        #    (+ rotary PE in key/value)
+        # ------------------------------------------------------------------
+        ti_cat = torch.cat([target, initial], dim=1)  # [B, N_t + N_i, d_model]
+        if coords_target is not None and coords_initial is not None:
+            coords_ti = torch.cat([coords_target, coords_initial], dim=1)  # [B, (N_t+N_i), 3]
+            ti_cat_rot = rotary_pe_3d(ti_cat, coords_ti)
+        else:
+            ti_cat_rot = ti_cat
+
+        src2, _ = self.cross_attn_ti(query=src, key=ti_cat_rot, value=ti_cat)
+        src = self.norm3(src + self.dropout3(src2))
+
+        # ------------------------------------------------------------------
+        # 4) FeedForward
+        # ------------------------------------------------------------------
+        src2 = self.linear2(self.dropout_ff(F.gelu(self.linear1(src))))
+        src = self.norm4(src + self.dropout4(src2))
+
+        return src
+
 class TransformerEncoder(nn.Module):
     """
-    Stacks multiple TransformerCrossAttentionLayers to fuse
-    state, hand, head, and text embeddings. Produces a final output.
+    예시:
+    - state, text, target, initial, hand, head 등을 모두 합쳐서 src로 둔 뒤
+      self-attn을 먼저 수행.
+    - 이후 cross-attn 내부에서 text, target, initial을 다시 별도 인자로 받아서
+      rotary PE 적용 후 cross-attn. 
     """
     def __init__(self, input_dim=120, hidden_dim=256, num_layers=2, num_heads=8, output_dim=1024):
         super().__init__()
@@ -26,6 +132,7 @@ class TransformerEncoder(nn.Module):
                 dim_feedforward=hidden_dim
             ) for _ in range(num_layers)
         ])
+        # 예시로 post_fusion_mlp 부분 수정 없이 유지
         self.post_fusion_mlp = nn.Sequential(
             nn.Linear(input_dim * 2 * 256, 4096),
             nn.LayerNorm(4096),
@@ -36,7 +143,19 @@ class TransformerEncoder(nn.Module):
             nn.Linear(2048, output_dim)
         )
 
-    def forward(self, target, initial, target_coords, initial_coords, hand, head, coords_hand=None, coords_head=None, state=None, text_embeddings=None):
+    def forward(
+        self,
+        target, 
+        initial,
+        target_coords,
+        initial_coords,
+        hand,
+        head,
+        coords_hand=None,
+        coords_head=None,
+        state=None,
+        text_embeddings=None,
+    ):
         """
         hand, head: [B, N, input_dim]
         coords_hand, coords_head: [B, N, 3]
@@ -46,20 +165,31 @@ class TransformerEncoder(nn.Module):
         B, N, D = hand.shape
 
         # Project state into a single token
-        state_token = self.state_projection(state).unsqueeze(1)
+        state_token = self.state_projection(state).unsqueeze(1)  # [B,1,input_dim]
         coords_state = torch.zeros(B, 1, 3, device=state.device)
 
+        # text_embeddings -> [B,1,input_dim]
         text_embeddings = text_embeddings.unsqueeze(1)
         coords_text = torch.zeros(B, 1, 3, device=state.device) 
 
-        # Concatenate state, text, hand, head
-        src = torch.cat([state_token, text_embeddings, target, initial, hand, head], dim=1)  # [B, 4+2N, input_dim]
+        # self-attn용 src
+        # [state_token, text_embeddings, target, initial, hand, head]
+        src = torch.cat([state_token, text_embeddings, target, initial, hand, head], dim=1)  
         coords_src = torch.cat([coords_state, coords_text, target_coords, initial_coords, coords_hand, coords_head], dim=1)
 
-
-        # Pass through Transformer layers
+        # cross-attn용(두 번째 블록)에서 사용할 target/initial 그대로 넘기기
+        # rotary PE용 coords도 별도로 넘길 것
         for layer in self.layers:
-            src = layer(src=src, text=text_embeddings, coords_src=coords_src)
+            src = layer(
+                src=src,
+                text=text_embeddings,   # (B, 1, d_model) or (B, Nt, d_model)
+                target=target,
+                initial=initial,
+                coords_src=coords_src,
+                coords_text=coords_text,
+                coords_target=target_coords,
+                coords_initial=initial_coords
+            )
 
         # Post-fusion MLP
         data = src[:, 4:, :].reshape(B, -1)

@@ -11,7 +11,63 @@ from ..utils import get_3d_coordinates, get_visual_features, positional_encoding
 
 import open_clip
 
-class Agent_static(nn.Module):
+class GlobalPointsPointNet(nn.Module):
+    def __init__(
+        self,
+        d_model=120,       
+        hidden_dim=256,
+        final_out_dim=1024,  
+        pe_freq_L=10,         
+    ):
+        super().__init__()
+        
+        self.pe_freq_L = pe_freq_L
+
+        self.mlp1 = nn.Sequential(
+            nn.Linear(d_model + 6 * pe_freq_L, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+        
+        # 전역 풀링 후 후처리
+        self.post_fusion_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, 2 * hidden_dim),
+            nn.LayerNorm(2 * hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(2 * hidden_dim, final_out_dim),
+        )
+
+    def forward(self, voxel_feat_global_points, coords_global_points):
+        """
+        Args:
+            state_token: [B, d_model=120] (옵션, 여기서는 직접 사용 안 함)
+            voxel_feat_global_points: [B, P, 120]
+            coords_global_points: [B, P, 3]
+
+        Returns:
+            out: [B, final_out_dim=1024]
+        """
+        B, P, D = voxel_feat_global_points.shape
+        
+        encoded_coords = positional_encoding(coords_global_points, L=self.pe_freq_L)
+
+        x = torch.cat([voxel_feat_global_points, encoded_coords], dim=-1)
+        
+        x = self.mlp1(x)  # (B, P, hidden_dim)
+        
+        x = torch.max(x, dim=1)[0]  # (B, hidden_dim)
+        
+        out = self.post_fusion_mlp(x)  # (B, final_out_dim=1024)
+
+        return out
+
+class Agent_static_global(nn.Module):
     def __init__(
         self,
         sample_obs,
@@ -79,7 +135,7 @@ class Agent_static(nn.Module):
         # Action MLP
         action_dim = np.prod(single_act_shape)
         self.action_mlp = ActionMLP(
-            input_dim=state_mlp_dim * 2,
+            input_dim=state_mlp_dim * 3,
             action_dim=action_dim
         ).to(self.device)
 
@@ -88,13 +144,26 @@ class Agent_static(nn.Module):
         self.implicit_decoder = implicit_decoder
 
         self.voxel_proj = VoxelProj(voxel_feature_dim=voxel_feature_dim).to(self.device)
-        self.state_to_voxeldim = nn.Linear(42, voxel_feature_dim).to(self.device)
 
         # Local feature fusion
         self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim)
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
+        
+        self.collected_points = []
+        
+        self.points = torch.from_numpy(np.load("points.npy")).float().to(device).unsqueeze(0)
+        
+        self.state_to_voxeldim = nn.Linear(42, voxel_feature_dim).to(self.device)
+        
+        self.global_pointnet = GlobalPointsPointNet(
+            d_model=voxel_feature_dim,  # 120
+            hidden_dim=256,
+            final_out_dim=state_mlp_dim, 
+            pe_freq_L=10
+        ).to(self.device)
+
 
     def forward_mapping(self, observations):
         """
@@ -158,23 +227,41 @@ class Agent_static(nn.Module):
         feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
 
+        with torch.no_grad():
+            # hand_depth: (B_, 16, 16) -> (B_*16*16)
+            hand_depth_flat = hand_depth.view(B_ * N)
+            head_depth_flat = head_depth.view(B_ * N)
+
+            # depth >= 0.5
+            mask_hand = (hand_depth_flat >= 0.5)
+            mask_head = (head_depth_flat >= 0.5)
+
+            valid_hand_coords = hand_coords_world_flat[mask_hand]
+            valid_head_coords = head_coords_world_flat[mask_head]
+
+            # 실제 저장
+            if valid_hand_coords.shape[0] > 0:
+                self.collected_points.append(valid_hand_coords.cpu().numpy())
+            if valid_head_coords.shape[0] > 0:
+                self.collected_points.append(valid_head_coords.cpu().numpy())
+
         # Voxel features
-        voxel_feat_for_points_hand, _ = self.hash_voxel.query_voxel_feature(
+        voxel_feat_view_points_hand, _ = self.hash_voxel.query_voxel_feature(
             hand_coords_world_flat, return_indices=False
         )
-        voxel_feat_for_points_head, _ = self.hash_voxel.query_voxel_feature(
+        voxel_feat_view_points_head, _ = self.hash_voxel.query_voxel_feature(
             head_coords_world_flat, return_indices=False
         )
 
         # Implicit decoding and cosine loss
         dec_hand_final = self.implicit_decoder(
-            voxel_feat_for_points_hand, hand_coords_world_flat, return_intermediate=False
+            voxel_feat_view_points_hand, hand_coords_world_flat, return_intermediate=False
         )
         cos_sim_hand = F.cosine_similarity(dec_hand_final, feats_hand_flat, dim=-1)
         cos_loss_hand = 1.0 - cos_sim_hand.mean()
 
         dec_head_final = self.implicit_decoder(
-            voxel_feat_for_points_head, head_coords_world_flat, return_intermediate=False
+            voxel_feat_view_points_head, head_coords_world_flat, return_intermediate=False
         )
         cos_sim_head = F.cosine_similarity(dec_head_final, feats_head_flat, dim=-1)
         cos_loss_head = 1.0 - cos_sim_head.mean()
@@ -246,25 +333,25 @@ class Agent_static(nn.Module):
 
         # Query voxel features 
         with torch.no_grad():
-            voxel_feat_for_points_hand, _ = self.hash_voxel.query_voxel_feature(
+            voxel_feat_view_points_hand, _ = self.hash_voxel.query_voxel_feature(
                 hand_coords_world_flat, return_indices=False
             )
-            voxel_feat_for_points_head, _ = self.hash_voxel.query_voxel_feature(
+            voxel_feat_view_points_head, _ = self.hash_voxel.query_voxel_feature(
                 head_coords_world_flat, return_indices=False
             )
 
-        voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand, hand_coords_world_flat)
-        voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head, head_coords_world_flat)
-
+        voxel_feat_view_points_hand = self.voxel_proj(voxel_feat_view_points_hand, hand_coords_world_flat)
+        voxel_feat_view_points_head = self.voxel_proj(voxel_feat_view_points_head, head_coords_world_flat)
+            
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(
             feats_hand_flat_reduced,
-            voxel_feat_for_points_hand,
+            voxel_feat_view_points_hand,
             hand_coords_world_flat
         )
         fused_head = self.feature_fusion(
             feats_head_flat_reduced,
-            voxel_feat_for_points_head,
+            voxel_feat_view_points_head,
             head_coords_world_flat
         )
 
@@ -290,10 +377,39 @@ class Agent_static(nn.Module):
             state=state_voxel_dim,
             text_embeddings=selected_text_reduced
         )
+        
+        # Find closest points
+        head_translations = head_pose[:, 0, :3, 3] # [B, 3]
+        points_repeated = self.points.repeat(B_, 1, 1)  # [B, P, 3]
 
+        diff = points_repeated - head_translations.unsqueeze(1)  # [B, P, 3]
+        distances = torch.sum(diff * diff, dim=-1)  # [B, P]
+
+        _, topk_indices = torch.topk(distances, k=4096, dim=1, largest=False)
+        batch_indices = torch.arange(B_, device=distances.device).unsqueeze(-1)
+        closest_points = points_repeated[batch_indices, topk_indices, :]  # [B, 1000, 3]
+
+        closest_points_flatten = closest_points.reshape(B_ * 4096, 3)
+        
+        # Query voxel features 
+        with torch.no_grad():
+            voxel_feat_global_points, _ = self.hash_voxel.query_voxel_feature(
+                closest_points_flatten, return_indices=False
+            )
+
+        voxel_feat_global_points = self.voxel_proj(voxel_feat_global_points, closest_points_flatten)
+        voxel_feat_global_points = voxel_feat_global_points.view(B_, 4096, -1)
+
+        coords_global_points = closest_points
+        
+        map_token_global = self.global_pointnet(
+            voxel_feat_global_points,    # (B, 4096, 120)
+            coords_global_points         # (B, 4096, 3)
+        )
+        
         # Final action
         state_token = self.state_mlp(state)
-        inp = torch.cat([visual_token, state_token], dim=1)
+        inp = torch.cat([visual_token, map_token_global, state_token], dim=1)
         action_pred = self.action_mlp(inp)
 
         return action_pred

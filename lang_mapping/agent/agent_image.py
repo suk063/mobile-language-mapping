@@ -64,6 +64,8 @@ class Agent_image(nn.Module):
         # Reduce CLIP feature dimension
         self.clip_dim_reducer = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
 
+        self.state_to_voxeldim = nn.Linear(42, voxel_feature_dim).to(self.device)
+
         # Transformer for feature fusion
         self.transformer = TransformerEncoder(
             input_dim=voxel_feature_dim,
@@ -152,13 +154,15 @@ class Agent_image(nn.Module):
         batch_feats_hand_flat_reduced = feats_hand_flat_reduced.view(B_, N, -1)
         batch_feats_head_flat_reduced = feats_head_flat_reduced.view(B_, N, -1)
 
+        state_voxel_dim = self.state_to_voxeldim(state)
+
         # Transformer
         visual_token = self.transformer(
             hand=batch_feats_hand_flat_reduced,
             head=batch_feats_head_flat_reduced,
             # coords_hand=batch_hand_coords,
             # coords_head=batch_head_coords,
-            state=state,
+            state=state_voxel_dim,
             text_embeddings=selected_text_reduced
         )
 

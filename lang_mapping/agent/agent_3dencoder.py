@@ -95,6 +95,8 @@ class Agent_3dencoder(nn.Module):
             output_dim=state_mlp_dim
         )
 
+        self.state_to_voxeldim = nn.Linear(42, voxel_feature_dim).to(self.device)
+
         # Action MLP
         action_dim = np.prod(single_act_shape)
         self.action_mlp = ActionMLP(
@@ -153,13 +155,15 @@ class Agent_3dencoder(nn.Module):
         hand_dp3_feat = self.dp3_encoder(batch_hand_coords) 
         head_dp3_feat = self.dp3_encoder(batch_head_coords) 
         
+        state_voxel_dim = self.state_to_voxeldim(state)
+        
         # Transformer
         visual_token = self.transformer(
             hand=hand_dp3_feat,
             head=head_dp3_feat,
             coords_hand=batch_hand_coords,
             coords_head=batch_head_coords,
-            state=state,
+            state=state_voxel_dim,
             text_embeddings=selected_text_reduced
         )
 
