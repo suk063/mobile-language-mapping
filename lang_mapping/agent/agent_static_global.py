@@ -5,68 +5,158 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module import *
+from ..module import ImplicitDecoder, TransformerEncoder, ActionMLP, ConcatMLPFusion
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, positional_encoding, transform
+from ..utils import get_3d_coordinates, get_visual_features, transform, rotary_pe_3d
 
 import open_clip
 
-class GlobalPointsPointNet(nn.Module):
+class PerceiverAttentionLayer(nn.Module):
+    """
+    Perceiver-style cross-attention with rotary positional encoding.
+
+    Inputs:
+      - q: [B, Q, dim]
+      - k: [B, N, dim]
+      - v: [B, N, dim]
+      - coords_q:  [B, Q, 3] (positional coords for q)
+      - coords_kv: [B, N, 3] (positional coords for k and v)
+
+    This layer applies rotary PE to q, k (optionally to v), 
+    then performs a multi-head cross-attention followed by a small FFN.
+    """
+    def __init__(self, dim: int, nhead: int = 8):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(dim, nhead, batch_first=True)
+        self.ln1 = nn.LayerNorm(dim)
+
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim, dim),
+        )
+        self.ln2 = nn.LayerNorm(dim)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        coords_q: torch.Tensor = None,
+        coords_kv: torch.Tensor = None
+    ) -> torch.Tensor:
+        # (1) Apply rotary PE to Query if coords_q is provided
+        if coords_q is not None:
+            q = rotary_pe_3d(q, coords_q)
+
+        # (2) Apply rotary PE to Key if coords_kv is provided
+        if coords_kv is not None:
+            k = rotary_pe_3d(k, coords_kv)
+            # v remains unchanged (by design), but could also apply PE if desired
+
+        # (3) Multi-head cross-attention
+        attn_out, _ = self.attn(q, k, v)  # [B, Q, dim]
+
+        # (4) Residual + LayerNorm
+        x = self.ln1(q + attn_out)        # [B, Q, dim]
+
+        # (5) Position-wise feedforward
+        ffn_out = self.ffn(x)            # [B, Q, dim]
+
+        # (6) Residual + LayerNorm
+        x = self.ln2(x + ffn_out)        # [B, Q, dim]
+        return x
+
+
+class StatePerceiver(nn.Module):
+    """
+    Perceiver module for mapping a projected state (query) 
+    to global voxel-based features (key/value) using cross-attention.
+
+    - Query: state_projected -> shape [B, 1, hidden_dim]
+    - Key/Value: derived from valid_feats -> implicit_decoder -> [B, N, hidden_dim]
+    - coords_q: head_translation -> [B, 1, 3]
+    - coords_kv: valid_coords -> [B, N, 3]
+    """
     def __init__(
         self,
-        d_model=120,       
-        hidden_dim=256,
-        final_out_dim=1024,  
-        pe_freq_L=10,         
+        hidden_dim: int = 120,
+        nhead: int = 8,
+        num_layers: int = 4,
+        out_dim: int = 120,
+        voxel_proj: nn.Module = None,
     ):
         super().__init__()
-        
-        self.pe_freq_L = pe_freq_L
+        self.hidden_dim = hidden_dim
+        self.voxel_proj = voxel_proj
 
-        self.mlp1 = nn.Sequential(
-            nn.Linear(d_model + 6 * pe_freq_L, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(inplace=True),
-        )
-        
-        # 전역 풀링 후 후처리
-        self.post_fusion_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, 2 * hidden_dim),
-            nn.LayerNorm(2 * hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(2 * hidden_dim, final_out_dim),
-        )
+        # Build a stack of cross-attention layers
+        self.layers = nn.ModuleList([
+            PerceiverAttentionLayer(dim=hidden_dim, nhead=nhead)
+            for _ in range(num_layers)
+        ])
+        self.out_proj = nn.Linear(hidden_dim, out_dim)
 
-    def forward(self, voxel_feat_global_points, coords_global_points):
+    def forward(
+        self,
+        state: torch.Tensor,            # [B, state_dim]
+        head_translation: torch.Tensor, # [B, 3]
+        valid_coords: torch.Tensor,     # [N, 3]
+        valid_feats: torch.Tensor       # [N, voxel_feature_dim]
+    ) -> torch.Tensor:
         """
         Args:
-            state_token: [B, d_model=120] (옵션, 여기서는 직접 사용 안 함)
-            voxel_feat_global_points: [B, P, 120]
-            coords_global_points: [B, P, 3]
+            state:           [B, state_dim]
+            head_translation [B, 3]
+            valid_coords:    [N, 3]  (global)
+            valid_feats:     [N, voxel_feature_dim] (global)
 
         Returns:
-            out: [B, final_out_dim=1024]
+            out: [B, out_dim]
         """
-        B, P, D = voxel_feat_global_points.shape
-        
-        encoded_coords = positional_encoding(coords_global_points, L=self.pe_freq_L)
+        B = state.shape[0]
+        N = valid_feats.shape[0]
 
-        x = torch.cat([voxel_feat_global_points, encoded_coords], dim=-1)
-        
-        x = self.mlp1(x)  # (B, P, hidden_dim)
-        
-        x = torch.max(x, dim=1)[0]  # (B, hidden_dim)
-        
-        out = self.post_fusion_mlp(x)  # (B, final_out_dim=1024)
+        # (1) Prepare query [B, 1, hidden_dim = state_dim in the caller context]
+        #     Here, we assume 'state' is already projected to 'hidden_dim'.
+        q = state.unsqueeze(1)  # [B, 1, hidden_dim]
 
-        return out
+        # (2) Query coords
+        coords_q = head_translation.unsqueeze(1)  # [B, 1, 3]
 
+        # (3) Key/Value creation via implicit_decoder
+        #     valid_feats -> [N, voxel_feature_dim]
+        #     implicit_decoder returns an intermediate feature for each voxel
+        k_intermediate_single, _ = self.voxel_proj(
+            valid_feats, valid_coords, return_intermediate=True
+        )  # [N, hidden_dim]
+
+        # Expand to match batch dimension
+        k_intermediate = k_intermediate_single.unsqueeze(0).expand(B, N, self.hidden_dim)
+
+        # Use the same feature for both Key and Value
+        k = k_intermediate
+        v = k_intermediate
+
+        # (4) Voxel coords repeated across batch
+        coords_kv = valid_coords.unsqueeze(0).expand(B, N, 3)
+
+        # (5) Pass through Perceiver cross-attention layers
+        x = q
+        for layer in self.layers:
+            x = layer(
+                q=x,
+                k=k,
+                v=v,
+                coords_q=coords_q,
+                coords_kv=coords_kv
+            )
+
+        # (6) Final projection
+        x = x.squeeze(1)          # [B, hidden_dim]
+        out = self.out_proj(x)    # [B, out_dim]
+        return x, out
+    
 class Agent_static_global(nn.Module):
     def __init__(
         self,
@@ -75,12 +165,13 @@ class Agent_static_global(nn.Module):
         open_clip_model: tuple = ("EVA02-L-14", "merged2b_s4b_b131k"),
         text_input: list = ["bowl", "apple"],
         clip_input_dim: int = 768,
-        voxel_feature_dim: int = 120,
+        voxel_feature_dim: int = 128,
         state_mlp_dim: int = 1024,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         hash_voxel: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
+        voxel_proj: ImplicitDecoder = None
     ):
         """
         Maintains a voxel-hash representation for 3D scenes and uses a CLIP-based
@@ -142,8 +233,10 @@ class Agent_static_global(nn.Module):
         # Voxel hashing and implicit decoder
         self.hash_voxel = hash_voxel
         self.implicit_decoder = implicit_decoder
-
-        self.voxel_proj = VoxelProj(voxel_feature_dim=voxel_feature_dim).to(self.device)
+        self.voxel_proj = voxel_proj
+        
+        self.state_proj_perceiver = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
+        self.state_proj_transformer = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
 
         # Local feature fusion
         self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim)
@@ -151,19 +244,18 @@ class Agent_static_global(nn.Module):
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
         
-        self.collected_points = []
+        self.register_buffer(
+            "used_voxel_idx", 
+            torch.from_numpy(np.load("used_voxel_idx.npy")).float().to(device).unsqueeze(0)
+            )
         
-        self.points = torch.from_numpy(np.load("points.npy")).float().to(device).unsqueeze(0)
-        
-        self.state_to_voxeldim = nn.Linear(42, voxel_feature_dim).to(self.device)
-        
-        self.global_pointnet = GlobalPointsPointNet(
-            d_model=voxel_feature_dim,  # 120
-            hidden_dim=256,
-            final_out_dim=state_mlp_dim, 
-            pe_freq_L=10
-        ).to(self.device)
-
+        self.state_perceiver = StatePerceiver(
+            hidden_dim=voxel_feature_dim,
+            nhead=8,
+            num_layers=4,
+            out_dim=state_mlp_dim,
+            voxel_proj=self.voxel_proj
+        ).to(device)
 
     def forward_mapping(self, observations):
         """
@@ -227,41 +319,23 @@ class Agent_static_global(nn.Module):
         feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
 
-        with torch.no_grad():
-            # hand_depth: (B_, 16, 16) -> (B_*16*16)
-            hand_depth_flat = hand_depth.view(B_ * N)
-            head_depth_flat = head_depth.view(B_ * N)
-
-            # depth >= 0.5
-            mask_hand = (hand_depth_flat >= 0.5)
-            mask_head = (head_depth_flat >= 0.5)
-
-            valid_hand_coords = hand_coords_world_flat[mask_hand]
-            valid_head_coords = head_coords_world_flat[mask_head]
-
-            # 실제 저장
-            if valid_hand_coords.shape[0] > 0:
-                self.collected_points.append(valid_hand_coords.cpu().numpy())
-            if valid_head_coords.shape[0] > 0:
-                self.collected_points.append(valid_head_coords.cpu().numpy())
-
         # Voxel features
-        voxel_feat_view_points_hand, _ = self.hash_voxel.query_voxel_feature(
+        voxel_feat_points_hand, _ = self.hash_voxel.query_voxel_feature(
             hand_coords_world_flat, return_indices=False
         )
-        voxel_feat_view_points_head, _ = self.hash_voxel.query_voxel_feature(
+        voxel_feat_points_head, _ = self.hash_voxel.query_voxel_feature(
             head_coords_world_flat, return_indices=False
         )
 
         # Implicit decoding and cosine loss
         dec_hand_final = self.implicit_decoder(
-            voxel_feat_view_points_hand, hand_coords_world_flat, return_intermediate=False
+            voxel_feat_points_hand, hand_coords_world_flat, return_intermediate=False
         )
         cos_sim_hand = F.cosine_similarity(dec_hand_final, feats_hand_flat, dim=-1)
         cos_loss_hand = 1.0 - cos_sim_hand.mean()
 
         dec_head_final = self.implicit_decoder(
-            voxel_feat_view_points_head, head_coords_world_flat, return_intermediate=False
+            voxel_feat_points_head, head_coords_world_flat, return_intermediate=False
         )
         cos_sim_head = F.cosine_similarity(dec_head_final, feats_head_flat, dim=-1)
         cos_loss_head = 1.0 - cos_sim_head.mean()
@@ -331,27 +405,40 @@ class Agent_static_global(nn.Module):
         feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat)
         feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat)
 
+        # Find closest points
+        state_projected_perceiver = self.state_proj_perceiver(state)
+        head_translation = head_pose[:, 0, :3, 3] # [B, 3]
+        
+        valid_coords, valid_feats = self.hash_voxel.get_all_valid_voxel_data()
+
+        perceiver_cond, perceiver_out  = self.state_perceiver(
+            state_projected_perceiver,
+            head_translation,
+            valid_coords,
+            valid_feats
+        )
+
         # Query voxel features 
         with torch.no_grad():
-            voxel_feat_view_points_hand, _ = self.hash_voxel.query_voxel_feature(
+            voxel_feat_points_hand, _ = self.hash_voxel.query_voxel_feature(
                 hand_coords_world_flat, return_indices=False
             )
-            voxel_feat_view_points_head, _ = self.hash_voxel.query_voxel_feature(
+            voxel_feat_points_head, _ = self.hash_voxel.query_voxel_feature(
                 head_coords_world_flat, return_indices=False
             )
 
-        voxel_feat_view_points_hand = self.voxel_proj(voxel_feat_view_points_hand, hand_coords_world_flat)
-        voxel_feat_view_points_head = self.voxel_proj(voxel_feat_view_points_head, head_coords_world_flat)
-            
+        voxel_feat_points_hand_projected, _ = self.implicit_decoder(voxel_feat_points_hand, hand_coords_world_flat, return_intermediate=True)
+        voxel_feat_points_head_projected, _ = self.implicit_decoder(voxel_feat_points_head, head_coords_world_flat, return_intermediate=True)
+
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(
             feats_hand_flat_reduced,
-            voxel_feat_view_points_hand,
+            voxel_feat_points_hand_projected,
             hand_coords_world_flat
         )
         fused_head = self.feature_fusion(
             feats_head_flat_reduced,
-            voxel_feat_view_points_head,
+            voxel_feat_points_head_projected,
             head_coords_world_flat
         )
 
@@ -366,7 +453,7 @@ class Agent_static_global(nn.Module):
         batch_fused_hand = fused_hand.view(B_, N, -1)
         batch_fused_head = fused_head.view(B_, N, -1)
 
-        state_voxel_dim = self.state_to_voxeldim(state)
+        state_projected_transformer = self.state_proj_transformer(state)
 
         # Transformer
         visual_token = self.transformer(
@@ -374,42 +461,13 @@ class Agent_static_global(nn.Module):
             head=batch_fused_head,
             coords_hand=batch_hand_coords,
             coords_head=batch_head_coords,
-            state=state_voxel_dim,
-            text_embeddings=selected_text_reduced
+            state=state_projected_transformer,
+            text_embeddings=selected_text_reduced,
         )
-        
-        # Find closest points
-        head_translations = head_pose[:, 0, :3, 3] # [B, 3]
-        points_repeated = self.points.repeat(B_, 1, 1)  # [B, P, 3]
 
-        diff = points_repeated - head_translations.unsqueeze(1)  # [B, P, 3]
-        distances = torch.sum(diff * diff, dim=-1)  # [B, P]
-
-        _, topk_indices = torch.topk(distances, k=4096, dim=1, largest=False)
-        batch_indices = torch.arange(B_, device=distances.device).unsqueeze(-1)
-        closest_points = points_repeated[batch_indices, topk_indices, :]  # [B, 1000, 3]
-
-        closest_points_flatten = closest_points.reshape(B_ * 4096, 3)
-        
-        # Query voxel features 
-        with torch.no_grad():
-            voxel_feat_global_points, _ = self.hash_voxel.query_voxel_feature(
-                closest_points_flatten, return_indices=False
-            )
-
-        voxel_feat_global_points = self.voxel_proj(voxel_feat_global_points, closest_points_flatten)
-        voxel_feat_global_points = voxel_feat_global_points.view(B_, 4096, -1)
-
-        coords_global_points = closest_points
-        
-        map_token_global = self.global_pointnet(
-            voxel_feat_global_points,    # (B, 4096, 120)
-            coords_global_points         # (B, 4096, 3)
-        )
-        
         # Final action
         state_token = self.state_mlp(state)
-        inp = torch.cat([visual_token, map_token_global, state_token], dim=1)
+        inp = torch.cat([visual_token, state_token, perceiver_out], dim=1)
         action_pred = self.action_mlp(inp)
 
         return action_pred

@@ -149,7 +149,7 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    hidden_dim: int = 240
+    hidden_dim: int = 120
     cos_loss_weight: float = 0.1
 
     num_eval_envs: int = field(init=False)
@@ -538,11 +538,11 @@ def train(cfg: TrainConfig):
 
     if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
         print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
-        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device))
+        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
 
     if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
         print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
-        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device))
+        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
 
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
@@ -677,7 +677,7 @@ def train(cfg: TrainConfig):
     for param in hash_voxel.parameters():
         param.requires_grad = False
     for param in implicit_decoder.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
         
     # LoRA    
     # apply_lora_to_clip(agent.clip_model, rank=16, alpha=8, dropout=0.0)

@@ -19,7 +19,7 @@ class Agent_static(nn.Module):
         open_clip_model: tuple = ("EVA02-L-14", "merged2b_s4b_b131k"),
         text_input: list = ["bowl", "apple"],
         clip_input_dim: int = 768,
-        voxel_feature_dim: int = 120,
+        voxel_feature_dim: int = 128,
         state_mlp_dim: int = 1024,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
@@ -159,22 +159,22 @@ class Agent_static(nn.Module):
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
 
         # Voxel features
-        voxel_feat_for_points_hand, _ = self.hash_voxel.query_voxel_feature(
+        voxel_feat_points_hand, _ = self.hash_voxel.query_voxel_feature(
             hand_coords_world_flat, return_indices=False
         )
-        voxel_feat_for_points_head, _ = self.hash_voxel.query_voxel_feature(
+        voxel_feat_points_head, _ = self.hash_voxel.query_voxel_feature(
             head_coords_world_flat, return_indices=False
         )
 
         # Implicit decoding and cosine loss
         dec_hand_final = self.implicit_decoder(
-            voxel_feat_for_points_hand, hand_coords_world_flat, return_intermediate=False
+            voxel_feat_points_hand, hand_coords_world_flat, return_intermediate=False
         )
         cos_sim_hand = F.cosine_similarity(dec_hand_final, feats_hand_flat, dim=-1)
         cos_loss_hand = 1.0 - cos_sim_hand.mean()
 
         dec_head_final = self.implicit_decoder(
-            voxel_feat_for_points_head, head_coords_world_flat, return_intermediate=False
+            voxel_feat_points_head, head_coords_world_flat, return_intermediate=False
         )
         cos_sim_head = F.cosine_similarity(dec_head_final, feats_head_flat, dim=-1)
         cos_loss_head = 1.0 - cos_sim_head.mean()
@@ -246,25 +246,25 @@ class Agent_static(nn.Module):
 
         # Query voxel features 
         with torch.no_grad():
-            voxel_feat_for_points_hand, _ = self.hash_voxel.query_voxel_feature(
+            voxel_feat_points_hand, _ = self.hash_voxel.query_voxel_feature(
                 hand_coords_world_flat, return_indices=False
             )
-            voxel_feat_for_points_head, _ = self.hash_voxel.query_voxel_feature(
+            voxel_feat_points_head, _ = self.hash_voxel.query_voxel_feature(
                 head_coords_world_flat, return_indices=False
             )
 
-        voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand, hand_coords_world_flat)
-        voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head, head_coords_world_flat)
+        voxel_feat_points_hand_projected, _ = self.implicit_decoder(voxel_feat_points_hand, hand_coords_world_flat, return_intermediate=True)
+        voxel_feat_points_head_projected, _ = self.implicit_decoder(voxel_feat_points_head, head_coords_world_flat, return_intermediate=True)
 
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(
             feats_hand_flat_reduced,
-            voxel_feat_for_points_hand,
+            voxel_feat_points_hand_projected,
             hand_coords_world_flat
         )
         fused_head = self.feature_fusion(
             feats_head_flat_reduced,
-            voxel_feat_for_points_head,
+            voxel_feat_points_head_projected,
             head_coords_world_flat
         )
 

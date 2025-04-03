@@ -43,6 +43,15 @@ class VoxelHashTable(nn.Module):
                                              dtype=torch.long, device=device)
         self.build_hash_grid()
         self.voxel_points = {}
+        
+        self.register_buffer(
+            "used_mask",
+            torch.zeros(self.total_voxels, dtype=torch.bool, device=device)
+        )
+        self.register_buffer(
+            "valid_grid_coords",
+            torch.empty((24582, 3), device=device)
+        )
 
     def build_hash_grid(self):
         """
@@ -89,10 +98,30 @@ class VoxelHashTable(nn.Module):
         feats = torch.zeros(M, self.feature_dim, device=device)
         feats[valid_mask] = self.voxel_features[voxel_indices[valid_mask]]
 
+        # mark valid voxel features
+        valid_voxel_indices = voxel_indices[valid_mask]
+        self.used_mask[valid_voxel_indices] = True
+
+        self.valid_grid_coords = self.voxel_coords[self.used_mask]
+
         if return_indices:
             return feats, voxel_indices
         else:
             return feats, None
+
+    def query_voxel_feature_from_subset(self, subset_coords, return_indices=False):
+        return self.query_voxel_feature(subset_coords, return_indices=return_indices)
+
+    def get_all_valid_voxel_data(self):
+        """
+        Returns:
+            valid_coords (Tensor): [N, 3] 
+            valid_feats (Tensor):  [N, feature_dim]
+        """
+        valid_indices = torch.where(self.used_mask)[0]
+        valid_coords = self.voxel_coords[valid_indices]
+        valid_feats = self.voxel_features[valid_indices]
+        return valid_coords, valid_feats
 
     def add_points(self, voxel_indices: torch.Tensor, points_3d: torch.Tensor):
         """

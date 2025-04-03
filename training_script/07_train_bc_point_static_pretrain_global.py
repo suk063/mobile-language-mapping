@@ -174,8 +174,9 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    hidden_dim: int = 240
+    hidden_dim: int = 120
     cos_loss_weight: float = 0.1
+    global_k: int = 4096
 
     num_eval_envs: int = field(init=False)
 
@@ -541,6 +542,13 @@ def train(cfg: TrainConfig):
         output_dim=cfg.algo.clip_input_dim,
         L=10
     ).to(device)
+    
+    voxel_proj = ImplicitDecoder(
+        voxel_feature_dim=cfg.algo.voxel_feature_dim,
+        hidden_dim=cfg.algo.hidden_dim,
+        output_dim=cfg.algo.clip_input_dim,
+        L=10
+    ).to(device)
 
     # Agent
     agent = Agent_static_global(
@@ -554,7 +562,8 @@ def train(cfg: TrainConfig):
         state_mlp_dim=cfg.algo.state_mlp_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         hash_voxel=hash_voxel,
-        implicit_decoder=implicit_decoder
+        implicit_decoder=implicit_decoder,
+        voxel_proj=voxel_proj
     ).to(device)
 
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
@@ -563,12 +572,15 @@ def train(cfg: TrainConfig):
 
     if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
         print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
-        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device))
+        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
 
     if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
         print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
-        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device))
-
+        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
+        
+    if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
+        print(f"[INFO] Loading pretrained voxel proj from {cfg.algo.pretrained_implicit_path}")
+        voxel_proj.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -642,6 +654,7 @@ def train(cfg: TrainConfig):
     params_to_optimize = (
         list(hash_voxel.parameters())
         + list(implicit_decoder.parameters())
+        + list(agent.parameters())
     )
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
 
@@ -687,15 +700,15 @@ def train(cfg: TrainConfig):
             logger.log(global_epoch)
             timer.end(key="log")
 
-        if len(agent.collected_points) > 0:
-            all_points = np.concatenate(agent.collected_points, axis=0)
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(all_points)
-            down_pcd = voxel_down_sample_random(pcd, voxel_size=0.06)
-            down_points = np.asarray(down_pcd.points)
+        # if len(agent.collected_points) > 0:
+        #     all_points = np.concatenate(agent.collected_points, axis=0)
+        #     pcd = o3d.geometry.PointCloud()
+        #     pcd.points = o3d.utility.Vector3dVector(all_points)
+        #     down_pcd = voxel_down_sample_random(pcd, voxel_size=0.12)
+        #     down_points = np.asarray(down_pcd.points)
             
-            print(len(down_points))
-            np.save(logger.model_path / f"stage1_points_epoch_{epoch}.npy", down_points)
+        #     print(len(down_points))
+        #     np.save("points.npy", down_points)
 
         # Saving
         if check_freq(cfg.algo.save_freq, epoch):
@@ -707,32 +720,19 @@ def train(cfg: TrainConfig):
     # ------------------------------------------------
     # Stage 2: Freeze mapping + Policy only (BC loss)
     # ------------------------------------------------
-    
-    # 1) Freeze mapping modules
-    for param in hash_voxel.parameters():
-        param.requires_grad = False
-    for param in implicit_decoder.parameters():
-        param.requires_grad = False
-        
-    # LoRA    
-    # apply_lora_to_clip(agent.clip_model, rank=16, alpha=8, dropout=0.0)
-    
     for name, param in agent.named_parameters():
         param.requires_grad = True 
     
     for name, param in agent.clip_model.named_parameters():
         param.requires_grad = False 
     
-    # for module in agent.clip_model.modules():
-    #     if isinstance(module, LoRALinear):
-    #         for param in module.parameters():
-    #             param.requires_grad = True
-    
-    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
+    for param in hash_voxel.parameters():
+        param.requires_grad = False
+
+    # params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)
-
 
     for epoch in range(cfg.algo.stage2_epochs):
         global_epoch = logger_start_log_step + cfg.algo.stage1_epochs + epoch
