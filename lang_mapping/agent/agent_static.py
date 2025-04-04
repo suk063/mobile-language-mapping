@@ -253,18 +253,18 @@ class Agent_static(nn.Module):
                 head_coords_world_flat, return_indices=False
             )
 
-        voxel_feat_points_hand_projected, _ = self.implicit_decoder(voxel_feat_points_hand, hand_coords_world_flat, return_intermediate=True)
-        voxel_feat_points_head_projected, _ = self.implicit_decoder(voxel_feat_points_head, head_coords_world_flat, return_intermediate=True)
+        voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand, hand_coords_world_flat)
+        voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head, head_coords_world_flat)
 
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(
             feats_hand_flat_reduced,
-            voxel_feat_points_hand_projected,
+            voxel_feat_for_points_hand,
             hand_coords_world_flat
         )
         fused_head = self.feature_fusion(
             feats_head_flat_reduced,
-            voxel_feat_points_head_projected,
+            voxel_feat_for_points_head,
             head_coords_world_flat
         )
 

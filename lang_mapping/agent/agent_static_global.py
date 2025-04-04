@@ -153,7 +153,7 @@ class GlobalPerceiver(nn.Module):
             )
 
         # (6) Final projection
-        out = self.out_proj(x[:, 1:, :])  # [B, out_dim]
+        out = self.out_proj(x[:, 1:, :])  # [B, num_learnable_tokens, out_dim]
 
         return out
     
@@ -218,7 +218,7 @@ class Agent_static_global(nn.Module):
             hidden_dim=256,
             num_layers=4,
             num_heads=8,
-            output_dim=state_mlp_dim
+            output_dim=state_mlp_dim,
         )
 
         # Action MLP
