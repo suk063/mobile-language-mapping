@@ -34,7 +34,7 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 16
+  batch_size: 32
   
   stage1_epochs: 0
   stage2_epochs: 30
@@ -69,7 +69,7 @@ algo:
   state_mlp_dim: 1024
   cos_loss_weight: 0.02
   global_k : 1024
-  num_learnable_tokens: 16
+  num_learnable_tokens: 32
 
   # Pre-trained Weights
   # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-global-local-trajs_per_obj=1000/models/stage1-final_agent.pt"
