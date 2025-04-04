@@ -36,7 +36,7 @@ algo:
   lr: 3e-4
   batch_size: 32
   
-  stage1_epochs: 1
+  stage1_epochs: 0
   stage2_epochs: 30
 
   eval_freq: 1
@@ -53,7 +53,7 @@ algo:
   torch_deterministic: True
 
   # Voxel / Scene Settings
-  voxel_feature_dim: 120
+  voxel_feature_dim: 240
   resolution: 0.12
   hash_table_size: 2097152  # 2**21
   scene_bound_min: [-2.6, -8.1, 0.0]

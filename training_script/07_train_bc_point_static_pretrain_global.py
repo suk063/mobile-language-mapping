@@ -161,7 +161,7 @@ class BCConfig:
     torch_deterministic: bool = True
 
     # Voxel/Scene Settings
-    voxel_feature_dim: int = 120
+    voxel_feature_dim: int = 240
     resolution: float = 0.12
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
@@ -174,9 +174,10 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    hidden_dim: int = 120
+    hidden_dim: int = 240
     cos_loss_weight: float = 0.1
     global_k: int = 4096
+    num_learnable_tokens: int = 16
 
     num_eval_envs: int = field(init=False)
 
@@ -563,7 +564,9 @@ def train(cfg: TrainConfig):
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         hash_voxel=hash_voxel,
         implicit_decoder=implicit_decoder,
-        voxel_proj=voxel_proj
+        voxel_proj=voxel_proj,
+        global_k = cfg.algo.global_k,
+        num_learnable_tokens=cfg.algo.num_learnable_tokens
     ).to(device)
 
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
@@ -654,7 +657,6 @@ def train(cfg: TrainConfig):
     params_to_optimize = (
         list(hash_voxel.parameters())
         + list(implicit_decoder.parameters())
-        + list(agent.parameters())
     )
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
 
@@ -729,7 +731,8 @@ def train(cfg: TrainConfig):
     for param in hash_voxel.parameters():
         param.requires_grad = False
 
-    # params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
+    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
+    
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)

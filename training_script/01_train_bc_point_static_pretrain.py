@@ -136,7 +136,7 @@ class BCConfig:
     torch_deterministic: bool = True
 
     # Voxel/Scene Settings
-    voxel_feature_dim: int = 120
+    voxel_feature_dim: int = 240
     resolution: float = 0.12
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
@@ -149,7 +149,7 @@ class BCConfig:
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     state_mlp_dim: int = 1024
-    hidden_dim: int = 120
+    hidden_dim: int = 240
     cos_loss_weight: float = 0.1
 
     num_eval_envs: int = field(init=False)
@@ -674,10 +674,6 @@ def train(cfg: TrainConfig):
     # ------------------------------------------------
     
     # 1) Freeze mapping modules
-    for param in hash_voxel.parameters():
-        param.requires_grad = False
-    for param in implicit_decoder.parameters():
-        param.requires_grad = True
         
     # LoRA    
     # apply_lora_to_clip(agent.clip_model, rank=16, alpha=8, dropout=0.0)
@@ -687,6 +683,12 @@ def train(cfg: TrainConfig):
     
     for name, param in agent.clip_model.named_parameters():
         param.requires_grad = False 
+        
+    for param in hash_voxel.parameters():
+        param.requires_grad = False
+        
+    for param in implicit_decoder.parameters():
+        param.requires_grad = True
     
     # for module in agent.clip_model.modules():
     #     if isinstance(module, LoRALinear):

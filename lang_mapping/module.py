@@ -13,64 +13,76 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     nn.init.constant_(layer.bias, bias_const)
     return layer
 
+def init_weights_kaiming(m):
+    if isinstance(m, nn.Linear):
+        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.0)
+
 class TransformerCrossAttentionLayer(nn.Module):
-    """
-    Consists of:
-    1) Self-Attention (with optional rotary PE)
-    2) Cross-Attention (Q=src, K=V=text)
-    3) FeedForward
-    """
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
         super().__init__()
+        # Define multi-head attention layers
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-
+        self.cross_attn_text = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        
+        # Feed-forward layers
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
-
+        
+        # Layer norms and dropouts
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
+        self.norm_ff = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
+        self.dropout_ff = nn.Dropout(dropout)
 
-    def forward(self, src, text, coords_src=None):
-        # Self-Attention (rotary PE applied if coords_src is given)
+    def forward(
+        self,
+        src: torch.Tensor,        # [B, S, d_model]
+        coords_src: torch.Tensor = None,
+        text: torch.Tensor = None,# [B, T, d_model] or None
+    ) -> torch.Tensor:
+        
+        # Self-Attention (use rotary encoding if coords_src is given)
         if coords_src is not None:
             q_rot = rotary_pe_3d(src, coords_src)
             k_rot = rotary_pe_3d(src, coords_src)
-            v_ = src
+            v_rot = src
         else:
-            q_rot = k_rot = v_ = src
+            q_rot = k_rot = v_rot = src
 
-        src2, _ = self.self_attn(query=q_rot, key=k_rot, value=v_)
-        src = self.norm1(src + self.dropout1(src2))
+        attn_out, _ = self.self_attn(q_rot, k_rot, v_rot)
+        src = self.norm1(src + self.dropout1(attn_out))
 
-        # Cross-Attention (Q=src, K=V=text)
-        src2, _ = self.cross_attn(query=src, key=text, value=text)
-        src = self.norm2(src + self.dropout2(src2))
+        # Cross-Attention with text
+        if text is not None:
+            attn_out_text, _ = self.cross_attn_text(query=src, key=text, value=text)
+            src = self.norm2(src + self.dropout2(attn_out_text))
 
         # FeedForward
-        src2 = self.linear2(self.dropout(F.gelu(self.linear1(src))))
-        src = self.norm3(src + self.dropout3(src2))
+        ff_out = self.linear2(self.dropout(F.gelu(self.linear1(src))))
+        src = self.norm_ff(src + self.dropout_ff(ff_out))
         return src
-
+    
 class TransformerEncoder(nn.Module):
-    """
-    Stacks multiple TransformerCrossAttentionLayers to fuse
-    state, hand, head, and text embeddings. Produces a final output.
-    """
     def __init__(self, input_dim=120, hidden_dim=256, num_layers=2, num_heads=8, output_dim=1024):
         super().__init__()
-        # self.state_projection = nn.Linear(42, input_dim)
+        
+        self.modality_embed_state = nn.Parameter(torch.randn(1, 1, input_dim))
+        self.modality_embed_text = nn.Parameter(torch.randn(1, 1, input_dim))
+        self.modality_embed_learnable = nn.Parameter(torch.randn(1, 1, input_dim))
+        self.modality_embed_3d = nn.Parameter(torch.randn(1, 1, input_dim))
+        
         self.layers = nn.ModuleList([
             TransformerCrossAttentionLayer(
                 d_model=input_dim,
                 nhead=num_heads,
                 dim_feedforward=hidden_dim
-            ) for _ in range(num_layers)
+            )
+            for _ in range(num_layers)
         ])
         self.post_fusion_mlp = nn.Sequential(
             nn.Linear(input_dim * 2 * 256, 4096),
@@ -81,38 +93,81 @@ class TransformerEncoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(2048, output_dim)
         )
-
-    def forward(self, hand, head, coords_hand=None, coords_head=None, state=None, text_embeddings=None):
-        """
-        hand, head: [B, N, input_dim]
-        coords_hand, coords_head: [B, N, 3]
-        state: [B, input_dim]
-        text_embeddings: [B, input_dim]
-        """
+        
+        self.apply(init_weights_kaiming)
+        
+    def forward(
+        self,
+        hand: torch.Tensor,        # [B, N, input_dim]
+        head: torch.Tensor,        # [B, N, input_dim]
+        coords_hand: torch.Tensor = None,
+        coords_head: torch.Tensor = None,
+        state: torch.Tensor = None,          # [B, input_dim] or None
+        text_embeddings: torch.Tensor = None,# [B, input_dim] or None
+        global_token: torch.Tensor = None  # [B, input_dim] or None
+    ) -> torch.Tensor:
         B, N, D = hand.shape
-
-        # Project state into a single token
-        state_token = state.unsqueeze(1)
-        coords_state = torch.zeros(B, 1, 3, device=state.device)
-
-        text_embeddings = text_embeddings.unsqueeze(1)
-        coords_text = torch.zeros(B, 1, 3, device=state.device) 
-
-        # Concatenate state, hand, head
-        src = torch.cat([state_token, text_embeddings, hand, head], dim=1)
-        if coords_hand is not None:
-            coords_src = torch.cat([coords_state, coords_text, coords_hand, coords_head], dim=1)
+        # -------------------------------------------------------------------
+        # 1) Construct the initial src tokens (self-attention input)
+        # -------------------------------------------------------------------
+        tokens = []
+        coords_list = []
+        # If we have state token
+        if state is not None:
+            state_token = state.unsqueeze(1) + self.modality_embed_state  # [B, 1, input_dim]
+            tokens.append(state_token)
+            coords_list.append(torch.zeros(B, 1, 3, device=state.device))
+        # If we have text token
+        if text_embeddings is not None:
+            text_token = text_embeddings.unsqueeze(1) + self.modality_embed_text # [B, 1, input_dim]
+            tokens.append(text_token)
+            coords_list.append(torch.zeros(B, 1, 3, device=state.device))
+        # If we have global_token token
+        if global_token is not None:     
+            Bg, Mg, Dg = global_token.shape
+            global_token = global_token + self.modality_embed_learnable
+            tokens.append(global_token)
+            coords_list.append(torch.zeros(Bg, Mg, 3, device=state.device))
+        # Now add hand + head tokens
+        hand = hand + self.modality_embed_3d
+        head = head + self.modality_embed_3d
+        
+        tokens.append(hand)  # [B, N, input_dim]
+        tokens.append(head)  # [B, N, input_dim]
+        # Build coords if provided
+        if coords_hand is not None and coords_head is not None:
+            coords_list.append(coords_hand)
+            coords_list.append(coords_head)
+            coords_src = torch.cat(coords_list, dim=1)  # [B, S+2N, 3]
         else:
             coords_src = None
+        # Concatenate all tokens along the sequence dimension
+        src = torch.cat(tokens, dim=1)  # shape: [B, S+2N, input_dim]
+        # -------------------------------------------------------------------
+        # 2) Pass through stacked TransformerCrossAttentionLayers
+        # -------------------------------------------------------------------
+        text_ = text_embeddings.unsqueeze(1) if text_embeddings is not None else None
 
-        # Pass through Transformer layers
         for layer in self.layers:
-            src = layer(src=src, text=text_embeddings, coords_src=coords_src)
-
-        # Post-fusion MLP
-        data = src[:, 2:, :].reshape(B, -1)
-        
-        out = self.post_fusion_mlp(data)
+            src = layer(
+                src=src,
+                coords_src=coords_src,
+                text=text_
+            )
+        # -------------------------------------------------------------------
+        # 3) Post-fusion MLP
+        # -------------------------------------------------------------------
+        num_special = 0
+        if state is not None:
+            num_special += 1
+        if text_embeddings is not None:
+            num_special += 1
+        if global_token is not None:
+            num_special += Mg
+        # Example: skip those special tokens
+        fused_tokens = src[:, num_special:, :]   # shape: [B, 2N, input_dim]
+        data = fused_tokens.reshape(B, -1)       # flatten the remaining
+        out = self.post_fusion_mlp(data)         # [B, output_dim]
         return out
     
 class ConcatMLPFusion(nn.Module):
@@ -229,6 +284,8 @@ class ImplicitDecoder(nn.Module):
         self.ln4 = nn.LayerNorm(self.hidden_dim)
 
         self.fc5 = nn.Linear(self.hidden_dim, self.output_dim)
+        
+        self.apply(init_weights_kaiming)
 
     def forward(self, voxel_features, coords_3d, return_intermediate=False):
         """
@@ -245,14 +302,13 @@ class ImplicitDecoder(nn.Module):
         x = torch.cat([voxel_features, pe], dim=-1)
         x = F.relu(self.ln1(self.fc1(x)), inplace=True)
 
-        x1 = x
-
         # 2) fc2
-        x = F.relu(self.ln2(self.fc2(x1)), inplace=True)
+        x = F.relu(self.ln2(self.fc2(x)), inplace=True)
 
         # 3) fc3 
         x = torch.cat([x, pe], dim=-1)
-        x = F.relu(self.ln3(self.fc3(x)), inplace=True)
+        x1 = self.fc3(x)
+        x = F.relu(self.ln3(x1), inplace=True)
         
         # 4) fc4
         x = F.relu(self.ln4(self.fc4(x)), inplace=True)
@@ -265,6 +321,22 @@ class ImplicitDecoder(nn.Module):
         else:
             return out
 
+class StateProj(nn.Module):
+    def __init__(self, state_dim=42, output_dim=120):
+        super().__init__()
+
+        self.mlp = nn.Sequential(
+            nn.Linear(state_dim, state_dim),
+            nn.ReLU(),
+            nn.LayerNorm(state_dim),
+            nn.Linear(state_dim, output_dim),
+        )
+        
+        self.apply(init_weights_kaiming)
+
+    def forward(self, state):
+        out = self.mlp(state)
+        return out
 
 class VoxelProj(nn.Module):
     def __init__(self, voxel_feature_dim=120, L=6):
@@ -277,8 +349,9 @@ class VoxelProj(nn.Module):
             nn.ReLU(),
             nn.LayerNorm(voxel_feature_dim),
             nn.Linear(voxel_feature_dim, voxel_feature_dim),
-            nn.ReLU(),
         )
+        
+        self.apply(init_weights_kaiming)
 
     def forward(self, voxel_feat, coords_3d):
         """

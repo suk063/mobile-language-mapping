@@ -53,7 +53,7 @@ algo:
   torch_deterministic: True
 
   # Voxel / Scene Settings
-  voxel_feature_dim: 120
+  voxel_feature_dim: 240
   resolution: 0.12
   hash_table_size: 2097152  # 2**21
   scene_bound_min: [-2.6, -8.1, 0.0]
@@ -67,14 +67,13 @@ algo:
   text_input: ["bowl", "apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   state_mlp_dim: 1024
-  temporal_emb_dim: 120
   cos_loss_weight: 0.02
-  global_k : 256
+  global_k : 1024
 
   # Pre-trained Weights
-  # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage1-final_agent.pt"
-  pretrained_voxel_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-local-trajs_per_obj=1000/models/stage1-final_voxel.pt"
-  pretrained_implicit_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-local-trajs_per_obj=1000/models/stage1-final_implicit.pt"
+  # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-global-local-trajs_per_obj=1000/models/stage1-final_agent.pt"
+  pretrained_voxel_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/stage1-final_voxel.pt"
+  pretrained_implicit_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/stage1-final_implicit.pt"
 
 
 logger:
