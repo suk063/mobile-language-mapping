@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module import ImplicitDecoder, TransformerEncoder, ActionMLP, ConcatMLPFusion
+from ..module import ImplicitDecoder, ActionMLP, ConcatMLPFusion, TransformerEncoder, init_weights_kaiming
 from ..mapper.mapper import VoxelHashTable
 from ..utils import get_3d_coordinates, get_visual_features, transform, rotary_pe_3d
 
@@ -13,17 +13,12 @@ import open_clip
 
 class PerceiverAttentionLayer(nn.Module):
     """
-    Perceiver-style cross-attention with rotary positional encoding.
-
     Inputs:
       - q: [B, Q, dim]
       - k: [B, N, dim]
       - v: [B, N, dim]
       - coords_q:  [B, Q, 3] (positional coords for q)
       - coords_kv: [B, N, 3] (positional coords for k and v)
-
-    This layer applies rotary PE to q, k (optionally to v), 
-    then performs a multi-head cross-attention followed by a small FFN.
     """
     def __init__(self, dim: int, nhead: int = 8):
         super().__init__()
@@ -32,7 +27,7 @@ class PerceiverAttentionLayer(nn.Module):
 
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Linear(dim, dim),
         )
         self.ln2 = nn.LayerNorm(dim)
@@ -68,11 +63,8 @@ class PerceiverAttentionLayer(nn.Module):
         return x
 
 
-class StatePerceiver(nn.Module):
+class GlobalPerceiver(nn.Module):
     """
-    Perceiver module for mapping a projected state (query) 
-    to global voxel-based features (key/value) using cross-attention.
-
     - Query: state_projected -> shape [B, 1, hidden_dim]
     - Key/Value: derived from valid_feats -> implicit_decoder -> [B, N, hidden_dim]
     - coords_q: head_translation -> [B, 1, 3]
@@ -85,8 +77,13 @@ class StatePerceiver(nn.Module):
         num_layers: int = 4,
         out_dim: int = 120,
         voxel_proj: nn.Module = None,
+        num_learnable_tokens: int = 16,
     ):
         super().__init__()
+        
+        self.modality_embed_state = nn.Parameter(torch.randn(1, 1, hidden_dim))
+        self.modality_embed_learnable = nn.Parameter(torch.randn(1, 1, hidden_dim))
+        
         self.hidden_dim = hidden_dim
         self.voxel_proj = voxel_proj
 
@@ -96,50 +93,53 @@ class StatePerceiver(nn.Module):
             for _ in range(num_layers)
         ])
         self.out_proj = nn.Linear(hidden_dim, out_dim)
+        
+        self.num_learnable_tokens = num_learnable_tokens
+        self.learnable_tokens = nn.Parameter(
+            torch.zeros(1, num_learnable_tokens, hidden_dim)
+        )
+        
+        self.apply(init_weights_kaiming)
 
     def forward(
         self,
         state: torch.Tensor,            # [B, state_dim]
-        head_translation: torch.Tensor, # [B, 3]
-        valid_coords: torch.Tensor,     # [N, 3]
-        valid_feats: torch.Tensor       # [N, voxel_feature_dim]
+        valid_coords: torch.Tensor,     # [B, N, 3]
+        valid_feats: torch.Tensor       # [B, N, voxel_feature_dim]
     ) -> torch.Tensor:
         """
         Args:
             state:           [B, state_dim]
             head_translation [B, 3]
-            valid_coords:    [N, 3]  (global)
-            valid_feats:     [N, voxel_feature_dim] (global)
-
-        Returns:
-            out: [B, out_dim]
+            valid_coords:    [B, N, 3]
+            valid_feats:     [B, N, voxel_feature_dim]
         """
-        B = state.shape[0]
-        N = valid_feats.shape[0]
+        B, N, _ = valid_feats.shape
 
-        # (1) Prepare query [B, 1, hidden_dim = state_dim in the caller context]
-        #     Here, we assume 'state' is already projected to 'hidden_dim'.
-        q = state.unsqueeze(1)  # [B, 1, hidden_dim]
+        # (1) Query = [ state_token + learnable_tokens ]
+        state_token = state.unsqueeze(1)  # [B, 1, hidden_dim]
+        state_token = state_token + self.modality_embed_state
+        
+        learnable_tokens = (
+            self.learnable_tokens + self.modality_embed_learnable
+        ).repeat(B, 1, 1)  # [B, num_learnable_tokens, hidden_dim]
+        q = torch.cat([state_token, learnable_tokens], dim=1)  # [B, 1 + num_learnable_tokens, hidden_dim]
+        
+        coords_state = torch.zeros(B, 1, 3, device=q.device) 
+        coords_learnable = torch.zeros(B, self.num_learnable_tokens, 3, device=q.device)  # [B, num_learnable_tokens, 3]
+        coords_q = torch.cat([coords_state, coords_learnable], dim=1) 
+        
+        feats_flat = valid_feats.reshape(B * N, -1)
+        coords_flat = valid_coords.reshape(B * N, 3)
+        
+        k_flat, _ = self.voxel_proj(
+            feats_flat, coords_flat, return_intermediate=True
+        )
 
-        # (2) Query coords
-        coords_q = head_translation.unsqueeze(1)  # [B, 1, 3]
-
-        # (3) Key/Value creation via implicit_decoder
-        #     valid_feats -> [N, voxel_feature_dim]
-        #     implicit_decoder returns an intermediate feature for each voxel
-        k_intermediate_single, _ = self.voxel_proj(
-            valid_feats, valid_coords, return_intermediate=True
-        )  # [N, hidden_dim]
-
-        # Expand to match batch dimension
-        k_intermediate = k_intermediate_single.unsqueeze(0).expand(B, N, self.hidden_dim)
-
-        # Use the same feature for both Key and Value
-        k = k_intermediate
-        v = k_intermediate
-
-        # (4) Voxel coords repeated across batch
-        coords_kv = valid_coords.unsqueeze(0).expand(B, N, 3)
+        k = k_flat.view(B, N, self.hidden_dim)
+        v = k
+        
+        coords_kv = valid_coords
 
         # (5) Pass through Perceiver cross-attention layers
         x = q
@@ -153,9 +153,9 @@ class StatePerceiver(nn.Module):
             )
 
         # (6) Final projection
-        x = x.squeeze(1)          # [B, hidden_dim]
-        out = self.out_proj(x)    # [B, out_dim]
-        return x, out
+        out = self.out_proj(x[:, 1:, :])  # [B, out_dim]
+
+        return out
     
 class Agent_static_global(nn.Module):
     def __init__(
@@ -171,12 +171,10 @@ class Agent_static_global(nn.Module):
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         hash_voxel: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
-        voxel_proj: ImplicitDecoder = None
+        voxel_proj: ImplicitDecoder = None,
+        global_k: int = 1024,
+        num_learnable_tokens: int = 16
     ):
-        """
-        Maintains a voxel-hash representation for 3D scenes and uses a CLIP-based
-        feature extractor plus an implicit decoder for mapping.
-        """
         super().__init__()
 
         self.device = device
@@ -226,7 +224,7 @@ class Agent_static_global(nn.Module):
         # Action MLP
         action_dim = np.prod(single_act_shape)
         self.action_mlp = ActionMLP(
-            input_dim=state_mlp_dim * 3,
+            input_dim=state_mlp_dim * 2,
             action_dim=action_dim
         ).to(self.device)
 
@@ -236,7 +234,7 @@ class Agent_static_global(nn.Module):
         self.voxel_proj = voxel_proj
         
         self.state_proj_perceiver = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
-        self.state_proj_transformer = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
+        self.state_proj = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
 
         # Local feature fusion
         self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim)
@@ -244,18 +242,21 @@ class Agent_static_global(nn.Module):
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
         
-        self.register_buffer(
-            "used_voxel_idx", 
-            torch.from_numpy(np.load("used_voxel_idx.npy")).float().to(device).unsqueeze(0)
-            )
+        # self.register_buffer(
+        #     "used_voxel_idx", 
+        #     torch.from_numpy(np.load("used_voxel_idx.npy")).float().to(device).unsqueeze(0)
+        #     )
         
-        self.state_perceiver = StatePerceiver(
+        self.state_perceiver = GlobalPerceiver(
             hidden_dim=voxel_feature_dim,
             nhead=8,
             num_layers=4,
-            out_dim=state_mlp_dim,
-            voxel_proj=self.voxel_proj
+            out_dim=voxel_feature_dim,
+            voxel_proj=self.voxel_proj,
+            num_learnable_tokens = num_learnable_tokens
         ).to(device)
+
+        self.global_k = global_k
 
     def forward_mapping(self, observations):
         """
@@ -410,22 +411,32 @@ class Agent_static_global(nn.Module):
         head_translation = head_pose[:, 0, :3, 3] # [B, 3]
         
         valid_coords, valid_feats = self.hash_voxel.get_all_valid_voxel_data()
+        
+        valid_coords_exp = valid_coords.unsqueeze(0).expand(B_, -1, 3)
+        dist = torch.norm(valid_coords_exp - head_translation.unsqueeze(1), dim=-1)
+        K = self.global_k
+        _, topk_indices = torch.topk(dist, k=K, dim=-1, largest=False)
+        coords_kv = torch.gather(valid_coords_exp, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 3))
+        coords_kv_flat = coords_kv.view(B_*K, 3)
+        
+        # selected_dist = torch.gather(dist, 1, topk_indices)  # [B_, K]
+        # max_dist_per_batch = selected_dist.max(dim=1).values # [B_]
 
-        perceiver_cond, perceiver_out  = self.state_perceiver(
+        # print(max_dist_per_batch)
+                
+        feats_kv_flat, _ = self.hash_voxel.query_voxel_feature(coords_kv_flat, return_indices=False)
+        feats_kv = feats_kv_flat.view(B_, K, -1)
+
+        global_token = self.state_perceiver(
             state_projected_perceiver,
-            head_translation,
-            valid_coords,
-            valid_feats
+            coords_kv,
+            feats_kv
         )
 
         # Query voxel features 
         with torch.no_grad():
-            voxel_feat_points_hand, _ = self.hash_voxel.query_voxel_feature(
-                hand_coords_world_flat, return_indices=False
-            )
-            voxel_feat_points_head, _ = self.hash_voxel.query_voxel_feature(
-                head_coords_world_flat, return_indices=False
-            )
+            voxel_feat_points_hand, _ = self.hash_voxel.query_voxel_feature(hand_coords_world_flat, return_indices=False)
+            voxel_feat_points_head, _ = self.hash_voxel.query_voxel_feature(head_coords_world_flat, return_indices=False)
 
         voxel_feat_points_hand_projected, _ = self.implicit_decoder(voxel_feat_points_hand, hand_coords_world_flat, return_intermediate=True)
         voxel_feat_points_head_projected, _ = self.implicit_decoder(voxel_feat_points_head, head_coords_world_flat, return_intermediate=True)
@@ -453,7 +464,7 @@ class Agent_static_global(nn.Module):
         batch_fused_hand = fused_hand.view(B_, N, -1)
         batch_fused_head = fused_head.view(B_, N, -1)
 
-        state_projected_transformer = self.state_proj_transformer(state)
+        state_projected = self.state_proj(state)
 
         # Transformer
         visual_token = self.transformer(
@@ -461,13 +472,14 @@ class Agent_static_global(nn.Module):
             head=batch_fused_head,
             coords_hand=batch_hand_coords,
             coords_head=batch_head_coords,
-            state=state_projected_transformer,
+            state=state_projected,
             text_embeddings=selected_text_reduced,
+            global_token=global_token
         )
 
         # Final action
         state_token = self.state_mlp(state)
-        inp = torch.cat([visual_token, state_token, perceiver_out], dim=1)
+        inp = torch.cat([visual_token, state_token], dim=1)
         action_pred = self.action_mlp(inp)
 
         return action_pred
