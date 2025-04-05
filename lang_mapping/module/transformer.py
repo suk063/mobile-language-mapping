@@ -162,50 +162,6 @@ class TransformerEncoder(nn.Module):
         out = self.post_fusion_mlp(data)         # [B, output_dim]
         return out
     
-class ConcatMLPFusion(nn.Module):
-    """
-    (feat1, feat2, coords_3d) -> [concat + sinusoidal PE] -> MLP -> fused
-    """
-    def __init__(self, feat_dim=120, L=6):
-        super().__init__()
-        self.feat_dim = feat_dim
-        self.L = L
-        
-        self.pos_enc_dim = 2 * self.L * 3
-
-        in_dim = feat_dim * 2 + self.pos_enc_dim
-        
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, feat_dim),
-            nn.LayerNorm(feat_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, feat_dim),
-            nn.LayerNorm(feat_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, feat_dim)
-        )
-
-    def forward(self, feat1, feat2, coords_3d):
-        """
-        Args:
-            feat1, feat2: (B * N, feat_dim)
-            coords_3d:    (B * N, 3)  
-        
-        Returns:
-            fused: (B * N, feat_dim) 
-        """
-
-        x = torch.cat([feat1, feat2], dim=-1)
-
-        pe = positional_encoding(coords_3d, L=self.L)  # (B*N, 2*L*3)
-
-        # feature + positional_encoding을 concat
-        x = torch.cat([x, pe], dim=-1)  # (B, N, feat_dim*2 + pos_enc_dim)
-
-        # MLP 
-        fused = self.mlp(x)  # (B, N, feat_dim)
-        return fused
-    
 class PerceiverAttentionLayer(nn.Module):
     """
     Inputs:

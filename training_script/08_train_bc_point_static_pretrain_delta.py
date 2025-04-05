@@ -25,9 +25,9 @@ from torch.utils.tensorboard import SummaryWriter
 import mani_skill.envs
 from mani_skill.utils import common
 
-from lang_mapping.agent.agent_static_global import Agent_static_global
-from lang_mapping.module import ImplicitDecoder, LoRALinear
-from lang_mapping.mapper.mapper import VoxelHashTable
+from lang_mapping.agent.agent_static_global_delta import Agent_static_global_delta
+from lang_mapping.module import ImplicitDecoder
+from lang_mapping.mapper.mapper_delta import VoxelHashTable
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
@@ -35,28 +35,44 @@ from mshab.utils.dataset import ClosableDataLoader, ClosableDataset
 from mshab.utils.logger import Logger, LoggerConfig
 from mshab.utils.time import NonOverlappingTimeProfiler
 
+def build_uid_mapping(task_plan_path: str):
+    """
+    Reads all composite_subtask_uids from the task_plan file located at task_plan_path,
+    and returns a dictionary mapping each unique uid to a unique integer from 0 to N-1.
+    """
+    with open(task_plan_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-def voxel_down_sample_random(pcd: o3d.geometry.PointCloud, voxel_size: float) -> o3d.geometry.PointCloud:
-    points = np.asarray(pcd.points)
+    all_uids = []
+    # Iterate over all plans
+    for plan in data["plans"]:
+        # Iterate over all subtasks within each plan
+        for subtask in plan["subtasks"]:
+            # Add each composite_subtask_uid from the current subtask to the list
+            for c_uid in subtask["composite_subtask_uids"]:
+                all_uids.append(c_uid)
 
-    voxel_indices = np.floor(points / voxel_size).astype(np.int64)
+    # Extract a sorted list of unique uids
+    unique_uids = sorted(list(set(all_uids)))
+    print(f"Total unique subtask_uids (N) = {len(unique_uids)}")
 
-    voxel_dict = {}
-    for i, vox_idx in enumerate(voxel_indices):
-        vox_idx_tuple = tuple(vox_idx)
-        if vox_idx_tuple not in voxel_dict:
-            voxel_dict[vox_idx_tuple] = []
-        voxel_dict[vox_idx_tuple].append(points[i])
+    # Create a mapping from uid to an integer index (0 to N-1)
+    uid2index = {uid: idx for idx, uid in enumerate(unique_uids)}
+    return uid2index
 
-    random_points = []
-    for vox_idx, pts_in_voxel in voxel_dict.items():
-        random_points.append(random.choice(pts_in_voxel))
-
-    random_points = np.array(random_points)
-    pcd_random_down = o3d.geometry.PointCloud()
-    pcd_random_down.points = o3d.utility.Vector3dVector(random_points)
-    
-    return pcd_random_down
+def map_uids_to_indices_tensor(uids, uid2index):
+    """
+    Given a list of arbitrary uid strings, returns a torch.Tensor containing 
+    their corresponding integer indices as defined in uid2index mapping.
+    """
+    indices = []
+    for uid in uids:
+        if uid in uid2index:
+            indices.append(uid2index[uid])
+        else:
+            # Assign -1 if the uid is not found in the mapping
+            indices.append(-1)
+    return torch.tensor(indices, dtype=torch.long)
 
 def build_object_map(json_file_path: str, object_names: List[str]) -> Dict[str, torch.Tensor]:
     """
@@ -104,51 +120,13 @@ def get_object_labels_batch(
         else:
             labels.append(object_map[uid])
     return torch.stack(labels, dim=0)
-
-def apply_lora_to_clip(
-    clip_model: nn.Module,
-    rank: int = 4,
-    alpha: float = 1.0,
-    dropout: float = 0.0,
-    target_blocks: Optional[List[int]] = None
-):
-
-    for i, block in enumerate(clip_model.visual.trunk.blocks):
-        if target_blocks is not None and i not in target_blocks:
-            continue
-        attn = block.attn  # EvaAttention
-        # q_proj
-        # if hasattr(attn, 'q_proj') and isinstance(attn.q_proj, nn.Linear):
-        #     attn.q_proj = LoRALinear(attn.q_proj, rank=rank, alpha=alpha, dropout=dropout)
-        # k_proj
-        # if hasattr(attn, 'k_proj') and isinstance(attn.k_proj, nn.Linear):
-        #     attn.k_proj = LoRALinear(attn.k_proj, rank=rank, alpha=alpha, dropout=dropout)
-        # v_proj
-        # if hasattr(attn, 'v_proj') and isinstance(attn.v_proj, nn.Linear):
-        #     attn.v_proj = LoRALinear(attn.v_proj, rank=rank, alpha=alpha, dropout=dropout)
-        # out_proj
-        # if hasattr(attn, 'proj') and isinstance(attn.proj, nn.Linear):
-        #     attn.proj = LoRALinear(attn.proj, rank=rank, alpha=alpha, dropout=dropout)
-
-        mlp = block.mlp  # SwiGLU
-        # # fc1_g
-        # if hasattr(mlp, 'fc1_g') and isinstance(mlp.fc1_g, nn.Linear):
-        #     mlp.fc1_g = LoRALinear(mlp.fc1_g, rank=rank, alpha=alpha, dropout=dropout)
-        # # fc1_x
-        # if hasattr(mlp, 'fc1_x') and isinstance(mlp.fc1_x, nn.Linear):
-        #     mlp.fc1_x = LoRALinear(mlp.fc1_x, rank=rank, alpha=alpha, dropout=dropout)
-        # # fc2
-        if hasattr(mlp, 'fc2') and isinstance(mlp.fc2, nn.Linear):
-            mlp.fc2 = LoRALinear(mlp.fc2, rank=rank, alpha=alpha, dropout=dropout)
-            
                     
 @dataclass
 class BCConfig:
     name: str = "bc"
     lr: float = 3e-4               # learning rate
     batch_size: int = 256          # batch size
-    stage1_epochs: int = 1         # stage 1 epochs
-    stage2_epochs: int = 10        # stage 2 epochs
+    epochs: int = 1         # stage 1 epochs
 
     eval_freq: int = 1
     log_freq: int = 1
@@ -452,7 +430,13 @@ class DPDataset(ClosableDataset):
             obs_seq["state"].shape[0] == self.obs_horizon
             and act_seq.shape[0] == self.pred_horizon
         )
-        return {"observations": obs_seq, "actions": act_seq, "subtask_uid": subtask_uid}
+        return {
+            "observations": obs_seq,
+            "actions": act_seq,
+            "subtask_uid": subtask_uid,
+            "traj_idx": traj_idx, 
+        }
+
 
     def __len__(self):
         return len(self.slices)
@@ -504,8 +488,9 @@ class TempTranslateToPointDataset(DPDataset):
         step_num = self.slices[index][2]
 
         subtask_uid = item["subtask_uid"]
+        traj_idx = item["traj_idx"]
 
-        return (obs, act, subtask_uid, step_num)
+        return (obs, act, subtask_uid, step_num, traj_idx)
 
 def train(cfg: TrainConfig):
     # Seed
@@ -516,7 +501,8 @@ def train(cfg: TrainConfig):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     uid_to_label_map = build_object_map(cfg.eval_env.task_plan_fp, cfg.algo.text_input)
-
+    uid2index_map = build_uid_mapping(cfg.eval_env.task_plan_fp)
+    
     # Make eval env
     print("Making eval env...")
     eval_envs = make_env(cfg.eval_env, video_path=cfg.logger.eval_video_path)
@@ -528,7 +514,16 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     # VoxelHashTable and ImplicitDecoder
-    hash_voxel = VoxelHashTable(
+    static_map = VoxelHashTable(
+        resolution=cfg.algo.resolution,
+        hash_table_size=cfg.algo.hash_table_size,
+        feature_dim=cfg.algo.voxel_feature_dim,
+        scene_bound_min=tuple(cfg.algo.scene_bound_min),
+        scene_bound_max=tuple(cfg.algo.scene_bound_max),
+        device=device
+    ).to(device)
+    
+    delta_map = VoxelHashTable(
         resolution=cfg.algo.resolution,
         hash_table_size=cfg.algo.hash_table_size,
         feature_dim=cfg.algo.voxel_feature_dim,
@@ -543,16 +538,9 @@ def train(cfg: TrainConfig):
         output_dim=cfg.algo.clip_input_dim,
         L=10
     ).to(device)
-    
-    voxel_proj = ImplicitDecoder(
-        voxel_feature_dim=cfg.algo.voxel_feature_dim,
-        hidden_dim=cfg.algo.hidden_dim,
-        output_dim=cfg.algo.clip_input_dim,
-        L=10
-    ).to(device)
 
     # Agent
-    agent = Agent_static_global(
+    agent = Agent_static_global_delta(
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
@@ -562,9 +550,9 @@ def train(cfg: TrainConfig):
         clip_input_dim=cfg.algo.clip_input_dim,
         state_mlp_dim=cfg.algo.state_mlp_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        hash_voxel=hash_voxel,
+        static_map=static_map,
+        delta_map=delta_map,
         implicit_decoder=implicit_decoder,
-        voxel_proj=voxel_proj,
         global_k = cfg.algo.global_k,
         num_learnable_tokens=cfg.algo.num_learnable_tokens
     ).to(device)
@@ -574,16 +562,13 @@ def train(cfg: TrainConfig):
         agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
 
     if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
-        print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
-        hash_voxel.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
-
-    if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
-        print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
-        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
+        print(f"[INFO] Loading pretrained voxel")
+        voxel_features = torch.load('pre-trained/hash_voxel.pt', map_location=device)['model']['voxel_features']
+        static_map.voxel_features.data.copy_(voxel_features)
         
     if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
-        print(f"[INFO] Loading pretrained voxel proj from {cfg.algo.pretrained_implicit_path}")
-        voxel_proj.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
+        print(f"[INFO] Loading pretrained implicit decoder")
+        implicit_decoder.load_state_dict(torch.load('pre-trained/implicit_decoder.pt', map_location=device)['model'], strict=True)
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -593,13 +578,9 @@ def train(cfg: TrainConfig):
         Save the agent, voxel table, decoder, and optimizer states.
         """
         agent_path = logger.model_path / f"{name}_agent.pt"
-        voxel_path = logger.model_path / f"{name}_voxel.pt"
-        decoder_path = logger.model_path / f"{name}_implicit.pt"
         optim_path = logger.model_path / f"{name}_optimizer.pt"
 
         torch.save(agent.state_dict(), agent_path)
-        torch.save(hash_voxel.state_dict(), voxel_path)
-        torch.save(implicit_decoder.state_dict(), decoder_path)
         torch.save(optimizer.state_dict(), optim_path)
 
     
@@ -653,31 +634,38 @@ def train(cfg: TrainConfig):
         )
         log_env.reset_queues()
 
-    # Combine parameters
-    params_to_optimize = (
-        list(hash_voxel.parameters())
-        + list(implicit_decoder.parameters())
-    )
+    # ------------------------------------------------
+    # Mapping
+    # ------------------------------------------------
+    for name, param in agent.named_parameters():
+        param.requires_grad = True 
+    
+    for name, param in agent.clip_model.named_parameters():
+        param.requires_grad = False 
+        
+    for name, param in agent.static_map.named_parameters():
+        param.requires_grad = False 
+    
+    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
+    
+    agent.to(device)
 
-    # -------------------------
-    # Stage 1: Only Mapping
-    # -------------------------
-    for epoch in range(cfg.algo.stage1_epochs):
+    for epoch in range(cfg.algo.epochs):
         global_epoch = logger_start_log_step + epoch
+        
         logger.print(f"[Stage 1] Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
-        agent.epoch = epoch
-        
-        agent.train()
-        hash_voxel.train()
-        implicit_decoder.train()
 
-        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
+        for obs, act, subtask_uids, step_nums, traj_idx in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
+            subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
+            subtask_idx = map_uids_to_indices_tensor(subtask_uids, uid2index_map).to(device)
+
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            total_cos_loss = agent.forward_mapping(obs)
-            loss = cfg.algo.cos_loss_weight * total_cos_loss
+            total_cos_loss, pi = agent(obs, subtask_labels, subtask_idx)
+            bc_loss = F.mse_loss(pi, act)
+            loss = cfg.algo.cos_loss_weight * total_cos_loss + bc_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -687,84 +675,7 @@ def train(cfg: TrainConfig):
             n_samples += act.size(0)
             global_step += 1
 
-            # Write to TensorBoard
             writer.add_scalar("Cosine Loss/Iteration", total_cos_loss.item(), global_step)
-
-        avg_loss = tot_loss / n_samples
-        loss_logs = dict(loss=avg_loss)
-        timer.end(key="train")
-
-        # Logging
-        if check_freq(cfg.algo.log_freq, epoch):
-            logger.store(tag="losses", **loss_logs)
-            if epoch > 0:
-                logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(global_epoch)
-            timer.end(key="log")
-
-        # if len(agent.collected_points) > 0:
-        #     all_points = np.concatenate(agent.collected_points, axis=0)
-        #     pcd = o3d.geometry.PointCloud()
-        #     pcd.points = o3d.utility.Vector3dVector(all_points)
-        #     down_pcd = voxel_down_sample_random(pcd, voxel_size=0.12)
-        #     down_points = np.asarray(down_pcd.points)
-            
-        #     print(len(down_points))
-        #     np.save("points.npy", down_points)
-
-        # Saving
-        if check_freq(cfg.algo.save_freq, epoch):
-            save_checkpoint(name="latest")
-            timer.end(key="checkpoint")
-
-    save_checkpoint(name="stage1-final")
-
-    # ------------------------------------------------
-    # Stage 2: Freeze mapping + Policy only (BC loss)
-    # ------------------------------------------------
-    # LoRA    
-    # apply_lora_to_clip(agent.clip_model, rank=16, alpha=8, dropout=0.0)
-    
-    for name, param in agent.named_parameters():
-        param.requires_grad = True 
-    
-    for name, param in agent.clip_model.named_parameters():
-        param.requires_grad = False 
-    
-    # for module in agent.clip_model.modules():
-    #     if isinstance(module, LoRALinear):
-    #         for param in module.parameters():
-    #             param.requires_grad = True
-    
-    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
-    optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
-    
-    agent.to(device)
-
-    
-    agent.to(device)
-
-    for epoch in range(cfg.algo.stage2_epochs):
-        global_epoch = logger_start_log_step + cfg.algo.stage1_epochs + epoch
-        
-        logger.print(f"[Stage 2] Epoch: {global_epoch}")
-        tot_loss, n_samples = 0, 0
-
-        for obs, act, subtask_uids, step_nums in tqdm(bc_dataloader, desc="Stage2-Batch", unit="batch"):
-            subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
-            obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
-
-            pi = agent.forward_policy(obs, subtask_labels, step_nums)
-            bc_loss = F.mse_loss(pi, act)
-
-            optimizer.zero_grad()
-            bc_loss.backward()
-            optimizer.step()
-
-            tot_loss += bc_loss.item()
-            n_samples += act.size(0)
-            global_step += 1
-
             writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
@@ -782,17 +693,18 @@ def train(cfg: TrainConfig):
         # Evaluation
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
-            hash_voxel.eval()
-            implicit_decoder.eval()
-
+            
             eval_obs, _ = eval_envs.reset()
             eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
+            eval_subtask_idx = map_uids_to_indices_tensor(eval_envs.unwrapped.task_plan[0].composite_subtask_uids, uid2index_map).to(device)
+            
             B = eval_subtask_labels.size()
 
             for t in range(eval_envs.max_episode_steps):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_policy(eval_obs, eval_subtask_labels, time_step)
+                    
+                    _, action = agent(eval_obs, eval_subtask_labels, eval_subtask_idx)
                 # Stub environment step
                 eval_obs, _, _, _, _ = eval_envs.step(action)
             if len(eval_envs.return_queue) > 0:

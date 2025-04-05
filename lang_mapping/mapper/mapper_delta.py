@@ -42,16 +42,9 @@ class VoxelHashTable(nn.Module):
         self.buffer_voxel_index = torch.full((self.hash_table_size,), -1,
                                              dtype=torch.long, device=device)
         self.build_hash_grid()
-        self.voxel_points = {}
+        self.store_all_stored_voxel_data()
         
-        self.register_buffer(
-            "used_mask",
-            torch.zeros(self.total_voxels, dtype=torch.bool, device=device)
-        )
-        self.register_buffer(
-            "valid_grid_coords",
-            torch.empty((24582, 3), device=device)
-        )
+        self.voxel_points = {}
 
     def build_hash_grid(self):
         """
@@ -98,12 +91,6 @@ class VoxelHashTable(nn.Module):
         feats = torch.zeros(M, self.feature_dim, device=device)
         feats[valid_mask] = self.voxel_features[voxel_indices[valid_mask]]
 
-        # mark valid voxel features
-        valid_voxel_indices = voxel_indices[valid_mask]
-        self.used_mask[valid_voxel_indices] = True
-
-        self.valid_grid_coords = self.voxel_coords[self.used_mask]
-
         if return_indices:
             return feats, voxel_indices
         else:
@@ -112,16 +99,23 @@ class VoxelHashTable(nn.Module):
     def query_voxel_feature_from_subset(self, subset_coords, return_indices=False):
         return self.query_voxel_feature(subset_coords, return_indices=return_indices)
 
-    def get_all_valid_voxel_data(self):
+    def store_all_stored_voxel_data(self):
+        stored_coords = self.get_all_stored_voxel_data()
+
+        self.register_buffer("stored_coords", stored_coords)
+
+    def get_all_stored_voxel_data(self):
         """
         Returns:
-            valid_coords (Tensor): [N, 3] 
-            valid_feats (Tensor):  [N, feature_dim]
+            stored_coords (Tensor): [N, 3]
+            stored_feats (Tensor):  [N, feature_dim]
         """
-        valid_indices = torch.where(self.used_mask)[0]
-        valid_coords = self.voxel_coords[valid_indices]
-        valid_feats = self.voxel_features[valid_indices]
-        return valid_coords, valid_feats
+        stored_mask = (self.buffer_voxel_index >= 0)
+        stored_indices = self.buffer_voxel_index[stored_mask]
+        stored_indices = torch.unique(stored_indices)
+
+        stored_coords = self.voxel_coords[stored_indices]
+        return stored_coords
 
     def add_points(self, voxel_indices: torch.Tensor, points_3d: torch.Tensor):
         """
