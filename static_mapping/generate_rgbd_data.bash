@@ -34,6 +34,8 @@ args=(
     "output_h5=${OUTPUT_H5}"
 )
 
-set -x
-CUDA_VISIBLE_DEVICES=0 python generate_data.py ${SCRIPT_DIR}/../configs/bc_pick.yml \
-    "${args[@]}"
+if [ ! -f ${OUTPUT_H5} ]; then
+    set -x
+    CUDA_VISIBLE_DEVICES=0 python generate_rgbd_data.py ${SCRIPT_DIR}/../configs/01_bc_pick_static.yml \
+        "${args[@]}"
+fi

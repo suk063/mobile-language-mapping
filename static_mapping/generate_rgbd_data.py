@@ -1,35 +1,35 @@
 import sys
+from dataclasses import dataclass
 from typing import Union
 
+import gymnasium as gym
 import h5py
+import matplotlib.pyplot as plt
+import numpy as np
+import sapien
+import torch
+import transforms3d as t3d
 import trimesh
+from dacite import from_dict
 from omegaconf import OmegaConf
+from sapien import physx
+from tqdm import tqdm
 
 from mani_skill import Actor
-from mani_skill.utils.registration import register_env
+from mani_skill.agents.base_agent import Keyframe
+from mani_skill.sensors.camera import CameraConfig
+from mani_skill.utils import sapien_utils
 from mani_skill.utils.building import actors
+from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.replicacad.rearrange.scene_builder import (
     ReplicaCADRearrangeSceneBuilder,
 )
+from mani_skill.utils.structs.pose import Pose
+from mshab.envs.make import EnvConfig
 from mshab.envs.pick import PickSubtaskTrainEnv
 from mshab.envs.place import PlaceSubtaskTrainEnv
-from mshab.envs.make import EnvConfig
-from dataclasses import dataclass
 from mshab.envs.planner import plan_data_from_file
-import gymnasium as gym
-from dacite import from_dict
 from mshab.utils.config import parse_cfg
-from mani_skill.utils import sapien_utils
-from mani_skill.sensors.camera import CameraConfig
-import torch
-import sapien
-from mani_skill.agents.base_agent import Keyframe
-import numpy as np
-from sapien import physx
-from mani_skill.utils.structs.pose import Pose
-import matplotlib.pyplot as plt
-import transforms3d as t3d
-from tqdm import tqdm
 
 image_height = 224
 image_width = 224

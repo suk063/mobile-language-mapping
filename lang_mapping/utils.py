@@ -1,7 +1,7 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
+
 
 def get_visual_features(model, x):
     """
@@ -10,7 +10,7 @@ def get_visual_features(model, x):
     """
     vision_model = model.visual.trunk
     x = vision_model.forward_features(x)
-    x = vision_model.norm(x)
+    # x = vision_model.norm(x)
     x = vision_model.fc_norm(x)
     x = vision_model.head_drop(x)
     x = vision_model.head(x)
@@ -19,10 +19,11 @@ def get_visual_features(model, x):
     dense_features = x[:, 1:, :]
     dense_features = F.normalize(dense_features, dim=-1)
     num_patches = dense_features.shape[1]
-    grid_size = int(num_patches ** 0.5)
+    grid_size = int(num_patches**0.5)
     dense_features = dense_features.permute(0, 2, 1)
     dense_features = dense_features.reshape(x.shape[0], -1, grid_size, grid_size)
     return dense_features
+
 
 def get_visual_features_dino(model, x):
     """
@@ -37,8 +38,9 @@ def get_visual_features_dino(model, x):
         x = blk(x)
 
     x = x[:, 1:, :].permute(0, 2, 1).reshape(B, 1024, H // 14, W // 14).contiguous()
-    
+
     return x
+
 
 def positional_encoding(x: torch.Tensor, L: int = 10) -> torch.Tensor:
     """
@@ -51,10 +53,11 @@ def positional_encoding(x: torch.Tensor, L: int = 10) -> torch.Tensor:
     """
     pe = []
     for i in range(L):
-        freq = 2 ** i
+        freq = 2**i
         pe.append(torch.sin(x * freq * torch.pi))
         pe.append(torch.cos(x * freq * torch.pi))
     return torch.cat(pe, dim=-1)
+
 
 def get_3d_coordinates(
     feature_maps: torch.Tensor,
@@ -95,8 +98,8 @@ def get_3d_coordinates(
     cy_new = cy * scale_y
 
     # Create pixel coordinate grid
-    u = torch.arange(W_feat, device=device).view(1, -1).expand(H_feat, W_feat)
-    v = torch.arange(H_feat, device=device).view(-1, 1).expand(H_feat, W_feat)
+    u = torch.arange(W_feat, device=device).view(1, -1).expand(H_feat, W_feat) + 0.5
+    v = torch.arange(H_feat, device=device).view(-1, 1).expand(H_feat, W_feat) + 0.5
     u = u.unsqueeze(0).expand(B, -1, -1)
     v = v.unsqueeze(0).expand(B, -1, -1)
 
@@ -109,8 +112,9 @@ def get_3d_coordinates(
     # If extrinsic is given, convert cam->world
     if camera_extrinsic is not None:
         camera_extrinsic = camera_extrinsic.squeeze(1)  # [B, 3, 4]
-        ones_row = torch.tensor([0, 0, 0, 1], device=device, 
-                                dtype=camera_extrinsic.dtype).view(1, 1, 4)
+        ones_row = torch.tensor(
+            [0, 0, 0, 1], device=device, dtype=camera_extrinsic.dtype
+        ).view(1, 1, 4)
         ones_row = ones_row.expand(B, 1, 4)  # [B, 1, 4]
         extrinsic_4x4 = torch.cat([camera_extrinsic, ones_row], dim=1)  # [B, 4, 4]
         extrinsic_inv = torch.inverse(extrinsic_4x4)  # [B, 4, 4]
@@ -127,10 +131,11 @@ def get_3d_coordinates(
     else:
         return coords_cam
 
+
 def rotary_pe_3d(
-    x: torch.Tensor,      # [B, S, D]
-    coords: torch.Tensor, # [B, S, 3]
-    base: float = 10000.0
+    x: torch.Tensor,  # [B, S, D]
+    coords: torch.Tensor,  # [B, S, 3]
+    base: float = 10000.0,
 ) -> torch.Tensor:
     """
     3D rotary positional embedding. Splits D into blocks of 6, each rotated by angles
@@ -156,7 +161,7 @@ def rotary_pe_3d(
 
     out_blocks = []
     for k in range(num_block):
-        block = x_splitted[:, :, k, :]   # [B, S, 6]
+        block = x_splitted[:, :, k, :]  # [B, S, 6]
         x_angle = x_p * theta_k[k]
         y_angle = y_p * theta_k[k]
         z_angle = z_p * theta_k[k]
@@ -178,16 +183,17 @@ def rotary_pe_3d(
 
     return torch.stack(out_blocks, dim=2).view(B, S, D)
 
+
 def chamfer_cosine_weighted(
-    pred_feat: torch.Tensor,   # [B, N, D] - predicted features
-    gt_feat: torch.Tensor,     # [B, M, D] - ground-truth (target) features
+    pred_feat: torch.Tensor,  # [B, N, D] - predicted features
+    gt_feat: torch.Tensor,  # [B, M, D] - ground-truth (target) features
     pred_weights: torch.Tensor,  # [B, N]   - scalar weight for each predicted point
-    threshold: float = 0.01
+    threshold: float = 0.01,
 ) -> torch.Tensor:
     """
     Computes a Chamfer-like distance using (1 - cosine similarity),
     applying 'pred_weights' to the predicted side (row2col) only.
-    
+
     Args:
         pred_feat: [B, N, D] predicted features
         gt_feat:   [B, M, D] target features
@@ -199,10 +205,10 @@ def chamfer_cosine_weighted(
     """
     B, N, D = pred_feat.shape
     _, M, _ = gt_feat.shape
-    
+
     # 1) Normalize
     pred_norm = F.normalize(pred_feat, dim=-1)  # (B, N, D)
-    gt_norm   = F.normalize(gt_feat,   dim=-1)  # (B, M, D)
+    gt_norm = F.normalize(gt_feat, dim=-1)  # (B, M, D)
 
     # 2) distance = 1 - cosine_similarity
     #    cos_sim shape: (B, N, M)
@@ -216,7 +222,7 @@ def chamfer_cosine_weighted(
     # row2col: for each predicted feature, find nearest GT feature
     row2col_vals, row2col_idx = dist_masked.min(dim=2)  # (B, N)
 
-    valid_mask = (row2col_vals < 9999.0)
+    valid_mask = row2col_vals < 9999.0
     valid_vals = row2col_vals[valid_mask]
     valid_weights = pred_weights[valid_mask] ** 2
 
@@ -238,11 +244,12 @@ def chamfer_cosine_weighted(
 
     return row_loss
 
+
 def chamfer_cosine_coverage_loss(
-    pred_feat: torch.Tensor,    # [B, N, D]
-    gt_feat: torch.Tensor,      # [B, M, D]
-    pred_weights: torch.Tensor, # [B, N]
-    threshold: float = 0.01
+    pred_feat: torch.Tensor,  # [B, N, D]
+    gt_feat: torch.Tensor,  # [B, M, D]
+    pred_weights: torch.Tensor,  # [B, N]
+    threshold: float = 0.01,
 ) -> torch.Tensor:
     """
     Computes coverage-based loss using:
@@ -255,17 +262,17 @@ def chamfer_cosine_coverage_loss(
 
     # 1) Normalize predicted and GT features
     pred_norm = F.normalize(pred_feat, dim=-1)  # [B, N, D]
-    gt_norm   = F.normalize(gt_feat,   dim=-1)  # [B, M, D]
+    gt_norm = F.normalize(gt_feat, dim=-1)  # [B, M, D]
 
     # 2) Compute distance = 1 - cos_sim
     cos_sim = torch.bmm(pred_norm, gt_norm.transpose(1, 2))  # [B, N, M]
-    dist = 1.0 - cos_sim                                      # [B, N, M]
-    
+    dist = 1.0 - cos_sim  # [B, N, M]
+
     # 3) For each predicted point, get min distance and index
     row2col_vals, row2col_idx = dist.min(dim=2)  # [B, N], [B, N]
 
     # 4) Create valid mask (distance <= threshold)
-    valid_mask = (row2col_vals <= threshold)  # [B, N] (bool)
+    valid_mask = row2col_vals <= threshold  # [B, N] (bool)
 
     # Debugging prints
     # print("----- Debug Info -----")
@@ -279,22 +286,23 @@ def chamfer_cosine_coverage_loss(
     #     print(f"  -> Counts:       {counts.tolist()}")
 
     # 5) Compute coverage using squared weights
-    weights_sq = pred_weights**2               # [B, N]
-    sum_all    = weights_sq.sum(dim=1) + 1e-8  # [B]
-    sum_valid  = (weights_sq * valid_mask).sum(dim=1)  # [B]
+    weights_sq = pred_weights**2  # [B, N]
+    sum_all = weights_sq.sum(dim=1) + 1e-8  # [B]
+    sum_valid = (weights_sq * valid_mask).sum(dim=1)  # [B]
 
-    coverage_per_batch = sum_valid / sum_all   # [B]
-    coverage = coverage_per_batch.mean()       # scalar
+    coverage_per_batch = sum_valid / sum_all  # [B]
+    coverage = coverage_per_batch.mean()  # scalar
 
     # 6) Define loss = 1 - coverage
     loss = 1.0 - coverage
     return loss
 
+
 def chamfer_3d_weighted(
     pred_points: torch.Tensor,  # (B, N_pred, 3)
-    gt_points: torch.Tensor,    # (B, N_gt, 3)
-    mask_pred: torch.Tensor,    # (B, N_pred) -> True if dist <= 1m
-    mask_gt: torch.Tensor,      # (B, N_gt)   -> True if dist <= 1m
+    gt_points: torch.Tensor,  # (B, N_gt, 3)
+    mask_pred: torch.Tensor,  # (B, N_pred) -> True if dist <= 1m
+    mask_gt: torch.Tensor,  # (B, N_gt)   -> True if dist <= 1m
     pred_weights: torch.Tensor = None,
 ):
     """
@@ -321,26 +329,35 @@ def chamfer_3d_weighted(
     gt_valid_for_pred = torch.gather(mask_gt, 1, row2col_idx)  # (B, N_pred)
     row_valid = mask_pred & gt_valid_for_pred
     row2col_selected = row2col_vals[row_valid]
-    row_loss = row2col_selected.mean() if row2col_selected.numel() > 0 else torch.tensor(0.0, device=device)
+    row_loss = (
+        row2col_selected.mean()
+        if row2col_selected.numel() > 0
+        else torch.tensor(0.0, device=device)
+    )
 
     # col2row (gt->pred)
     col2row_vals, col2row_idx = dist.min(dim=1)  # (B, N_gt)
     pred_valid_for_gt = torch.gather(mask_pred, 1, col2row_idx)  # (B, N_gt)
     col_valid = mask_gt & pred_valid_for_gt
     col2row_selected = col2row_vals[col_valid]
-    col_loss = col2row_selected.mean() if col2row_selected.numel() > 0 else torch.tensor(0.0, device=device)
+    col_loss = (
+        col2row_selected.mean()
+        if col2row_selected.numel() > 0
+        else torch.tensor(0.0, device=device)
+    )
 
     return row_loss + col_loss
 
+
 # Basic image transform
-transform = transforms.Compose([
-    transforms.Resize(
-        size=224,
-        interpolation=transforms.InterpolationMode.BICUBIC,
-        antialias=True
-    ),
-    transforms.Normalize(
-        mean=(0.48145466, 0.4578275, 0.40821073),
-        std=(0.26862954, 0.26130258, 0.27577711)
-    ),
-])
+transform = transforms.Compose(
+    [
+        transforms.Resize(
+            size=224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
+        ),
+        transforms.Normalize(
+            mean=(0.48145466, 0.4578275, 0.40821073),
+            std=(0.26862954, 0.26130258, 0.27577711),
+        ),
+    ]
+)
