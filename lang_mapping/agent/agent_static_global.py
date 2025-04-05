@@ -219,6 +219,7 @@ class Agent_static_global(nn.Module):
             num_layers=6,
             num_heads=8,
             output_dim=state_mlp_dim,
+            num_token=512+num_learnable_tokens
         )
 
         # Action MLP
@@ -250,7 +251,7 @@ class Agent_static_global(nn.Module):
         self.state_perceiver = GlobalPerceiver(
             hidden_dim=voxel_feature_dim,
             nhead=8,
-            num_layers=6,
+            num_layers=4,
             out_dim=voxel_feature_dim,
             voxel_proj=self.voxel_proj,
             num_learnable_tokens = num_learnable_tokens

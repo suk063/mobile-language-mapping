@@ -24,7 +24,7 @@ class TransformerCrossAttentionLayer(nn.Module):
         super().__init__()
         # Define multi-head attention layers
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        # self.cross_attn_text = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.cross_attn_text = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         
         # Feed-forward layers
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -33,8 +33,10 @@ class TransformerCrossAttentionLayer(nn.Module):
         
         # Layer norms and dropouts
         self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
         self.norm_ff = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
         self.dropout_ff = nn.Dropout(dropout)
 
     def forward(
@@ -56,9 +58,9 @@ class TransformerCrossAttentionLayer(nn.Module):
         src = self.norm1(src + self.dropout1(attn_out))
 
         # Cross-Attention with text
-        # if text is not None:
-        #     attn_out_text, _ = self.cross_attn_text(query=src, key=text, value=text)
-        #     src = self.norm2(src + self.dropout2(attn_out_text))
+        if text is not None:
+            attn_out_text, _ = self.cross_attn_text(query=src, key=text, value=text)
+            src = self.norm2(src + self.dropout2(attn_out_text))
 
         # FeedForward
         ff_out = self.linear2(self.dropout(F.gelu(self.linear1(src))))
@@ -66,10 +68,8 @@ class TransformerCrossAttentionLayer(nn.Module):
         return src
     
 class TransformerEncoder(nn.Module):
-    def __init__(self, input_dim=120, hidden_dim=256, num_layers=2, num_heads=8, output_dim=1024):
+    def __init__(self, input_dim=120, hidden_dim=256, num_layers=2, num_heads=8, output_dim=1024, num_token=512):
         super().__init__()
-        
-        self.cls_token = nn.Parameter(torch.randn(1, 1, input_dim))
         
         self.modality_embed_state = nn.Parameter(torch.randn(1, 1, input_dim))
         self.modality_embed_text = nn.Parameter(torch.randn(1, 1, input_dim))
@@ -84,18 +84,15 @@ class TransformerEncoder(nn.Module):
             )
             for _ in range(num_layers)
         ])
-        
-        self.post_fusion_mlp = nn.Linear(input_dim, output_dim)
-        
-        # self.post_fusion_mlp = nn.Sequential(
-        #     nn.Linear(input_dim * num_token, 4096),
-        #     nn.LayerNorm(4096),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(4096, 2048),
-        #     nn.LayerNorm(2048),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(2048, output_dim)
-        # )
+        self.post_fusion_mlp = nn.Sequential(
+            nn.Linear(input_dim * num_token, 4096),
+            nn.LayerNorm(4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, 2048),
+            nn.LayerNorm(2048),
+            nn.ReLU(inplace=True),
+            nn.Linear(2048, output_dim)
+        )
         
         self.apply(init_weights_kaiming)
         
@@ -113,11 +110,8 @@ class TransformerEncoder(nn.Module):
         # -------------------------------------------------------------------
         # 1) Construct the initial src tokens (self-attention input)
         # -------------------------------------------------------------------
-        cls_token_expanded = self.cls_token.repeat(B, 1, 1)  # [B, 1, input_dim]
-        
-        tokens = [cls_token_expanded] 
-        coords_list = [torch.zeros(B, 1, 3, device=hand.device)] 
-        
+        tokens = []
+        coords_list = []
         # If we have state token
         if state is not None:
             state_token = state.unsqueeze(1) + self.modality_embed_state  # [B, 1, input_dim]
@@ -163,13 +157,17 @@ class TransformerEncoder(nn.Module):
         # -------------------------------------------------------------------
         # 3) Post-fusion MLP
         # -------------------------------------------------------------------
-        # Example: skip those special tokens
-        # fused_tokens = src[:, 2:, :]   # shape: [B, 2N, input_dim]
-        # data = fused_tokens.reshape(B, -1)       # flatten the remaining
-        # out = self.post_fusion_mlp(data)         # [B, output_dim]
-        cls_output = src[:, 0, :]      # [B, input_dim]
-        out = self.post_fusion_mlp(cls_output)  # [B, output_dim]
+        num_special = 0
+        if state is not None:
+            num_special += 1
+        if text_embeddings is not None:
+            num_special += 1
+        # if global_token is not None:
+        #     num_special += Mg
         
+        fused_tokens = src[:, num_special:, :]   # shape: [B, 2N, input_dim]
+        data = fused_tokens.reshape(B, -1)       # flatten the remaining
+        out = self.post_fusion_mlp(data)         # [B, output_dim]
         return out
     
 class ConcatMLPFusion(nn.Module):

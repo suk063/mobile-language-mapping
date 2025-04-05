@@ -71,7 +71,7 @@ class Agent_static(nn.Module):
         self.transformer = TransformerEncoder(
             input_dim=voxel_feature_dim,
             hidden_dim=256,
-            num_layers=6,
+            num_layers=4,
             num_heads=8,
             output_dim=state_mlp_dim
         )
