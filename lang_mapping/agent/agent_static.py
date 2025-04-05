@@ -5,9 +5,10 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module import *
+from ..module.transformer import TransformerEncoder
+from ..module.mlp import ActionMLP, ImplicitDecoder, ConcatMLPFusion, VoxelProj
 from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, positional_encoding, transform
+from ..utils import get_3d_coordinates, get_visual_features, transform
 
 import open_clip
 
@@ -253,18 +254,18 @@ class Agent_static(nn.Module):
                 head_coords_world_flat, return_indices=False
             )
 
-        voxel_feat_for_points_hand = self.voxel_proj(voxel_feat_for_points_hand, hand_coords_world_flat)
-        voxel_feat_for_points_head = self.voxel_proj(voxel_feat_for_points_head, head_coords_world_flat)
+        voxel_feat_points_hand = self.voxel_proj(voxel_feat_points_hand, hand_coords_world_flat)
+        voxel_feat_points_head = self.voxel_proj(voxel_feat_points_head, head_coords_world_flat)
 
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(
             feats_hand_flat_reduced,
-            voxel_feat_for_points_hand,
+            voxel_feat_points_hand,
             hand_coords_world_flat
         )
         fused_head = self.feature_fusion(
             feats_head_flat_reduced,
-            voxel_feat_for_points_head,
+            voxel_feat_points_head,
             head_coords_world_flat
         )
 

@@ -5,8 +5,9 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module import *
-from ..utils import get_3d_coordinates, get_visual_features, transform
+from ..module.transformer import TransformerEncoder
+from ..module.mlp import ActionMLP
+from ..utils import get_3d_coordinates
 
 import open_clip
 
