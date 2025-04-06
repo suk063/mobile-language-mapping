@@ -40,3 +40,4 @@ decoder_output_dim: 768
 output_dir: /home/daizhirui/results/mobile_language_mapping/static_mapping/nearest
 valid_interval: 1000
 ckpt_interval: 1
+test_model_dir:

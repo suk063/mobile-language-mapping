@@ -3,6 +3,7 @@ import random
 import sys
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional
 
 import h5py
 import numpy as np
@@ -66,6 +67,7 @@ class Config:
     output_dir: str
     valid_interval: int
     ckpt_interval: int
+    test_model_dir: str
 
     def as_dict(self):
         out = vars(self)
@@ -426,6 +428,22 @@ class Pipeline:
         valid_loss /= len(self.valid_loader)
         return valid_loss
 
+    def test(self):
+        state = torch.load(
+            os.path.join(self.cfg.test_model_dir, "hash_voxel.pt"),
+            map_location=self.cfg.device,
+        )
+        self.hash_voxel.load_state_dict(state["model"])
+        self.hash_voxel.eval()
+        state = torch.load(
+            os.path.join(self.cfg.test_model_dir, "implicit_decoder.pt"),
+            map_location=self.cfg.device,
+        )
+        self.implicit_decoder.load_state_dict(state["model"])
+        self.implicit_decoder.eval()
+        loss = self.valid()
+        tqdm.write(f"Test completed. Validation loss: {loss:.4f}")
+
     def setup_model(self, training=True):
         if self.clip_model is not None:
             self.clip_model.eval()
@@ -515,11 +533,21 @@ class Pipeline:
 def main():
     cfg = parse_cfg(default_cfg_path=sys.argv[1])
     cfg = from_dict(data_class=Config, data=OmegaConf.to_container(cfg))
+    if cfg.test_model_dir is not None:
+        # reload the config based on the test model directory
+        test_model_dir = cfg.test_model_dir
+        cfg = parse_cfg(default_cfg_path=os.path.join(test_model_dir, "../config.yaml"))
+        cfg = from_dict(data_class=Config, data=OmegaConf.to_container(cfg))
+        cfg.test_model_dir = test_model_dir
     if cfg.torch_deterministic:
         torch.backends.cudnn.deterministic = True
     else:
         torch.backends.cudnn.benchmark = True
     pipeline = Pipeline(cfg)
+    if cfg.test_model_dir is not None:
+        tqdm.write("Testing the model...")
+        pipeline.test()
+        return
     pipeline.train()
 
 
