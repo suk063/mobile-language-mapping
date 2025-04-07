@@ -11,12 +11,75 @@ from lang_mapping.mapper.mapper_delta import VoxelHashTable
 
 from ..utils import get_3d_coordinates, get_visual_features, transform, rotary_pe_3d
 import open_clip
+from torchvision import models
+
 
 def init_weights_kaiming(m):
     if isinstance(m, nn.Linear):
         nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.constant_(m.bias, 0.0)
+            
+class CNNFeatureExtractor(nn.Module):
+    """
+    Extracts 2D feature maps from a ResNet-based CLIP model (e.g., RN50) and adapts them
+    to the specified channel and size. If using a ViT-based model (e.g., EVA), you'll need
+    additional patch-to-2D reconstruction.
+    """
+    def __init__(self, clip_model, output_channels=768):
+        super().__init__()
+
+        # Stem layers
+        self.conv1 = clip_model.visual.conv1
+        self.bn1 = clip_model.visual.bn1
+        self.act1 = clip_model.visual.act1
+        self.conv2 = clip_model.visual.conv2
+        self.bn2 = clip_model.visual.bn2
+        self.act2 = clip_model.visual.act2
+        self.conv3 = clip_model.visual.conv3
+        self.bn3 = clip_model.visual.bn3
+        self.act3 = clip_model.visual.act3
+        self.avgpool = clip_model.visual.avgpool
+
+        # ResNet blocks
+        self.layer1 = clip_model.visual.layer1
+        self.layer2 = clip_model.visual.layer2
+        self.layer3 = clip_model.visual.layer3
+
+        # Adapt output channels and size
+        self.conv_adapt = nn.Conv2d(1024, output_channels, kernel_size=3, stride=1, padding=1)
+        self.upsample = nn.Upsample(size=(16, 16), mode='bilinear', align_corners=False)
+        self.norm = nn.BatchNorm2d(output_channels)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        # Stem
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act1(x)
+
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.act2(x)
+
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = self.act3(x)
+
+        x = self.avgpool(x)
+
+        # ResNet body
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+
+        # Final adaptation
+        x = self.conv_adapt(x)
+        x = self.upsample(x)
+        x = self.norm(x)
+        x = self.act(x)
+
+        return x
             
 class TransformerLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
@@ -165,7 +228,7 @@ class TransformerEncoder(nn.Module):
         out = self.post_fusion_mlp(data)  # [B, output_dim]
         return out
 
-class Agent_global_multistep(nn.Module):
+class Agent_static_global_cnn(nn.Module):
     def __init__(
         self,
         sample_obs,
@@ -197,20 +260,22 @@ class Agent_global_multistep(nn.Module):
 
         # Load CLIP model
         clip_model, _, _ = open_clip.create_model_and_transforms(
-            open_clip_model[0], pretrained=open_clip_model[1]
+            "RN50", pretrained="openai"
         )
         self.clip_model = clip_model.to(self.device)
         self.tokenizer = open_clip.get_tokenizer(open_clip_model[0])
 
         # Text embeddings and projection
         text_tokens = self.tokenizer(text_input).to(self.device)
-        self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
+        self.text_proj = nn.Linear(1024, voxel_feature_dim).to(self.device)
         with torch.no_grad():
             text_embeddings = self.clip_model.encode_text(text_tokens)
             self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
 
-        # Reduce CLIP feature dimension
-        self.clip_dim_reducer = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        self.image_encoder = CNNFeatureExtractor(
+            clip_model=self.clip_model,  
+            output_channels=voxel_feature_dim
+        ).to(self.device)
         
         # Transformer for feature fusion
         self.transformer = TransformerEncoder(
@@ -238,11 +303,6 @@ class Agent_global_multistep(nn.Module):
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
          
-        # Time embeddings for conditioning
-        # self.subtask_embedding = nn.Parameter(
-        #     torch.randn(episode_num, voxel_feature_dim, device=device) * 0.01
-        # )
-
         self.global_k = global_k
 
     def forward(self, observations, object_labels, subtask_idx):
@@ -254,37 +314,37 @@ class Agent_global_multistep(nn.Module):
         state: torch.Tensor = observations["state"]
 
         # Extract CLIP features without gradient
+        hand_rgb = pixels["fetch_hand_rgb"]
+        head_rgb = pixels["fetch_head_rgb"]
+        # Reshape to (B, C, H, W)
+        if hand_rgb.shape[2] != 3:
+            hand_rgb = hand_rgb.permute(0, 1, 4, 2, 3)
+            head_rgb = head_rgb.permute(0, 1, 4, 2, 3)
+        B, fs, d, H, W = hand_rgb.shape
+        hand_rgb = hand_rgb.reshape(B, fs * d, H, W)
+        head_rgb = head_rgb.reshape(B, fs * d, H, W)
+
+        # Normalize RGB
+        hand_rgb = transform(hand_rgb.float() / 255.0)
+        head_rgb = transform(head_rgb.float() / 255.0)
+
+        # Depth resizing
+        hand_depth = pixels["fetch_hand_depth"] / 1000.0
+        head_depth = pixels["fetch_head_depth"] / 1000.0
+        if hand_depth.dim() == 5:
+            b2, fs2, d2, h2, w2 = hand_depth.shape
+            hand_depth = hand_depth.view(b2, fs2 * d2, h2, w2)
+            head_depth = head_depth.view(b2, fs2 * d2, h2, w2)
+            hand_depth = F.interpolate(hand_depth, (16, 16), mode="nearest")
+            head_depth = F.interpolate(head_depth, (16, 16), mode="nearest")
+
+        hand_pose = pixels["fetch_hand_pose"]
+        head_pose = pixels["fetch_head_pose"]
+
         with torch.no_grad():
-            hand_rgb = pixels["fetch_hand_rgb"]
-            head_rgb = pixels["fetch_head_rgb"]
-            # Reshape to (B, C, H, W)
-            if hand_rgb.shape[2] != 3:
-                hand_rgb = hand_rgb.permute(0, 1, 4, 2, 3)
-                head_rgb = head_rgb.permute(0, 1, 4, 2, 3)
-            B, fs, d, H, W = hand_rgb.shape
-            hand_rgb = hand_rgb.reshape(B, fs * d, H, W)
-            head_rgb = head_rgb.reshape(B, fs * d, H, W)
-
-            # Normalize RGB
-            hand_rgb = transform(hand_rgb.float() / 255.0)
-            head_rgb = transform(head_rgb.float() / 255.0)
-
-            # Depth resizing
-            hand_depth = pixels["fetch_hand_depth"] / 1000.0
-            head_depth = pixels["fetch_head_depth"] / 1000.0
-            if hand_depth.dim() == 5:
-                b2, fs2, d2, h2, w2 = hand_depth.shape
-                hand_depth = hand_depth.view(b2, fs2 * d2, h2, w2)
-                head_depth = head_depth.view(b2, fs2 * d2, h2, w2)
-                hand_depth = F.interpolate(hand_depth, (16, 16), mode="nearest")
-                head_depth = F.interpolate(head_depth, (16, 16), mode="nearest")
-
-            hand_pose = pixels["fetch_hand_pose"]
-            head_pose = pixels["fetch_head_pose"]
-
-            hand_visfeat = get_visual_features(self.clip_model, hand_rgb)
-            head_visfeat = get_visual_features(self.clip_model, head_rgb)
-
+            hand_visfeat = self.image_encoder(hand_rgb)  # [B, voxel_feature_dim, 16, 16]
+            head_visfeat = self.image_encoder(head_rgb)  # [B, voxel_feature_dim, 16, 16]
+            
         # Compute 3D world coordinates
         hand_coords_world, _ = get_3d_coordinates(
             hand_visfeat, hand_depth, hand_pose, self.fx, self.fy, self.cx, self.cy
@@ -299,13 +359,6 @@ class Agent_global_multistep(nn.Module):
         # Flatten coordinates
         hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
         head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
-
-        # Flatten CLIP features 
-        with torch.no_grad():
-            hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
-            head_visfeat = head_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
-        feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
-        feats_head_flat = head_visfeat.reshape(B_ * N, -1)
         
         # Project state
         state_projected = self.state_proj(state)
@@ -335,10 +388,8 @@ class Agent_global_multistep(nn.Module):
         head_voxel = head_voxels_flat.view(B_, K, -1)
         
         # Reduce CLIP dimension 
-        feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat, hand_coords_world_flat)
-        feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat, head_coords_world_flat)
-        feats_hand_reduced = feats_hand_flat_reduced.view(B_, N, -1)
-        feats_head_reduced = feats_head_flat_reduced.view(B_, N, -1)
+        hand_visfeat_2d = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
+        head_visfeat_2d = head_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
 
         # Get text embeddings (projected)
         text_embeddings_reduced = self.text_proj(self.text_embeddings)
@@ -350,8 +401,8 @@ class Agent_global_multistep(nn.Module):
 
         # Transformer
         visual_token = self.transformer(
-            hand_token=feats_hand_reduced,
-            head_token=feats_head_reduced,
+            hand_token=hand_visfeat_2d,
+            head_token=head_visfeat_2d,
             coords_hand=batch_hand_coords,
             coords_head=batch_head_coords,
             state=state_projected,
@@ -359,7 +410,6 @@ class Agent_global_multistep(nn.Module):
             voxel_token=head_voxel,
             coords_voxel=coords_kv_head,
         )
-        
 
         # Final action
         state_token = self.state_mlp(state)
