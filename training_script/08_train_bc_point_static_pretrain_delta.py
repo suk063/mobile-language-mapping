@@ -27,7 +27,7 @@ from mani_skill.utils import common
 
 from lang_mapping.agent.agent_static_global_delta import Agent_static_global_delta
 from lang_mapping.module import ImplicitDecoder
-from lang_mapping.mapper.mapper_delta import VoxelHashTable
+from lang_mapping.mapper.mapper import VoxelHashTable
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
@@ -155,7 +155,9 @@ class BCConfig:
     hidden_dim: int = 240
     cos_loss_weight: float = 0.1
     global_k: int = 4096
-    num_learnable_tokens: int = 16
+    num_heads: int = 8
+    num_layers: int = 4
+    prefix_len: int = 16
 
     num_eval_envs: int = field(init=False)
 
@@ -523,15 +525,6 @@ def train(cfg: TrainConfig):
         device=device
     ).to(device)
     
-    delta_map = VoxelHashTable(
-        resolution=cfg.algo.resolution,
-        hash_table_size=cfg.algo.hash_table_size,
-        feature_dim=cfg.algo.voxel_feature_dim,
-        scene_bound_min=tuple(cfg.algo.scene_bound_min),
-        scene_bound_max=tuple(cfg.algo.scene_bound_max),
-        device=device
-    ).to(device)
-
     implicit_decoder = ImplicitDecoder(
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
         hidden_dim=cfg.algo.hidden_dim,
@@ -551,25 +544,43 @@ def train(cfg: TrainConfig):
         state_mlp_dim=cfg.algo.state_mlp_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         static_map=static_map,
-        delta_map=delta_map,
         implicit_decoder=implicit_decoder,
         global_k = cfg.algo.global_k,
-        num_learnable_tokens=cfg.algo.num_learnable_tokens
+        num_heads = cfg.algo.num_heads,
+        num_layers = cfg.algo.num_layers,
+        prefix_len = cfg.algo.prefix_len
     ).to(device)
-
+    
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
         print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
         agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
 
-    if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
-        print(f"[INFO] Loading pretrained voxel")
-        voxel_features = torch.load('pre-trained/hash_voxel.pt', map_location=device)['model']['voxel_features']
-        static_map.voxel_features.data.copy_(voxel_features)
-        
-    if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
-        print(f"[INFO] Loading pretrained implicit decoder")
-        implicit_decoder.load_state_dict(torch.load('pre-trained/implicit_decoder.pt', map_location=device)['model'], strict=True)
+    # if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
+    #     print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
+    #     static_map.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
 
+    # if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
+    #     print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
+    #     implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
+
+    voxel_checkpoint = torch.load('pre-trained/hash_voxel.pt', map_location=device)
+    decoder_checkpoint = torch.load('pre-trained/implicit_decoder.pt', map_location=device)
+    static_map.load_state_dict(voxel_checkpoint['model'], strict=False)
+    implicit_decoder.load_state_dict(decoder_checkpoint['model'], strict=True)
+    def verify_load(tensor1, tensor2, tensor_name):
+        if torch.allclose(tensor1, tensor2):
+            print(f"{tensor_name} successfully loaded")
+        else:
+            print(f"{tensor_name} loading failed")
+    for name, param in implicit_decoder.named_parameters():
+        loaded_param = decoder_checkpoint['model'][name]
+        verify_load(param.data, loaded_param, f"implicit_decoder.{name}")
+    
+    buffers = torch.load('voxel_buffers.pt')
+    
+    static_map.used_mask = buffers['used_mask'].to(static_map.device)
+    static_map.valid_grid_coords = buffers['valid_grid_coords'].to(static_map.device)
+    
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
 
@@ -643,8 +654,8 @@ def train(cfg: TrainConfig):
     for name, param in agent.clip_model.named_parameters():
         param.requires_grad = False 
         
-    for name, param in agent.static_map.named_parameters():
-        param.requires_grad = False 
+    # for name, param in agent.static_map.named_parameters():
+    #     param.requires_grad = False 
     
     params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
@@ -663,19 +674,17 @@ def train(cfg: TrainConfig):
 
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            total_cos_loss, pi = agent(obs, subtask_labels, subtask_idx)
+            pi = agent(obs, subtask_labels, subtask_idx)
             bc_loss = F.mse_loss(pi, act)
-            loss = cfg.algo.cos_loss_weight * total_cos_loss + bc_loss
 
             optimizer.zero_grad()
-            loss.backward()
+            bc_loss.backward()
             optimizer.step()
 
-            tot_loss += loss.item()
+            tot_loss += bc_loss.item()
             n_samples += act.size(0)
             global_step += 1
 
-            writer.add_scalar("Cosine Loss/Iteration", total_cos_loss.item(), global_step)
             writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
@@ -704,7 +713,7 @@ def train(cfg: TrainConfig):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
                     
-                    _, action = agent(eval_obs, eval_subtask_labels, eval_subtask_idx)
+                    action = agent(eval_obs, eval_subtask_labels, eval_subtask_idx)
                 # Stub environment step
                 eval_obs, _, _, _, _ = eval_envs.step(action)
             if len(eval_envs.return_queue) > 0:

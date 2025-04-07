@@ -291,7 +291,7 @@ class StateProj(nn.Module):
         return out
 
 class VoxelProj(nn.Module):
-    def __init__(self, voxel_feature_dim=120, L=6):
+    def __init__(self, voxel_feature_dim=120, L=10):
         super().__init__()
         self.L = L
         self.pos_enc_dim = 2 * self.L * 3
@@ -315,6 +315,34 @@ class VoxelProj(nn.Module):
         """
         pe = positional_encoding(coords_3d, L=self.L)  # (N, 2*L*3)
         x = torch.cat([voxel_feat, pe], dim=-1)
+        out = self.mlp(x)
+        return out
+
+class DimReducer(nn.Module):
+    def __init__(self, input_dim=768, output_dim=240, L=10):
+        super().__init__()
+        self.L = L
+        self.pos_enc_dim = 2 * self.L * 3
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim + self.pos_enc_dim, output_dim),
+            nn.ReLU(),
+            nn.LayerNorm(output_dim),
+            nn.Linear(output_dim, output_dim),
+        )
+        
+        self.apply(init_weights_kaiming)
+
+    def forward(self, feat, coords_3d):
+        """
+        Args:
+            voxel_feat: (N, voxel_feature_dim)
+            coords_3d:  (N, 3)
+        Returns:
+            projected:  (N, voxel_feature_dim)
+        """
+        pe = positional_encoding(coords_3d, L=self.L)  # (N, 2*L*3)
+        x = torch.cat([feat, pe], dim=-1)
         out = self.mlp(x)
         return out
 

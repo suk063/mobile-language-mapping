@@ -5,14 +5,166 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module.transformer import TransformerEncoder, GlobalPerceiver
-from ..module.mlp import ActionMLP, ImplicitDecoder, ConcatMLPFusion
+# from ..module.transformer import TransformerEncoder, GlobalPerceiver
+from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer
 from lang_mapping.mapper.mapper_delta import VoxelHashTable
 
-from ..utils import get_3d_coordinates, get_visual_features, transform
-
+from ..utils import get_3d_coordinates, get_visual_features, transform, rotary_pe_3d
 import open_clip
+
+def init_weights_kaiming(m):
+    if isinstance(m, nn.Linear):
+        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.0)
+            
+class TransformerLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+        super().__init__()
+        # Multi-head self-attention
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        
+        # Feed-forward network
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        
+        # Layer normalization and dropout
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm_ff = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout_ff = nn.Dropout(dropout)
+
+    def forward(self, src: torch.Tensor, coords_src: torch.Tensor = None) -> torch.Tensor:
+        # Self-attention, use rotary encoding if coords_src is provided
+        if coords_src is not None:
+            q_rot = rotary_pe_3d(src, coords_src)
+            k_rot = rotary_pe_3d(src, coords_src)
+            v_rot = src
+        else:
+            q_rot = k_rot = v_rot = src
+
+        attn_out, _ = self.self_attn(q_rot, k_rot, v_rot)
+        src = self.norm1(src + self.dropout1(attn_out))
+
+        # Feed-forward
+        ff_out = self.linear2(self.dropout(F.gelu(self.linear1(src))))
+        src = self.norm_ff(src + self.dropout_ff(ff_out))
+        return src
     
+class TransformerEncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim=120,
+        hidden_dim=256,
+        num_layers=2,
+        num_heads=8,
+        output_dim=1024,
+        prefix_len=16,
+    ):
+        super().__init__()
+        
+        self.prefix_len = prefix_len
+        self.prefix = nn.Parameter(torch.randn(1, prefix_len, input_dim))
+
+        self.modality_embed_image = nn.Parameter(torch.randn(1, 1, input_dim))
+        self.modality_embed_3d = nn.Parameter(torch.randn(1, 1, input_dim))
+        
+        # Transformer layers
+        self.layers = nn.ModuleList([
+            TransformerLayer(
+                d_model=input_dim,
+                nhead=num_heads,
+                dim_feedforward=hidden_dim
+            )
+            for _ in range(num_layers)
+        ])
+        
+        # Post-fusion MLP
+        # self.post_fusion_mlp = nn.Sequential(
+        #     nn.Linear(input_dim * self.prefix_len, 4096),
+        #     nn.LayerNorm(4096),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(4096, 2048),
+        #     nn.LayerNorm(2048),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(2048, output_dim)
+        # )
+        self.post_fusion_mlp = nn.Sequential(
+            nn.Linear(input_dim * self.prefix_len, 4096),
+            nn.LayerNorm(4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, output_dim)
+        )
+        
+        self.apply(init_weights_kaiming)
+        
+    def forward(
+        self,
+        hand_token: torch.Tensor,  # [B, N, input_dim]
+        head_token: torch.Tensor,  # [B, N, input_dim] 
+        coords_hand: torch.Tensor = None,
+        coords_head: torch.Tensor = None,
+        state: torch.Tensor = None,  # [B, input_dim] or None
+        text_embeddings: torch.Tensor = None,  # [B, input_dim] or None
+        voxel_token: torch.Tensor = None,       # [B, M, D] or None
+        coords_voxel: torch.Tensor = None,
+    ) -> torch.Tensor:
+        B, N, D = hand_token.shape
+        
+        prefix_token = self.prefix.expand(B, self.prefix_len, D)  # [B, prefix_len, D]
+        prefix_coords = torch.zeros(B, self.prefix_len, 3, device=hand_token.device)
+        
+        tokens = []
+        coords_list = []
+        
+        if state is not None:
+            state_token = state.unsqueeze(1)  # [B, 1, D]
+            tokens.append(state_token)
+            coords_list.append(torch.zeros(B, 1, 3, device=state.device))
+        
+        if text_embeddings is not None:
+            text_token = text_embeddings.unsqueeze(1)  # [B, 1, D]
+            tokens.append(text_token)
+            coords_list.append(torch.zeros(B, 1, 3, device=state.device))
+
+        if voxel_token is not None:
+            M = voxel_token.size(1)
+            voxel_token = voxel_token + self.modality_embed_3d.expand(B, M, -1)
+            tokens.append(voxel_token)    # [B, M, D]
+            coords_list.append(coords_voxel)  # [B, M, 3]
+
+        hand_token = hand_token + self.modality_embed_image.expand(B, N, -1)
+        tokens.append(hand_token)     # [B, N, D]
+        coords_list.append(coords_hand)
+        
+        head_token = head_token + self.modality_embed_image.expand(B, N, -1)
+        tokens.append(head_token)     # [B, N, D]
+        coords_list.append(coords_head)
+        
+        main_src = torch.cat(tokens, dim=1)         # [B, S+N, D]
+        main_coords = torch.cat(coords_list, dim=1) # [B, S+N, 3]
+        
+        src = torch.cat([prefix_token, main_src], dim=1)         # [B, prefix_len + S + N, D]
+        coords_src = torch.cat([prefix_coords, main_coords], dim=1)  # [B, prefix_len + S + N, 3]
+
+        # Pass through Transformer layers
+        for layer in self.layers:
+            src = layer(src=src, coords_src=coords_src)
+
+        # start_idx = self.prefix_len
+        # if state is not None:
+        #     start_idx += 1
+        # if text_embeddings is not None:
+        #     start_idx += 1
+        # if voxel_token is not None:
+        #     start_idx += M
+
+        fused_tokens = src[:, :self.prefix_len, :]  # [B, (N + ?), input_dim]
+        data = fused_tokens.reshape(B, -1)
+        out = self.post_fusion_mlp(data)  # [B, output_dim]
+        return out
+
 class Agent_static_global_delta(nn.Module):
     def __init__(
         self,
@@ -26,16 +178,15 @@ class Agent_static_global_delta(nn.Module):
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         static_map: VoxelHashTable = None,
-        delta_map: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
-        global_k: int = 1024,
-        num_learnable_tokens: int = 16,
-        episode_num: int = 244,
+        global_k: int = 256,
+        num_heads: int = 8,
+        num_layers: int = 4,
+        prefix_len: int = 16
     ):
         super().__init__()
 
         self.device = device
-        self.epoch = 0
 
         # Prepare state dimension
         state_obs: torch.Tensor = sample_obs["state"]
@@ -49,36 +200,28 @@ class Agent_static_global_delta(nn.Module):
             open_clip_model[0], pretrained=open_clip_model[1]
         )
         self.clip_model = clip_model.to(self.device)
-
         self.tokenizer = open_clip.get_tokenizer(open_clip_model[0])
 
         # Text embeddings and projection
-        # if text_input:
-        #     text_input += [""]
-        
         text_tokens = self.tokenizer(text_input).to(self.device)
         self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
         with torch.no_grad():
             text_embeddings = self.clip_model.encode_text(text_tokens)
             self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
-            # Remove the last embedding (blank token) to avoid repetition
-            # text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
-            # text_embeddings = text_embeddings - redundant_emb
-            # self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
 
         # Reduce CLIP feature dimension
-        self.clip_dim_reducer = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
-
+        self.clip_dim_reducer = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        
         # Transformer for feature fusion
         self.transformer = TransformerEncoder(
             input_dim=voxel_feature_dim,
             hidden_dim=256,
-            num_layers=4,
-            num_heads=8,
+            num_layers=num_layers,
+            num_heads=num_heads,
             output_dim=state_mlp_dim,
-            num_token=512+num_learnable_tokens
+            prefix_len=prefix_len
         )
-
+        
         # Action MLP
         action_dim = np.prod(single_act_shape)
         self.action_mlp = ActionMLP(
@@ -88,39 +231,17 @@ class Agent_static_global_delta(nn.Module):
 
         # Voxel hashing and implicit decoder
         self.static_map = static_map
-        self.delta_map = delta_map
-        
         self.implicit_decoder = implicit_decoder
 
         self.state_proj = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
 
-        # Local feature fusion
-        self.fusion_image = ConcatMLPFusion(feat_dim=voxel_feature_dim, L=10)
-        
-        self.fusion_subtask = ConcatMLPFusion(feat_dim=voxel_feature_dim, L=10)
-        self.fusion_subtask_global = ConcatMLPFusion(feat_dim=voxel_feature_dim)
-        
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
-        
-        # self.register_buffer(
-        #     "used_voxel_idx", 
-        #     torch.from_numpy(np.load("used_voxel_idx.npy")).float().to(device).unsqueeze(0)
-        #     )
-        
-        self.state_perceiver = GlobalPerceiver(
-            hidden_dim=voxel_feature_dim,
-            nhead=8,
-            num_layers=4,
-            out_dim=voxel_feature_dim,
-            voxel_proj=self.implicit_decoder,
-            num_learnable_tokens = num_learnable_tokens
-        ).to(device)
          
         # Time embeddings for conditioning
-        self.subtask_embedding = nn.Parameter(
-            torch.randn(episode_num, voxel_feature_dim, device=device) * 0.01
-        )
+        # self.subtask_embedding = nn.Parameter(
+        #     torch.randn(episode_num, voxel_feature_dim, device=device) * 0.01
+        # )
 
         self.global_k = global_k
 
@@ -185,100 +306,39 @@ class Agent_static_global_delta(nn.Module):
             head_visfeat = head_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
         feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
-
-        # Voxel features
-        voxel_feat_points_hand_static, _ = self.static_map.query_voxel_feature(
-            hand_coords_world_flat, return_indices=False
-        )
-        voxel_feat_points_head_static, _ = self.static_map.query_voxel_feature(
-            head_coords_world_flat, return_indices=False
-        )
         
-        voxel_feat_points_hand_delta, _ = self.delta_map.query_voxel_feature(
-            hand_coords_world_flat, return_indices=False
-        )
-        voxel_feat_points_head_delta, _ = self.delta_map.query_voxel_feature(
-            head_coords_world_flat, return_indices=False
-        )
-        
-        subtask_embedding = self.subtask_embedding[subtask_idx, :].unsqueeze(1).expand(-1, N, -1)
-        subtask_embedding_flat = subtask_embedding.reshape(B_*N, -1)
-        
-        voxel_feat_points_hand_delta_subtask = self.fusion_subtask(voxel_feat_points_hand_delta, subtask_embedding_flat, hand_coords_world_flat)
-        voxel_feat_points_head_delta_subtask = self.fusion_subtask(voxel_feat_points_head_delta, subtask_embedding_flat, head_coords_world_flat)
-        
-        voxel_feat_points_hand = voxel_feat_points_hand_static + voxel_feat_points_hand_delta_subtask
-        voxel_feat_points_head = voxel_feat_points_head_static + voxel_feat_points_head_delta_subtask
-
-        # Implicit decoding and cosine loss
-        dec_hand_projected, dec_hand_final = self.implicit_decoder(
-            voxel_feat_points_hand, hand_coords_world_flat, return_intermediate=True
-        )
-        cos_sim_hand = F.cosine_similarity(dec_hand_final, feats_hand_flat, dim=-1)
-        cos_loss_hand = 1.0 - cos_sim_hand.mean()
-
-        dec_head_projected, dec_head_final = self.implicit_decoder(
-            voxel_feat_points_head, head_coords_world_flat, return_intermediate=True
-        )
-        cos_sim_head = F.cosine_similarity(dec_head_final, feats_head_flat, dim=-1)
-        cos_loss_head = 1.0 - cos_sim_head.mean()
-
-        total_cos_loss = cos_loss_hand + cos_loss_head
-        
-        ###################################################################################
-
-        # Find closest points
+        # Project state
         state_projected = self.state_proj(state)
-        head_translation = head_pose[:, 0, :3, 3] # [B, 3]
-        
-        valid_coords = self.static_map.stored_coords
+
+        # For HEAD: get nearest K global coords
+        head_translation = head_pose[:, 0, :3, 3]  # [B, 3]
+        valid_coords = self.static_map.valid_grid_coords
         
         valid_coords_exp = valid_coords.unsqueeze(0).expand(B_, -1, 3)
         dist = torch.norm(valid_coords_exp - head_translation.unsqueeze(1), dim=-1)
         K = self.global_k
         _, topk_indices = torch.topk(dist, k=K, dim=-1, largest=False)
-        coords_kv = torch.gather(valid_coords_exp, 1, topk_indices.unsqueeze(-1).expand(-1, -1, 3))
-        coords_kv_flat = coords_kv.view(B_*K, 3)
-    
-        # selected_dist = torch.gather(dist, 1, topk_indices)  # [B_, K]
-        # max_dist_per_batch = selected_dist.max(dim=1).values # [B_]
-
-        # print(max_dist_per_batch)
         
-        feats_kv_flat_static, _ = self.static_map.query_voxel_feature(coords_kv_flat, return_indices=False)
-        feats_kv_flat_delta, _ = self.delta_map.query_voxel_feature(coords_kv_flat, return_indices=False)
-        
-        subtask_embedding = self.subtask_embedding[subtask_idx, :].unsqueeze(1).expand(-1, K, -1)
-        subtask_embedding_flat = subtask_embedding.reshape(B_* K, -1)
-        
-        feats_kv_delta_subtask_flat = self.fusion_subtask_global(feats_kv_flat_delta, subtask_embedding_flat)
-        feats_kv_delta_subtask = feats_kv_delta_subtask_flat.view(B_, K, -1)
-        
-        feats_kv_static = feats_kv_flat_static.view(B_, K, -1)
-        
-        feats_kv = feats_kv_static + feats_kv_delta_subtask
-
-        global_token = self.state_perceiver(
-            state_projected,
-            coords_kv,
-            feats_kv 
+        coords_kv_head = torch.gather(
+            valid_coords_exp, 1,
+            topk_indices.unsqueeze(-1).expand(-1, -1, 3)
         )
+        coords_kv_head_flat = coords_kv_head.view(B_ * K, 3)
+
+        # Decode HEAD voxel
+        feats_kv_flat_static_head, _ = self.static_map.query_voxel_feature(
+            coords_kv_head_flat, return_indices=False
+        )
+        head_voxels_flat, _ = self.implicit_decoder(
+            feats_kv_flat_static_head, coords_kv_head_flat, return_intermediate=True
+        )
+        head_voxel = head_voxels_flat.view(B_, K, -1)
         
         # Reduce CLIP dimension 
-        feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat)
-        feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat)
-
-        # Fuse voxel and CLIP features
-        fused_hand = self.fusion_image(
-            feats_hand_flat_reduced,
-            dec_hand_projected,
-            hand_coords_world_flat
-        )
-        fused_head = self.fusion_image(
-            feats_head_flat_reduced,
-            dec_head_projected,
-            head_coords_world_flat
-        )
+        feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat, hand_coords_world_flat)
+        feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat, head_coords_world_flat)
+        feats_hand_reduced = feats_hand_flat_reduced.view(B_, N, -1)
+        feats_head_reduced = feats_head_flat_reduced.view(B_, N, -1)
 
         # Get text embeddings (projected)
         text_embeddings_reduced = self.text_proj(self.text_embeddings)
@@ -288,24 +348,22 @@ class Agent_static_global_delta(nn.Module):
         batch_hand_coords = hand_coords_world_flat.view(B_, N, 3)
         batch_head_coords = head_coords_world_flat.view(B_, N, 3)
 
-        batch_fused_hand = fused_hand.view(B_, N, -1)
-        batch_fused_head = fused_head.view(B_, N, -1)
-
         # Transformer
         visual_token = self.transformer(
-            hand=batch_fused_hand,
-            head=batch_fused_head,
+            hand_token=feats_hand_reduced,
+            head_token=feats_head_reduced,
             coords_hand=batch_hand_coords,
             coords_head=batch_head_coords,
             state=state_projected,
             text_embeddings=selected_text_reduced,
-            global_token=global_token
+            voxel_token=head_voxel,
+            coords_voxel=coords_kv_head,
         )
+        
 
         # Final action
         state_token = self.state_mlp(state)
-        inp = torch.cat([visual_token, state_token], dim=1)
+        inp = torch.cat([state_token, visual_token], dim=1)
         action_pred = self.action_mlp(inp)
 
-        return total_cos_loss, action_pred
-    
+        return action_pred
