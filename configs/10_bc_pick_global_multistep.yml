@@ -34,7 +34,7 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 4
+  batch_size: 8
   
   epochs: 30
 
@@ -65,13 +65,11 @@ algo:
   open_clip_model_pretrained: "merged2b_s4b_b131k"
   text_input: ["bowl", "apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
-  state_mlp_dim: 1024
+  state_mlp_dim: 128
   cos_loss_weight: 0.01
-  global_k : 512
-  num_learnable_tokens: 16
 
   # Pre-trained Weights
-  pretrained_agent_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_weights/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/latest_agent.pt"
+  # pretrained_agent_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save1/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/latest_agent.pt"
 
 logger:
   workspace: mshab_exps

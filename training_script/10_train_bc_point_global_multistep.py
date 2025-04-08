@@ -178,8 +178,7 @@ class BCConfig:
     cos_loss_weight: float = 0.1
     global_k: int = 4096
     num_heads: int = 8
-    num_layers: int = 4
-    prefix_len: int = 16
+    num_layers: int = 2
 
     num_eval_envs: int = field(init=False)
 
@@ -568,15 +567,13 @@ def train(cfg: TrainConfig):
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         static_map=static_map,
         implicit_decoder=implicit_decoder,
-        global_k = cfg.algo.global_k,
         num_heads = cfg.algo.num_heads,
         num_layers = cfg.algo.num_layers,
-        prefix_len = cfg.algo.prefix_len
     ).to(device)
     
-    # if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
-    #     print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
-    #     agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
+    if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
+        print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
+        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device), strict=False)
 
     # if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
     #     print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
