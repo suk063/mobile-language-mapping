@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mshab-job1
+spec:
+  template:
+    spec:
+      containers:
+      - name: mshab-job1
+        image: maniskill/base:latest
+        command:
+        - /bin/bash
+        args:
+        - -c
+        - |
+          conda activate /wj-vol/mshab_env
+          export MS_ASSET_DIR="/wj-vol/mani_skill_assets/data"
+          cd /wj-vol/projects/mobile-language-mapping
+          bash scripts/train_bc_point.sh
+        volumeMounts:
+        - name: wj-vol
+          mountPath: /wj-vol
+        resources:
+          limits:
+            memory: 48G
+            cpu: "16"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 48G
+            cpu: "16"
+            nvidia.com/gpu: "1"
+      volumes:
+      - name: wj-vol
+        persistentVolumeClaim:
+          claimName: wj-vol
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - "NVIDIA-GeForce-RTX-3090"
+  backoffLimit: 5
