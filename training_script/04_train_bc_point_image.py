@@ -658,8 +658,8 @@ def train(cfg: TrainConfig):
             if epoch < (cfg.algo.stage1_epochs - 1):
                 eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
                 # DEBUG
-                for i, plan in enumerate(eval_envs.unwrapped.task_plan):
-                    print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+                # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
                 run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
                 # Final stats
                 if len(eval_envs.return_queue) > 0:
@@ -671,6 +671,9 @@ def train(cfg: TrainConfig):
                 # For now we run subset like the previous epochs and run eval on all tasks seperately
                 print("Running normal fixed-plan eval for last epoch...")
                 eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+                # DEBUG
+                # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
                 run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
                 if len(eval_envs.return_queue) > 0:
                     store_env_stats("eval")
@@ -697,8 +700,8 @@ def train(cfg: TrainConfig):
                     eval_obs, info = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
 
                     # DEBUG
-                    for i, plan in enumerate(eval_envs.unwrapped.task_plan):
-                        print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+                    # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                    #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
 
                     run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
 
