@@ -128,30 +128,62 @@ def get_3d_coordinates(
         return coords_cam
 
 def rotary_pe_3d(
+    x: torch.Tensor,      # Could be [B, S, D] or [B, n_heads, S, D]
+    coords: torch.Tensor, # [B, S, 3]
+    base: float = 10000.0
+) -> torch.Tensor:
+    """
+    A flexible 3D rotary positional embedding that supports both 3D and 4D inputs.
+    Args:
+        x: [..., S, D], either [B, S, D] or [B, n_heads, S, D].
+        coords: [B, S, 3].
+        base: Base for frequency calculation.
+    Returns:
+        Tensor of the same shape as x, with RoPE applied.
+    """
+    # If input x is 4D => flatten to 3D, apply RoPE, then reshape back.
+    if x.dim() == 4:
+        B, H, S, D = x.shape
+        # Flatten the first two dims for x
+        x_reshaped = x.reshape(B * H, S, D)
+
+        # Also reshape coords to match (B*H, S, 3)
+        # Here we broadcast coords over the head dimension
+        coords_reshaped = coords.unsqueeze(1).expand(B, H, S, 3).reshape(B * H, S, 3)
+
+        # Apply RoPE in 3D form
+        x_rotated = _rotary_pe_3d_impl(x_reshaped, coords_reshaped, base)
+
+        # Reshape back to [B, n_heads, S, D]
+        return x_rotated.view(B, H, S, D)
+    elif x.dim() == 3:
+        # Directly apply the original logic
+        return _rotary_pe_3d_impl(x, coords, base)
+    else:
+        raise ValueError(
+            f"rotary_pe_3d expects x to be 3D or 4D, but got shape {x.shape}"
+        )
+
+def _rotary_pe_3d_impl(
     x: torch.Tensor,      # [B, S, D]
     coords: torch.Tensor, # [B, S, 3]
     base: float = 10000.0
 ) -> torch.Tensor:
     """
-    3D rotary positional embedding. Splits D into blocks of 6, each rotated by angles
-    derived from coords along x, y, and z.
-    Args:
-        x: [B, S, D], with D % 6 == 0.
-        coords: [B, S, 3].
-        base: Base for frequency calculation.
-    Returns:
-        [B, S, D], same shape as x.
+    Core RoPE logic for 3D input shape [B, S, D].
     """
     B, S, D = x.shape
     assert D % 6 == 0, "D must be a multiple of 6"
     num_block = D // 6
 
-    # Frequency factors
+    # Compute frequency factors
     k_idx = torch.arange(num_block, device=x.device, dtype=x.dtype)
     theta_k = 1.0 / (base ** (k_idx / (D / 6)))
 
-    # Reshape into blocks of size 6
-    x_splitted = x.view(B, S, num_block, 6)
+    # Reshape x into blocks of size 6
+    x_splitted = x.view(B, S, num_block, 6)   # [B, S, num_block, 6]
+
+    # coords: [B, S, 3] => separate x_p, y_p, z_p
     x_p, y_p, z_p = coords[..., 0], coords[..., 1], coords[..., 2]
 
     out_blocks = []
@@ -166,17 +198,21 @@ def rotary_pe_3d(
         cos_y, sin_y = torch.cos(y_angle), torch.sin(y_angle)
         cos_z, sin_z = torch.cos(z_angle), torch.sin(z_angle)
 
-        # Rotate each pair around X, Y, Z
+        # Rotate pairs around X, Y, Z
         b0_ = b0 * cos_x - b1 * sin_x
         b1_ = b0 * sin_x + b1 * cos_x
+
         b2_ = b2 * cos_y - b3 * sin_y
         b3_ = b2 * sin_y + b3 * cos_y
+
         b4_ = b4 * cos_z - b5 * sin_z
         b5_ = b4 * sin_z + b5 * cos_z
 
         out_blocks.append(torch.stack([b0_, b1_, b2_, b3_, b4_, b5_], dim=-1))
 
-    return torch.stack(out_blocks, dim=2).view(B, S, D)
+    # Stack all blocks along num_block dim, then reshape back
+    x_out = torch.stack(out_blocks, dim=2).view(B, S, D)
+    return x_out
 
 def chamfer_cosine_weighted(
     pred_feat: torch.Tensor,   # [B, N, D] - predicted features

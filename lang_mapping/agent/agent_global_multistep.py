@@ -271,7 +271,7 @@ class TransformerEncoder(nn.Module):
         hidden_dim=1024,
         num_layers=4,
         num_heads=8,
-        output_dim=64,
+        output_dim=128,
         proj_dim=16,
     ):
         super().__init__()
@@ -534,7 +534,7 @@ class Agent_global_multistep(nn.Module):
         head_translation_all = head_pose_all[:, 0, :3, 3]  # [2B, 3]
         
         valid_coords, valid_feats = self.static_map.get_all_valid_voxel_data() # [N, 3], [N, D]
-        valid_feats_projected = self.voxel_proj(valid_feats, valid_coords)
+        valid_feats_projected, _ = self.implicit_decoder(valid_feats, valid_coords, return_intermediate=True)
         
         valid_coords_expanded = valid_coords.unsqueeze(0).expand(2*B, -1, -1)  # [2B, N, 3]
         valid_feats_projected_expanded = valid_feats_projected.unsqueeze(0).expand(2*B, -1, -1)
@@ -560,38 +560,38 @@ class Agent_global_multistep(nn.Module):
 
         hand_coords_world_flat_all = hand_coords_world_all.permute(0, 2, 3, 1).reshape(2*B*N, 3)
         feats_hand_flat_all = feats_hand_all.reshape(2*B*N, -1)
-        # feats_hand_reduced_flat = self.clip_dim_reducer(feats_hand_flat_all, hand_coords_world_flat_all)
-        # feats_hand_reduced_all = feats_hand_reduced_flat.view(2*B, N, -1)
+        feats_hand_reduced_flat = self.clip_dim_reducer(feats_hand_flat_all, hand_coords_world_flat_all)
+        feats_hand_reduced_all = feats_hand_reduced_flat.view(2*B, N, -1)
 
         head_coords_world_flat_all = head_coords_world_all.permute(0, 2, 3, 1).reshape(2*B*N, 3)
         feats_head_flat_all = feats_head_all.reshape(2*B*N, -1)
-        # feats_head_reduced_flat = self.clip_dim_reducer(feats_head_flat_all, head_coords_world_flat_all)
-        # feats_head_reduced_all = feats_head_reduced_flat.view(2*B, N, -1)
+        feats_head_reduced_flat = self.clip_dim_reducer(feats_head_flat_all, head_coords_world_flat_all)
+        feats_head_reduced_all = feats_head_reduced_flat.view(2*B, N, -1)
 
-        # Query voxel features 
-        with torch.no_grad():
-            voxel_feat_points_hand_flat_all, _ = self.static_map.query_voxel_feature(
-                hand_coords_world_flat_all, return_indices=False
-            )
-            voxel_feat_points_head_flat_all, _ = self.static_map.query_voxel_feature(
-                head_coords_world_flat_all, return_indices=False
-            )
+        # # Query voxel features 
+        # with torch.no_grad():
+        #     voxel_feat_points_hand_flat_all, _ = self.static_map.query_voxel_feature(
+        #         hand_coords_world_flat_all, return_indices=False
+        #     )
+        #     voxel_feat_points_head_flat_all, _ = self.static_map.query_voxel_feature(
+        #         head_coords_world_flat_all, return_indices=False
+        #     )
         
-        voxel_feat_points_hand_flat_all, _ = self.implicit_decoder(voxel_feat_points_hand_flat_all, hand_coords_world_flat_all, return_intermediate=True)
-        voxel_feat_points_head_flat_all, _ = self.implicit_decoder(voxel_feat_points_head_flat_all, head_coords_world_flat_all, return_intermediate=True)
+        # voxel_feat_points_hand_flat_all, _ = self.implicit_decoder(voxel_feat_points_hand_flat_all, hand_coords_world_flat_all, return_intermediate=True)
+        # voxel_feat_points_head_flat_all, _ = self.implicit_decoder(voxel_feat_points_head_flat_all, head_coords_world_flat_all, return_intermediate=True)
         
         # Fuse voxel and CLIP features
-        fused_hand_all = self.feature_fusion(
-            voxel_feat_points_hand_flat_all,
-            feats_hand_flat_all,
-            hand_coords_world_flat_all
-        ).view(2*B, N, -1)
+        # fused_hand_all = self.feature_fusion(
+        #     voxel_feat_points_hand_flat_all,
+        #     feats_hand_flat_all,
+        #     hand_coords_world_flat_all
+        # ).view(2*B, N, -1)
         
-        fused_head_all = self.feature_fusion(
-            voxel_feat_points_head_flat_all,
-            feats_head_flat_all,
-            head_coords_world_flat_all
-        ).view(2*B, N, -1)
+        # fused_head_all = self.feature_fusion(
+        #     voxel_feat_points_head_flat_all,
+        #     feats_head_flat_all,
+        #     head_coords_world_flat_all
+        # ).view(2*B, N, -1)
             
         # Text embeddings
         object_labels_all = torch.cat([object_labels, object_labels], dim=0)
@@ -600,8 +600,8 @@ class Agent_global_multistep(nn.Module):
 
         # Transformer forward
         out_transformer_all = self.transformer(
-            hand_token=fused_hand_all,
-            head_token=fused_head_all,
+            hand_token=feats_hand_reduced_all,
+            head_token=feats_head_reduced_all,
             coords_hand=hand_coords_world_flat_all.reshape(2*B, N, 3),
             coords_head=head_coords_world_flat_all.reshape(2*B, N, 3),
             state=state_proj_all, 

@@ -121,7 +121,7 @@ class ConcatMLPFusion(nn.Module):
     """
     (feat1, feat2, coords_3d) -> [concat + sinusoidal PE] -> MLP -> fused
     """
-    def __init__(self, feat_dim=120, L=0):
+    def __init__(self, feat_dim=240, clip_embedding_dim=768, L=10):
         super().__init__()
         self.feat_dim = feat_dim
         self.L = L
@@ -131,7 +131,7 @@ class ConcatMLPFusion(nn.Module):
         else:
             self.pos_enc_dim = 2 * self.L * 3
 
-        in_dim = feat_dim * 2 + self.pos_enc_dim
+        in_dim = feat_dim + clip_embedding_dim + self.pos_enc_dim
         
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, feat_dim),
@@ -146,7 +146,8 @@ class ConcatMLPFusion(nn.Module):
     def forward(self, feat1, feat2, coords_3d=None):
         """
         Args:
-            feat1, feat2: (B * N, feat_dim)
+            feat1: (B * N, feat_dim) 
+            feat2: (B * N, clip_embedding_dim)
             coords_3d:    (B * N, 3)  
         
         Returns:
@@ -157,9 +158,6 @@ class ConcatMLPFusion(nn.Module):
 
         if coords_3d is not None:
             pe = positional_encoding(coords_3d, L=self.L)  # (B*N, 2*L*3)
-
-        # feature + positional_encoding을 concat
-        if coords_3d is not None:
             x = torch.cat([x, pe], dim=-1)
 
         # MLP 
