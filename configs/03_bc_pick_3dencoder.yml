@@ -5,8 +5,9 @@ eval_env:
 
   env_id: "PickSubtaskTrain-v0"
   num_envs: 50
-  max_episode_steps: 500
- 
+  max_episode_steps: 200
+  all_plan_count: 244
+
   continuous_task: True
 
   cat_state: True

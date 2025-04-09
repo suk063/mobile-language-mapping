@@ -77,7 +77,59 @@ def get_object_labels_batch(
         else:
             labels.append(object_map[uid])
     return torch.stack(labels, dim=0)
-                    
+
+def merge_t_m1(obs_m1: Dict[str, np.ndarray], obs_t: Dict[str, np.ndarray]):
+    agent_obs = {
+        "state": obs_t["state"],      # t
+        "state_m1": obs_m1["state"],    # t-1
+        "pixels": {
+            "fetch_hand_rgb": obs_t['pixels']["fetch_hand_rgb"],
+            "fetch_hand_rgb_m1": obs_m1['pixels']["fetch_hand_rgb"],
+            "fetch_hand_depth": obs_t['pixels']["fetch_hand_depth"],
+            "fetch_hand_depth_m1": obs_m1['pixels']["fetch_hand_depth"],
+            "fetch_hand_pose": obs_t['pixels']["fetch_hand_pose"],
+            "fetch_hand_pose_m1": obs_m1['pixels']["fetch_hand_pose"],
+
+            "fetch_head_rgb": obs_t['pixels']["fetch_head_rgb"],
+            "fetch_head_rgb_m1": obs_m1['pixels']["fetch_head_rgb"],
+            "fetch_head_depth": obs_t['pixels']["fetch_head_depth"],
+            "fetch_head_depth_m1": obs_m1['pixels']["fetch_head_depth"],
+            "fetch_head_pose": obs_t['pixels']["fetch_head_pose"],
+            "fetch_head_pose_m1": obs_m1['pixels']["fetch_head_pose"],
+        }
+    }
+    return agent_obs
+
+def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
+    """
+    Run a single evaluation episode.
+    Uses 'prev_obs' and 'current_obs' for merging observations.
+    """
+    device = eval_obs["state"].device
+    max_steps = eval_envs.max_episode_steps
+    prev_obs = eval_obs  # For the first step, prev_obs = current_obs = reset result
+
+    # Get subtask info (labels and indices) for the episode
+    plan0 = eval_envs.unwrapped.task_plan[0]
+    subtask_labels = get_object_labels_batch(uid_to_label_map, plan0.composite_subtask_uids).to(device)
+
+    # Batch size (number of parallel evaluation environments)
+    B = subtask_labels.size(0)
+
+    for t in range(max_steps):
+        # Merge observations from time t and t-1
+        agent_obs = merge_t_m1(prev_obs, eval_obs)
+
+        with torch.no_grad():
+            action, _ = agent(agent_obs, subtask_labels)
+
+        # Environment step
+        next_obs, _, _, _, _ = eval_envs.step(action)
+        prev_obs = eval_obs
+        eval_obs = next_obs
+
+    return eval_obs
+          
 @dataclass
 class BCConfig:
     name: str = "bc"
@@ -97,7 +149,7 @@ class BCConfig:
     torch_deterministic: bool = True
 
     # Voxel/Scene Settings
-    voxel_feature_dim: int = 120
+    voxel_feature_dim: int = 240
     resolution: float = 0.12
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
@@ -109,7 +161,7 @@ class BCConfig:
     open_clip_model_pretrained: str = "merged2b_s4b_b131k"
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
-    state_mlp_dim: int = 64
+    state_mlp_dim: int = 128
     hidden_dim: int = 240
     cos_loss_weight: float = 0.1
 
@@ -393,7 +445,6 @@ class DPDataset(ClosableDataset):
         for h5_file in self.h5_files:
             h5_file.close()
 
-
 class TempTranslateToPointDataset(DPDataset):
     def __init__(self, *args, cat_state=True, cat_pixels=False, **kwargs):
         assert (
@@ -412,27 +463,28 @@ class TempTranslateToPointDataset(DPDataset):
 
         state_obs = item["observations"]["state"]
         assert state_obs.size(0) == 2
-        state_obs = {"state": state_obs[0], "state_p1": state_obs[1]}
+        state_obs = {"state_m1": state_obs[0], "state": state_obs[1]}
 
         pixel_obs = {
-            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_depth_p1": item["observations"]["fetch_hand_depth"][1].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb_p1": item["observations"]["fetch_hand_rgb"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth_p1": item["observations"]["fetch_head_depth"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb_p1": item["observations"]["fetch_head_rgb"][1].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose_p1": item["observations"]["fetch_hand_pose"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose_p1": item["observations"]["fetch_head_pose"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_depth_m1": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb_m1": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth_m1": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth": item["observations"]["fetch_head_depth"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb_m1": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose_m1": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose_m1": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose": item["observations"]["fetch_head_pose"][1].squeeze(-1).unsqueeze(0),
         }
 
         obs = {**state_obs, "pixels": pixel_obs}
 
         # NOTE (arth): we use start act and step_num since we use o_t and o_{t+1} for scene flow est
-        act = item["actions"][0]
+        
+        act = item["actions"][1]
         step_num = self.slices[index][2]
 
         subtask_uid = item["subtask_uid"]
@@ -456,6 +508,8 @@ def train(cfg: TrainConfig):
     print("Eval env made.")
 
     eval_obs, _ = eval_envs.reset(seed=cfg.seed + 1_000_000)
+    # MARK: Here we try to save the plan indexes
+    fixed_plan_idxs = eval_envs.unwrapped.task_plan_idxs.clone()
     eval_envs.action_space.seed(cfg.seed + 1_000_000)
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
@@ -464,6 +518,10 @@ def train(cfg: TrainConfig):
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
+        voxel_feature_dim=cfg.algo.voxel_feature_dim,
+        open_clip_model=(cfg.algo.open_clip_model_name, cfg.algo.open_clip_model_pretrained),
+        text_input=cfg.algo.text_input,
+        clip_input_dim=cfg.algo.clip_input_dim,
         state_mlp_dim=cfg.algo.state_mlp_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
     ).to(device)
@@ -524,8 +582,13 @@ def train(cfg: TrainConfig):
         """
         Store env stats in logger (evaluation only).
         """
-        assert key == "eval"
-        log_env = eval_envs
+
+        if key == "eval":
+            log_env = eval_envs
+        elif key == "eval_all":
+            log_env = eval_envs
+        else:
+            raise ValueError(f"Unsupported key: {key}")
         logger.store(
             key,
             return_per_step=common.to_tensor(log_env.return_queue, device=device).float().mean()
@@ -543,6 +606,9 @@ def train(cfg: TrainConfig):
     for name, param in agent.named_parameters():
         param.requires_grad = True 
     
+    for name, param in agent.clip_model.named_parameters():
+        param.requires_grad = False 
+    
     params_to_optimize = agent.parameters()
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
@@ -559,7 +625,7 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi = agent.forward_policy(obs, subtask_labels, step_nums)
+            pi = agent(obs, subtask_labels)
             bc_loss = F.mse_loss(pi, act)
 
             optimizer.zero_grad()
@@ -588,20 +654,68 @@ def train(cfg: TrainConfig):
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
 
-            eval_obs, _ = eval_envs.reset()
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
-            B = eval_subtask_labels.size()
+            # If not last epoch
+            if epoch < (cfg.algo.stage1_epochs - 1):
+                eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+                # DEBUG
+                # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+                run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+                # Final stats
+                if len(eval_envs.return_queue) > 0:
+                    store_env_stats("eval")
+                logger.log(global_epoch)
+                timer.end(key="eval")
+            # For last epoch, run all task plans in chunks
+            else:
+                # For now we run subset like the previous epochs and run eval on all tasks seperately
+                print("Running normal fixed-plan eval for last epoch...")
+                eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+                # DEBUG
+                # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+                run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+                if len(eval_envs.return_queue) > 0:
+                    store_env_stats("eval")
+                logger.log(global_epoch)
 
-            for t in range(eval_envs.max_episode_steps):
-                with torch.no_grad():
-                    time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_policy(eval_obs, eval_subtask_labels, time_step)
-                # Stub environment step
-                eval_obs, _, _, _, _ = eval_envs.step(action)
-            if len(eval_envs.return_queue) > 0:
-                store_env_stats("eval")
-            logger.log(global_epoch)
-            timer.end(key="eval")
+                batch_size = eval_envs.num_envs
+                all_plan_count = cfg.eval_env.all_plan_count
+                all_plan_idxs_list = list(range(all_plan_count))
+
+                print("Now running all tasks in chunks...")
+                pbar = tqdm(total=all_plan_count, desc="Evaluating all tasks (last epoch)")
+
+                chunk_start = 0
+                while chunk_start < all_plan_count:
+                    chunk_end = min(chunk_start + batch_size, all_plan_count)
+                    chunk_size = chunk_end - chunk_start
+                    chunk = all_plan_idxs_list[chunk_start:chunk_end]
+
+                    if chunk_size < batch_size:
+                        chunk += [chunk[-1]] * (batch_size - chunk_size)
+
+                    plan_idxs_tensor = torch.tensor(chunk, dtype=torch.int)
+
+                    eval_obs, info = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
+
+                    # DEBUG
+                    # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                    #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+
+                    run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+
+                    chunk_start += batch_size
+                    pbar.update(chunk_size)
+                
+                if len(eval_envs.return_queue) > 0:
+                    store_env_stats("eval_all")
+
+                pbar.close() 
+
+                # Done with all tasks
+                logger.log(global_epoch)
+                timer.end(key="eval")
 
         # Saving
         if check_freq(cfg.algo.save_freq, epoch):

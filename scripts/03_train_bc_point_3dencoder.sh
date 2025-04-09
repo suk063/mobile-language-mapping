@@ -4,13 +4,13 @@ SEED=1
 
 TRAJS_PER_OBJ=1000
 
-TASK=prepare_groceries
+TASK=set_table
 SUBTASK=pick
 SPLIT=train
 OBJ=all
 
 # Change according to the task
-ALL_PLAN_COUNT=519
+ALL_PLAN_COUNT=244
 NUM_ENVS=50
 
 # shellcheck disable=SC2001
@@ -19,7 +19,7 @@ WORKSPACE="mshab_exps"
 GROUP=$TASK-rcad-bc-point-$SUBTASK
 EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-3dencoder-local-trajs_per_obj=$TRAJS_PER_OBJ"
 # shellcheck disable=SC2001
-PROJECT_NAME="MS-HAB-RCAD-bc-point-uplift"
+PROJECT_NAME="MS-HAB-RCAD-bc-point-3dencoder"
 
 WANDB=True
 TENSORBOARD=True
