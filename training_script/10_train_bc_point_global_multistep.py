@@ -209,6 +209,7 @@ class BCConfig:
     num_heads: int = 8
     num_layers_transformer: int = 4
     num_layers_perceiver: int = 2
+    num_learnable_tokens: int = 16
 
     num_eval_envs: int = field(init=False)
 
@@ -602,6 +603,7 @@ def train(cfg: TrainConfig):
         num_heads = cfg.algo.num_heads,
         num_layers_transformer=cfg.algo.num_layers_transformer,
         num_layers_perceiver=cfg.algo.num_layers_perceiver,
+        num_learnable_tokens=cfg.algo.num_learnable_tokens
     ).to(device)
     
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
