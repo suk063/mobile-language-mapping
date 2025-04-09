@@ -425,13 +425,14 @@ class TransformerEncoder(nn.Module):
             coords_list.append(coords_cam)  # [B, 2, 3]
 
         tokens.append(hand_token)     # [B, N, D]
-        coords_list.append(coords_hand)
+        tokens.append(head_token) 
+        src = torch.cat(tokens, dim=1)
         
-        tokens.append(head_token)     # [B, N, D]
-        coords_list.append(coords_head)
-        
-        src = torch.cat(tokens, dim=1)         # [B, S+N, D]
-        coords_src = torch.cat(coords_list, dim=1) # [B, S+N, 3]
+        coords_src = None
+        if coords_hand is not None:
+            coords_list.append(coords_hand)
+            coords_list.append(coords_head)
+            coords_src = torch.cat(coords_list, dim=1) # [B, S+N, 3]
         
         # Pass through Transformer layers
         for layer in self.layers:
