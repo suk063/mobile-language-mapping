@@ -77,7 +77,59 @@ def get_object_labels_batch(
         else:
             labels.append(object_map[uid])
     return torch.stack(labels, dim=0)
-                    
+
+def merge_t_m1(obs_m1: Dict[str, np.ndarray], obs_t: Dict[str, np.ndarray]):
+    agent_obs = {
+        "state": obs_t["state"],      # t
+        "state_m1": obs_m1["state"],    # t-1
+        "pixels": {
+            "fetch_hand_rgb": obs_t['pixels']["fetch_hand_rgb"],
+            "fetch_hand_rgb_m1": obs_m1['pixels']["fetch_hand_rgb"],
+            "fetch_hand_depth": obs_t['pixels']["fetch_hand_depth"],
+            "fetch_hand_depth_m1": obs_m1['pixels']["fetch_hand_depth"],
+            "fetch_hand_pose": obs_t['pixels']["fetch_hand_pose"],
+            "fetch_hand_pose_m1": obs_m1['pixels']["fetch_hand_pose"],
+
+            "fetch_head_rgb": obs_t['pixels']["fetch_head_rgb"],
+            "fetch_head_rgb_m1": obs_m1['pixels']["fetch_head_rgb"],
+            "fetch_head_depth": obs_t['pixels']["fetch_head_depth"],
+            "fetch_head_depth_m1": obs_m1['pixels']["fetch_head_depth"],
+            "fetch_head_pose": obs_t['pixels']["fetch_head_pose"],
+            "fetch_head_pose_m1": obs_m1['pixels']["fetch_head_pose"],
+        }
+    }
+    return agent_obs
+
+def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
+    """
+    Run a single evaluation episode.
+    Uses 'prev_obs' and 'current_obs' for merging observations.
+    """
+    device = eval_obs["state"].device
+    max_steps = eval_envs.max_episode_steps
+    prev_obs = eval_obs  # For the first step, prev_obs = current_obs = reset result
+
+    # Get subtask info (labels and indices) for the episode
+    plan0 = eval_envs.unwrapped.task_plan[0]
+    subtask_labels = get_object_labels_batch(uid_to_label_map, plan0.composite_subtask_uids).to(device)
+
+    # Batch size (number of parallel evaluation environments)
+    B = subtask_labels.size(0)
+
+    for t in range(max_steps):
+        # Merge observations from time t and t-1
+        agent_obs = merge_t_m1(prev_obs, eval_obs)
+
+        with torch.no_grad():
+            action, _ = agent(agent_obs, subtask_labels)
+
+        # Environment step
+        next_obs, _, _, _, _ = eval_envs.step(action)
+        prev_obs = eval_obs
+        eval_obs = next_obs
+
+    return eval_obs
+          
 @dataclass
 class BCConfig:
     name: str = "bc"
@@ -97,7 +149,7 @@ class BCConfig:
     torch_deterministic: bool = True
 
     # Voxel/Scene Settings
-    voxel_feature_dim: int = 120
+    voxel_feature_dim: int = 240
     resolution: float = 0.12
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
@@ -109,7 +161,7 @@ class BCConfig:
     open_clip_model_pretrained: str = "merged2b_s4b_b131k"
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
-    state_mlp_dim: int = 1024
+    state_mlp_dim: int = 128
     hidden_dim: int = 240
     cos_loss_weight: float = 0.1
 
@@ -393,7 +445,6 @@ class DPDataset(ClosableDataset):
         for h5_file in self.h5_files:
             h5_file.close()
 
-
 class TempTranslateToPointDataset(DPDataset):
     def __init__(self, *args, cat_state=True, cat_pixels=False, **kwargs):
         assert (
@@ -412,27 +463,28 @@ class TempTranslateToPointDataset(DPDataset):
 
         state_obs = item["observations"]["state"]
         assert state_obs.size(0) == 2
-        state_obs = {"state": state_obs[0], "state_p1": state_obs[1]}
+        state_obs = {"state_m1": state_obs[0], "state": state_obs[1]}
 
         pixel_obs = {
-            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_depth_p1": item["observations"]["fetch_hand_depth"][1].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb_p1": item["observations"]["fetch_hand_rgb"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth_p1": item["observations"]["fetch_head_depth"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb_p1": item["observations"]["fetch_head_rgb"][1].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose_p1": item["observations"]["fetch_hand_pose"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose_p1": item["observations"]["fetch_head_pose"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_depth_m1": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb_m1": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth_m1": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth": item["observations"]["fetch_head_depth"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb_m1": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose_m1": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose_m1": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose": item["observations"]["fetch_head_pose"][1].squeeze(-1).unsqueeze(0),
         }
 
         obs = {**state_obs, "pixels": pixel_obs}
 
         # NOTE (arth): we use start act and step_num since we use o_t and o_{t+1} for scene flow est
-        act = item["actions"][0]
+        
+        act = item["actions"][1]
         step_num = self.slices[index][2]
 
         subtask_uid = item["subtask_uid"]
@@ -562,18 +614,6 @@ def train(cfg: TrainConfig):
     
     agent.to(device)
 
-    def run_eval_episode(eval_envs, eval_obs, agent, uid_map):
-        max_steps = eval_envs.max_episode_steps
-
-        for t in range(max_steps):
-            plan0 = eval_envs.unwrapped.task_plan[0]
-            subtask_labels = get_object_labels_batch(uid_map, plan0.composite_subtask_uids).to(device)
-
-            with torch.no_grad():
-                time_step = torch.tensor([t], dtype=torch.int32, device=device).repeat(eval_envs.num_envs)
-                action = agent.forward_policy(eval_obs, subtask_labels, time_step)
-            eval_obs, _, _, _, _ = eval_envs.step(action)
-
     for epoch in range(cfg.algo.stage1_epochs):
         global_epoch = logger_start_log_step + epoch
         
@@ -585,7 +625,7 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi = agent.forward_policy(obs, subtask_labels, step_nums)
+            pi = agent(obs, subtask_labels)
             bc_loss = F.mse_loss(pi, act)
 
             optimizer.zero_grad()

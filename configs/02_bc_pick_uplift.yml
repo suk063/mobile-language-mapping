@@ -4,8 +4,8 @@ eval_env:
   make_env: True
 
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 50
-  max_episode_steps: 500
+  num_envs: 20
+  max_episode_steps: 200
   all_plan_count: 244
  
   continuous_task: True
@@ -58,7 +58,7 @@ algo:
   open_clip_model_pretrained: "merged2b_s4b_b131k"
   text_input: ["bowl", "apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
-  state_mlp_dim: 1024
+  state_mlp_dim: 128
 
   # Pre-trained Weights
   # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage1-final_agent.pt"
