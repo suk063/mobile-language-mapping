@@ -143,6 +143,36 @@ def merge_t_m1(obs_m1: Dict[str, np.ndarray], obs_t: Dict[str, np.ndarray]):
     }
     return agent_obs
 
+def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
+    """
+    Run a single evaluation episode.
+    Uses 'prev_obs' and 'current_obs' for merging observations.
+    """
+    device = eval_obs["state"].device
+    max_steps = eval_envs.max_episode_steps
+    prev_obs = eval_obs  # For the first step, prev_obs = current_obs = reset result
+
+    # Get subtask info (labels and indices) for the episode
+    plan0 = eval_envs.unwrapped.task_plan[0]
+    subtask_labels = get_object_labels_batch(uid_to_label_map, plan0.composite_subtask_uids).to(device)
+
+    # Batch size (number of parallel evaluation environments)
+    B = subtask_labels.size(0)
+
+    for t in range(max_steps):
+        # Merge observations from time t and t-1
+        agent_obs = merge_t_m1(prev_obs, eval_obs)
+
+        with torch.no_grad():
+            action, _ = agent(agent_obs, subtask_labels)
+
+        # Environment step
+        next_obs, _, _, _, _ = eval_envs.step(action)
+        prev_obs = eval_obs
+        eval_obs = next_obs
+
+    return eval_obs
+
 @dataclass
 class BCConfig:
     name: str = "bc"
@@ -176,7 +206,6 @@ class BCConfig:
     state_mlp_dim: int = 1024
     hidden_dim: int = 240
     cos_loss_weight: float = 0.1
-    global_k: int = 4096
     num_heads: int = 8
     num_layers_transformer: int = 4
     num_layers_perceiver: int = 2
@@ -535,6 +564,8 @@ def train(cfg: TrainConfig):
     print("Eval env made.")
 
     eval_obs, _ = eval_envs.reset(seed=cfg.seed + 1_000_000)
+    # MARK: Here we try to save the plan indexes
+    fixed_plan_idxs = eval_envs.unwrapped.task_plan_idxs.clone()
     eval_envs.action_space.seed(cfg.seed + 1_000_000)
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
@@ -569,8 +600,8 @@ def train(cfg: TrainConfig):
         static_map=static_map,
         implicit_decoder=implicit_decoder,
         num_heads = cfg.algo.num_heads,
-        num_layers_transformer = cfg.algo.num_layers_transformer,
-        num_layers_perceiver = cfg.algo.num_layers_perceiver
+        num_layers_transformer=cfg.algo.num_layers_transformer,
+        num_layers_perceiver=cfg.algo.num_layers_perceiver,
     ).to(device)
     
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
@@ -685,22 +716,22 @@ def train(cfg: TrainConfig):
     agent.to(device)
 
     for epoch in range(cfg.algo.epochs):
-        agent.train()
         global_epoch = logger_start_log_step + epoch
         
         logger.print(f"[Stage 1] Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
+        agent.train()
 
         for obs, act, subtask_uids, step_nums, traj_idx in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
-            subtask_idx = map_uids_to_indices_tensor(subtask_uids, uid2index_map).to(device)
 
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi, total_cos_loss = agent(obs, subtask_labels, subtask_idx)
+            pi, total_cos_loss = agent(obs, subtask_labels)
+            cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
             bc_loss = F.mse_loss(pi, act)
-            cos_loss = cfg.algo.cos_loss_weight * total_cos_loss
-            loss = bc_loss + cos_loss
+            
+            loss = cos_loss + bc_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -711,8 +742,7 @@ def train(cfg: TrainConfig):
             global_step += 1
 
             writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
-            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
-
+            writer.add_scalar("cos Loss/Iteration", cos_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
@@ -729,27 +759,12 @@ def train(cfg: TrainConfig):
         # Evaluation
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
-            
-            current_obs, _ = eval_envs.reset()
-            prev_obs = current_obs
-            
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
-            eval_subtask_idx = map_uids_to_indices_tensor(eval_envs.unwrapped.task_plan[0].composite_subtask_uids, uid2index_map).to(device)
-            
-            B = eval_subtask_labels.size()
-
-            for t in range(eval_envs.max_episode_steps):
-                agent_obs = merge_t_m1(prev_obs, current_obs)
-                
-                with torch.no_grad():
-                    time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    
-                    action, _ = agent(agent_obs, eval_subtask_labels, eval_subtask_idx)
-                # Stub environment step
-                next_obs, _, _, _, _ = eval_envs.step(action)
-                
-                prev_obs = current_obs
-                current_obs = next_obs
+            eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+            # DEBUG
+            for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+            run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+            # Final stats
             if len(eval_envs.return_queue) > 0:
                 store_env_stats("eval")
             logger.log(global_epoch)
@@ -759,9 +774,43 @@ def train(cfg: TrainConfig):
         if check_freq(cfg.algo.save_freq, epoch):
             save_checkpoint(name="latest")
             timer.end(key="checkpoint")
+            
+    # Now evaluate all task plans in chunks
+    batch_size = eval_envs.num_envs
+    all_plan_count = cfg.eval_env.all_plan_count
+    all_plan_idxs_list = list(range(all_plan_count))
+
+    print("Evaluating all tasks in chunks...")
+    agent.eval()
+    pbar = tqdm(total=all_plan_count, desc="Evaluating all tasks (last epoch)")
+
+    chunk_start = 0
+    while chunk_start < all_plan_count:
+        chunk_end = min(chunk_start + batch_size, all_plan_count)
+        chunk_size = chunk_end - chunk_start
+        chunk = all_plan_idxs_list[chunk_start:chunk_end]
+
+        # If chunk is smaller than batch_size, pad it with the last element
+        if chunk_size < batch_size:
+            chunk += [chunk[-1]] * (batch_size - chunk_size)
+
+        plan_idxs_tensor = torch.tensor(chunk, dtype=torch.int)
+
+        eval_obs, info = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
+        run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+
+        chunk_start += batch_size
+        pbar.update(chunk_size)
+
+    if len(eval_envs.return_queue) > 0:
+        store_env_stats("eval_all")
+
+    pbar.close()
+    logger.log(global_epoch)
+    timer.end(key="eval")
 
     # Final save
-    save_checkpoint(name="stage2-final")
+    save_checkpoint(name="stage-final")
 
     bc_dataloader.close()
     eval_envs.close()

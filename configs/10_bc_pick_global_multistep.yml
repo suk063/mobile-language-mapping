@@ -4,8 +4,9 @@ eval_env:
   make_env: True
 
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 63
-  max_episode_steps: 500
+  num_envs: 50
+  max_episode_steps: 200
+  all_plan_count: 244
  
   continuous_task: True
 
@@ -34,9 +35,9 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 16
+  batch_size: 1
   
-  epochs: 30
+  epochs: 1
 
   eval_freq: 1
   log_freq: 1

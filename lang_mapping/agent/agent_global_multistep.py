@@ -545,7 +545,7 @@ class Agent_global_multistep(nn.Module):
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
 
-    def forward(self, observations, object_labels, subtask_idx):
+    def forward(self, observations, object_labels):
         """
         Forward pass that processes time t and t-1 in a single batch:
          1) Merge data of t and t-1 to form batch=2B
