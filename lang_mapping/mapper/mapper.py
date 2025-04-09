@@ -99,10 +99,10 @@ class VoxelHashTable(nn.Module):
         feats[valid_mask] = self.voxel_features[voxel_indices[valid_mask]]
 
         # mark valid voxel features
-        valid_voxel_indices = voxel_indices[valid_mask]
-        self.used_mask[valid_voxel_indices] = True
+        # valid_voxel_indices = voxel_indices[valid_mask]
+        # self.used_mask[valid_voxel_indices] = True
 
-        self.valid_grid_coords = self.voxel_coords[self.used_mask]
+        # self.valid_grid_coords = self.voxel_coords[self.used_mask]
 
         if return_indices:
             return feats, voxel_indices

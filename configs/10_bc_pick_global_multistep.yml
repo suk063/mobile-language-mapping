@@ -69,7 +69,7 @@ algo:
   cos_loss_weight: 0.01
 
   # Pre-trained Weights
-  # pretrained_agent_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save1/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/latest_agent.pt"
+  pretrained_agent_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save1/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/latest_agent.pt"
 
 logger:
   workspace: mshab_exps

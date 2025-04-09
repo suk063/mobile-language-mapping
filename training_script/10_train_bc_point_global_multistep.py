@@ -178,7 +178,8 @@ class BCConfig:
     cos_loss_weight: float = 0.1
     global_k: int = 4096
     num_heads: int = 8
-    num_layers: int = 2
+    num_layers_transformer: int = 4
+    num_layers_perceiver: int = 2
 
     num_eval_envs: int = field(init=False)
 
@@ -568,7 +569,8 @@ def train(cfg: TrainConfig):
         static_map=static_map,
         implicit_decoder=implicit_decoder,
         num_heads = cfg.algo.num_heads,
-        num_layers = cfg.algo.num_layers,
+        num_layers_transformer = cfg.algo.num_layers_transformer,
+        num_layers_perceiver = cfg.algo.num_layers_perceiver
     ).to(device)
     
     if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
@@ -683,6 +685,7 @@ def train(cfg: TrainConfig):
     agent.to(device)
 
     for epoch in range(cfg.algo.epochs):
+        agent.train()
         global_epoch = logger_start_log_step + epoch
         
         logger.print(f"[Stage 1] Epoch: {global_epoch}")
@@ -694,11 +697,13 @@ def train(cfg: TrainConfig):
 
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
-            pi = agent(obs, subtask_labels, subtask_idx)
+            pi, total_cos_loss = agent(obs, subtask_labels, subtask_idx)
             bc_loss = F.mse_loss(pi, act)
+            cos_loss = cfg.algo.cos_loss_weight * total_cos_loss
+            loss = bc_loss + cos_loss
 
             optimizer.zero_grad()
-            bc_loss.backward()
+            loss.backward()
             optimizer.step()
 
             tot_loss += bc_loss.item()
@@ -706,6 +711,8 @@ def train(cfg: TrainConfig):
             global_step += 1
 
             writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
+            writer.add_scalar("Cosine Loss/Iteration", cos_loss.item(), global_step)
+
 
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)
@@ -737,7 +744,7 @@ def train(cfg: TrainConfig):
                 with torch.no_grad():
                     time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
                     
-                    action = agent(agent_obs, eval_subtask_labels, eval_subtask_idx)
+                    action, _ = agent(agent_obs, eval_subtask_labels, eval_subtask_idx)
                 # Stub environment step
                 next_obs, _, _, _, _ = eval_envs.step(action)
                 

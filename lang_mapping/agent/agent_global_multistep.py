@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 # Local imports
 # from ..module.transformer import TransformerEncoder, GlobalPerceiver
-from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, ConcatMLPFusion, VoxelProj, StateProj
+from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, ConcatMLPFusion, StateProj
 from lang_mapping.mapper.mapper_delta import VoxelHashTable
 
 from ..utils import get_3d_coordinates, get_visual_features, transform, rotary_pe_3d
@@ -182,7 +182,65 @@ class GlobalPerceiver(nn.Module):
         out_tokens = x[:, 1:, :]
         out = self.out_proj(out_tokens)  # [B,2,out_dim]
         return out   
-            
+
+class CrossAttentionLayer(nn.Module):
+    def __init__(self, d_model=256, n_heads=8, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        # Q, K, V projection
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model)
+        
+        # projection
+        self.out_proj = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        query: torch.Tensor,        # (B, Lq, d_model)
+        key: torch.Tensor,          # (B, Lk, d_model)
+        value: torch.Tensor,        # (B, Lk, d_model)
+        coords_query: torch.Tensor = None,  # (B, Lq, 3) or None
+        coords_key: torch.Tensor = None  # (B, Lk, 3) or None
+    ) -> torch.Tensor:
+
+        B, Lq, _ = query.shape
+        _, Lk, _ = key.shape
+
+        # 1) Q, K, V projection
+        q = self.W_q(query)  # (B, Lq, d_model)
+        k = self.W_k(key)    # (B, Lk, d_model)
+        v = self.W_v(value)  # (B, Lk, d_model)
+        
+        # 2) reshape => (B, n_heads, Lq(or Lk), head_dim)
+        q = q.view(B, Lq, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, Lq, head_dim)
+        k = k.view(B, Lk, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, Lk, head_dim)
+        v = v.view(B, Lk, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, Lk, head_dim)
+        
+         # 3) keyRoPE
+        if coords_query is not None:  
+            q = rotary_pe_3d(q, coords_query)
+        if coords_key is not None:
+            k = rotary_pe_3d(k, coords_key)
+        
+        # 4) Scaled dot-product attention
+        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)  # (B, n_heads, Lq, Lk)
+        attn = F.softmax(scores, dim=-1)
+        attn = self.dropout(attn)
+        
+        out = torch.matmul(attn, v)  # (B, n_heads, Lq, head_dim)
+        
+        # 5)
+        out = out.transpose(1, 2).contiguous().view(B, Lq, self.d_model)
+        out = self.out_proj(out)
+        return out
+
+
 class TransformerLayer(nn.Module):
     def __init__(
         self, 
@@ -216,15 +274,26 @@ class TransformerLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         
-        # Cross-attention layer for text
-        self.cross_attn_text = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        # Text cross-attention
+        self.cross_attn_text = CrossAttentionLayer(d_model, n_heads, dropout)
         self.norm3 = nn.LayerNorm(d_model)
         self.dropout3 = nn.Dropout(dropout)
+        
+        # Perceiver cross-attention
+        self.cross_attn_perceiver = CrossAttentionLayer(d_model, n_heads, dropout)
+        self.norm4 = nn.LayerNorm(d_model)
+        self.dropout4 = nn.Dropout(dropout)
         
         # Activation
         self.activation = F.gelu
 
-    def forward(self, src: torch.Tensor, coords_src: torch.Tensor = None, text: torch.Tensor = None) -> torch.Tensor:
+    def forward(
+        self, 
+        src: torch.Tensor,             # (B, S, d_model)
+        coords_src: torch.Tensor = None,  # (B, S, 3) or None
+        text: torch.Tensor = None,         # (B, T, d_model) or None
+        perceiver: torch.Tensor = None,    # (B, P, d_model) or None
+    ) -> torch.Tensor:
         # src shape: (B, S, d_model)
         B, S, _ = src.shape
         
@@ -245,24 +314,40 @@ class TransformerLayer(nn.Module):
             k = rotary_pe_3d(k, coords_src)
             # v is often unchanged in RoPE
         
-        # 4) Scaled dot-product attention
-        # scores shape: (B, n_heads, S, S)
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
         attn_weights = F.softmax(scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, v)  # (B, n_heads, S, head_dim)
-        
-        # 5) Reshape back to (B, S, d_model)
+        attn_output = torch.matmul(attn_weights, v)
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, S, self.d_model)
         
-        # 6) Output projection + residual + norm
-        out = self.out_proj(attn_output)
-        src2 = self.norm1(src + self.dropout_attn(out))
+        src2 = self.norm1(src + self.dropout_attn(self.out_proj(attn_output)))
         
         if text is not None:    
-            attn_out_text, _ = self.cross_attn_text(query=src2, key=text, value=text)
-            src2 = self.norm3(src2 + self.dropout3(attn_out_text))
+            B_txt, T, _ = text.shape
+            text_coords = torch.zeros(B_txt, T, 3, device=text.device)
+            
+            attn_text = self.cross_attn_text(
+                query=src2,
+                key=text,
+                value=text, 
+                coords_query=coords_src,  
+                coords_key=text_coords  
+            )
+            src2 = self.norm3(src2 + self.dropout3(attn_text))
         
-        # 7) Feed-forward
+        if perceiver is not None:
+            B_p, P, _ = perceiver.shape
+            perceiver_coords = torch.zeros(B_p, P, 3, device=perceiver.device)
+            
+            attn_perceiver = self.cross_attn_perceiver(
+                query=src2,
+                key=perceiver,
+                value=perceiver,
+                coords_query=coords_src,    
+                coords_key=perceiver_coords  
+            )
+            src2 = self.norm4(src2 + self.dropout4(attn_perceiver))
+        
+        # Feed froward network
         ff_out = self.linear2(self.activation(self.linear1(src2)))
         out2 = self.norm2(src2 + self.dropout_ff(ff_out))
         
@@ -282,7 +367,6 @@ class TransformerEncoder(nn.Module):
 
         self.modality_embed_hand = nn.Parameter(torch.randn(1, 1, input_dim))
         self.modality_embed_head = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.modality_embed_3d = nn.Parameter(torch.randn(1, 1, input_dim))
         
         # Transformer layers
         self.layers = nn.ModuleList([
@@ -298,7 +382,7 @@ class TransformerEncoder(nn.Module):
         
         # Post-fusion MLP
         self.post_fusion_mlp = nn.Sequential(
-            nn.Linear(proj_dim * (2 + 256 * 2), 2048),
+            nn.Linear(proj_dim * (256 * 2), 2048),
             nn.LayerNorm(2048),
             nn.ReLU(inplace=True),
             nn.Linear(2048, 512),
@@ -339,7 +423,6 @@ class TransformerEncoder(nn.Module):
 
         if perceiver_out_all is not None:
             M = 2
-            perceiver_out_all = perceiver_out_all + self.modality_embed_3d.expand(B2, M, -1) # [B, 2, D]
             tokens.append(perceiver_out_all)    # [B, M, D]
             
             coords_cam = torch.stack([hand_translation_all, head_translation_all], dim=1)         # [B,2,3]
@@ -358,15 +441,20 @@ class TransformerEncoder(nn.Module):
         
         # Pass through Transformer layers
         for layer in self.layers:
-            src = layer(src=src, coords_src=coords_src, text=text_token)
+            src = layer(
+                src=src,
+                coords_src=coords_src,
+                text=text_token,
+                perceiver=perceiver_out_all
+            )
 
         start_idx = 0
         if state is not None:
             start_idx += 1
         if text_embeddings is not None:
             start_idx += 1
-        # if perceiver_out_all is not None:
-        #     start_idx += M
+        if perceiver_out_all is not None:
+            start_idx += M
 
         # fused_tokens = src[:, start_idx:, :]  # [B, (N + ?), input_dim]
         
@@ -391,7 +479,8 @@ class Agent_global_multistep(nn.Module):
         static_map: VoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
         num_heads: int = 8,
-        num_layers: int = 4,
+        num_layers_transformer: int = 4,
+        num_layers_perceiver: int = 2,
     ):
         super().__init__()
 
@@ -425,15 +514,15 @@ class Agent_global_multistep(nn.Module):
         self.transformer = TransformerEncoder(
             input_dim=voxel_feature_dim,
             hidden_dim=1024,
-            num_layers=num_layers,
-            num_heads=4,
+            num_layers=num_layers_transformer,
+            num_heads=num_heads,
             output_dim=state_mlp_dim,
         )
         
         self.global_perceiver = GlobalPerceiver(
             input_dim=voxel_feature_dim,
             nhead=num_heads,
-            num_layers=num_layers,
+            num_layers=num_layers_perceiver,
             out_dim=voxel_feature_dim
         )
         
@@ -447,6 +536,8 @@ class Agent_global_multistep(nn.Module):
         # Voxel hashing and implicit decoder
         self.static_map = static_map
         self.implicit_decoder = implicit_decoder
+        
+        # self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim, clip_embedding_dim=clip_input_dim)
 
         self.state_proj_perceiver =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device)   
         self.state_proj_transformer =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device)   
@@ -570,6 +661,28 @@ class Agent_global_multistep(nn.Module):
         feats_head_flat_all = feats_head_all.reshape(2*B*N, -1)
         feats_head_reduced_flat = self.clip_dim_reducer(feats_head_flat_all, head_coords_world_flat_all)
         feats_head_reduced_all = feats_head_reduced_flat.view(2*B, N, -1)
+        
+        # Query voxel features and cos simeilarity
+        with torch.no_grad():
+            voxel_feat_points_hand_flat_all, _ = self.static_map.query_voxel_feature(
+                hand_coords_world_flat_all, return_indices=False
+            )
+            voxel_feat_points_head_flat_all, _ = self.static_map.query_voxel_feature(
+                head_coords_world_flat_all, return_indices=False
+            )
+        
+        voxel_feat_points_hand_flat_proj_all, voxel_feat_points_hand_flat_final_all = self.implicit_decoder(
+            voxel_feat_points_hand_flat_all, hand_coords_world_flat_all, return_intermediate=True)
+        voxel_feat_points_head_flat_proj_all, voxel_feat_points_head_flat_final_all = self.implicit_decoder(
+            voxel_feat_points_head_flat_all, head_coords_world_flat_all, return_intermediate=True)
+        
+        cos_sim_hand = F.cosine_similarity(voxel_feat_points_hand_flat_final_all, feats_hand_flat_all, dim=-1)
+        cos_loss_hand = 1.0 - cos_sim_hand.mean()  
+        
+        cos_sim_head = F.cosine_similarity(voxel_feat_points_head_flat_final_all, feats_head_flat_all, dim=-1)
+        cos_loss_head = 1.0 - cos_sim_head.mean()      
+        
+        total_cos_loss = cos_loss_hand + cos_loss_head 
             
         # Text embeddings
         object_labels_all = torch.cat([object_labels, object_labels], dim=0)
@@ -602,4 +715,4 @@ class Agent_global_multistep(nn.Module):
         action_input_t = torch.cat([state_projected_t, state_projected_m1, state_projected_delta, out_transformer_t, out_transformer_m1, out_transformer_delta], dim=-1)
         action_t = self.action_mlp(action_input_t)
 
-        return action_t
+        return action_t, total_cos_loss

@@ -95,8 +95,8 @@ def get_3d_coordinates(
     cy_new = cy * scale_y
 
     # Create pixel coordinate grid
-    u = torch.arange(W_feat, device=device).view(1, -1).expand(H_feat, W_feat)
-    v = torch.arange(H_feat, device=device).view(-1, 1).expand(H_feat, W_feat)
+    u = torch.arange(W_feat, device=device).view(1, -1).expand(H_feat, W_feat) + 0.5
+    v = torch.arange(H_feat, device=device).view(-1, 1).expand(H_feat, W_feat) + 0.5
     u = u.unsqueeze(0).expand(B, -1, -1)
     v = v.unsqueeze(0).expand(B, -1, -1)
 
