@@ -4,10 +4,14 @@ SEED=1
 
 TRAJS_PER_OBJ=1000
 
-TASK=set_table
+TASK=prepare_groceries
 SUBTASK=pick
 SPLIT=train
 OBJ=all
+
+# Change according to the task
+ALL_PLAN_COUNT=519
+NUM_ENVS=50
 
 # shellcheck disable=SC2001
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
@@ -47,7 +51,7 @@ args=(
     "algo.log_freq=1"
     "algo.save_freq=1"
     "eval_env.make_env=True"
-    "eval_env.num_envs=50"
+    "eval_env.num_envs=$NUM_ENVS"
     "eval_env.max_episode_steps=200"
     "eval_env.record_video=True"
     "eval_env.info_on_video=True"

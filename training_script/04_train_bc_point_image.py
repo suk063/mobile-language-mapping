@@ -489,10 +489,11 @@ def train(cfg: TrainConfig):
     # Make eval env
     print("Making eval env...")
     eval_envs = make_env(cfg.eval_env, video_path=cfg.logger.eval_video_path)
-    # eval_uids = eval_envs.unwrapped.task_plan[0].composite_subtask_uids
     print("Eval env made.")
 
     eval_obs, _ = eval_envs.reset(seed=cfg.seed + 1_000_000)
+    # MARK: Here we try to save the plan indexes
+    fixed_plan_idxs = eval_envs.unwrapped.task_plan_idxs.clone()
     eval_envs.action_space.seed(cfg.seed + 1_000_000)
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
@@ -565,8 +566,10 @@ def train(cfg: TrainConfig):
         """
         Store env stats in logger (evaluation only).
         """
-        assert key == "eval"
-        log_env = eval_envs
+        if key == "eval":
+            log_env = eval_envs
+        elif key == "eval_all":
+            log_env = eval_envs
         logger.store(
             key,
             return_per_step=common.to_tensor(log_env.return_queue, device=device).float().mean()
@@ -597,6 +600,19 @@ def train(cfg: TrainConfig):
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)
+
+    def run_eval_episode(eval_envs, eval_obs, agent, uid_map):
+        max_steps = eval_envs.max_episode_steps
+
+        for t in range(max_steps):
+            plan0 = eval_envs.unwrapped.task_plan[0]
+            subtask_labels = get_object_labels_batch(uid_map, plan0.composite_subtask_uids).to(device)
+
+            with torch.no_grad():
+                time_step = torch.tensor([t], dtype=torch.int32, device=device).repeat(eval_envs.num_envs)
+                action = agent.forward_policy(eval_obs, subtask_labels, time_step)
+            eval_obs, _, _, _, _ = eval_envs.step(action)
+
 
     for epoch in range(cfg.algo.stage1_epochs):
         global_epoch = logger_start_log_step + epoch
@@ -638,20 +654,68 @@ def train(cfg: TrainConfig):
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
 
-            eval_obs, _ = eval_envs.reset()
-            eval_subtask_labels = get_object_labels_batch(uid_to_label_map, eval_envs.unwrapped.task_plan[0].composite_subtask_uids).to(device)
-            B = eval_subtask_labels.size()
+            # If not last epoch
+            if epoch < (cfg.algo.stage1_epochs - 1):
+                eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+                # DEBUG
+                # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+                run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+                # Final stats
+                if len(eval_envs.return_queue) > 0:
+                    store_env_stats("eval")
+                logger.log(global_epoch)
+                timer.end(key="eval")
+            # For last epoch, run all task plans in chunks
+            else:
+                # For now we run subset like the previous epochs and run eval on all tasks seperately
+                print("Running normal fixed-plan eval for last epoch...")
+                eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+                # DEBUG
+                # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+                run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+                if len(eval_envs.return_queue) > 0:
+                    store_env_stats("eval")
+                logger.log(global_epoch)
 
-            for t in range(eval_envs.max_episode_steps):
-                with torch.no_grad():
-                    time_step = torch.tensor([t], dtype=torch.int32).repeat(B)
-                    action = agent.forward_policy(eval_obs, eval_subtask_labels, time_step)
-                # Stub environment step
-                eval_obs, _, _, _, _ = eval_envs.step(action)
-            if len(eval_envs.return_queue) > 0:
-                store_env_stats("eval")
-            logger.log(global_epoch)
-            timer.end(key="eval")
+                batch_size = eval_envs.num_envs
+                all_plan_count = cfg.eval_env.all_plan_count
+                all_plan_idxs_list = list(range(all_plan_count))
+
+                print("Now running all tasks in chunks...")
+                pbar = tqdm(total=all_plan_count, desc="Evaluating all tasks (last epoch)")
+
+                chunk_start = 0
+                while chunk_start < all_plan_count:
+                    chunk_end = min(chunk_start + batch_size, all_plan_count)
+                    chunk_size = chunk_end - chunk_start
+                    chunk = all_plan_idxs_list[chunk_start:chunk_end]
+
+                    if chunk_size < batch_size:
+                        chunk += [chunk[-1]] * (batch_size - chunk_size)
+
+                    plan_idxs_tensor = torch.tensor(chunk, dtype=torch.int)
+
+                    eval_obs, info = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
+
+                    # DEBUG
+                    # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
+                    #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
+
+                    run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+
+                    chunk_start += batch_size
+                    pbar.update(chunk_size)
+                
+                if len(eval_envs.return_queue) > 0:
+                    store_env_stats("eval_all")
+
+                pbar.close() 
+
+                # Done with all tasks
+                logger.log(global_epoch)
+                timer.end(key="eval")
 
         # Saving
         if check_freq(cfg.algo.save_freq, epoch):
