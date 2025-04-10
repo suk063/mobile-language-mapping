@@ -459,3 +459,37 @@ class TransformerEncoder(nn.Module):
         data = fused_tokens.reshape(B2, -1)
         out = self.post_fusion_mlp(data)  # [B, output_dim]
         return out
+
+class LocalSelfAttentionFusion(nn.Module):
+    """
+    Fuses two feature vectors via self-attention.
+    Each voxel is treated independently as a 2-token sequence.
+    """
+    def __init__(self, feat_dim=120, num_heads=8):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(embed_dim=feat_dim, num_heads=num_heads, batch_first=True)
+        self.layernorm = nn.LayerNorm(feat_dim)
+
+    def forward(self, feat1, feat2):
+        """
+        Args:
+            feat1, feat2: (B, N, feat_dim). 
+              - In typical usage here, N=1 and feat_dim=384.
+        Returns:
+            (B, N, feat_dim): fused feature after 2-token self-attention.
+        """
+        
+        # Stack feat1 and feat2 into a 2-token sequence: (B, N, 2, feat_dim)
+        x = torch.stack([feat1, feat2], dim=2)  # shape: (B, N, 2, feat_dim)
+        B, N, T, D = x.shape  # T=2
+        x = x.view(B*N, T, D)  # (B*N, 2, D)
+
+        # Self-attention on the 2 tokens
+        y, _ = self.mha(x, x, x)
+        y = self.layernorm(y)  # (B*N, 2, D)
+
+        # Average the 2 tokens to get a single feature vector
+        fused = y.mean(dim=1).view(B, N, D)
+        # fused = y[:, 0, :].view(B, N, D)
+        
+        return fused

@@ -210,6 +210,7 @@ class BCConfig:
     num_layers_transformer: int = 4
     num_layers_perceiver: int = 2
     num_learnable_tokens: int = 16
+    pe_level: int = 10
 
     num_eval_envs: int = field(init=False)
 
@@ -584,7 +585,7 @@ def train(cfg: TrainConfig):
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
         hidden_dim=cfg.algo.hidden_dim,
         output_dim=cfg.algo.clip_input_dim,
-        L=10
+        L=cfg.algo.pe_level
     ).to(device)
 
     # Agent
@@ -610,13 +611,13 @@ def train(cfg: TrainConfig):
         print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
         agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device), strict=False)
 
-    # if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
-    #     print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
-    #     static_map.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
+    if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
+        print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
+        static_map.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
 
-    # if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
-    #     print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
-    #     implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
+    if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
+        print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
+        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
 
     voxel_checkpoint = torch.load('pre-trained/hash_voxel.pt', map_location=device)
     decoder_checkpoint = torch.load('pre-trained/implicit_decoder.pt', map_location=device)

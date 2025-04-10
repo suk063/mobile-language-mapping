@@ -4,8 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Local imports
-from ..module.transformer import TransformerEncoder, GlobalPerceiver
-from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, StateProj
+from ..module.transformer import TransformerEncoder, GlobalPerceiver, LocalSelfAttentionFusion
+from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, StateProj, ConcatMLPFusion, VoxelProj
 from lang_mapping.mapper.mapper_delta import VoxelHashTable
 
 from ..utils import get_3d_coordinates, get_visual_features, transform, rotary_pe_3d
@@ -56,7 +56,8 @@ class Agent_global_multistep(nn.Module):
             self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
 
         # Reduce CLIP feature dimension
-        self.clip_dim_reducer = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        self.dim_reducer = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        self.voxel_proj = DimReducer(clip_input_dim, voxel_feature_dim, L=10).to(self.device)
         
         # Transformer for feature fusion
         self.transformer = TransformerEncoder(
@@ -77,8 +78,8 @@ class Agent_global_multistep(nn.Module):
         
         # Action MLP
         action_dim = np.prod(single_act_shape)
-        self.action_mlp = ActionMLP(
-            input_dim=state_mlp_dim * 6,
+        self.action_mlp_multi = ActionMLP(
+            input_dim=state_mlp_dim * 4,
             action_dim=action_dim
         ).to(self.device)
 
@@ -87,6 +88,7 @@ class Agent_global_multistep(nn.Module):
         self.implicit_decoder = implicit_decoder
         
         # self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim, clip_embedding_dim=clip_input_dim)
+        self.feature_fusion_attn = LocalSelfAttentionFusion(feat_dim=clip_input_dim)
 
         self.state_proj_perceiver =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device)   
         self.state_proj_transformer =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device)   
@@ -172,12 +174,14 @@ class Agent_global_multistep(nn.Module):
             self.fx, self.fy, self.cx, self.cy
         )
 
-        # Global voxel query using head position
+        # Global voxel query using each pose
         hand_translation_all = hand_pose_all[:, 0, :3, 3]  # [2B, 3]
         head_translation_all = head_pose_all[:, 0, :3, 3]  # [2B, 3]
         
         valid_coords, valid_feats = self.static_map.get_all_valid_voxel_data() # [N, 3], [N, D]
-        valid_feats_projected, _ = self.implicit_decoder(valid_feats, valid_coords, return_intermediate=True)
+        valid_feats = self.implicit_decoder(valid_feats, valid_coords, return_intermediate=False)
+        
+        valid_feats_projected = self.voxel_proj(valid_feats, valid_coords)
         
         valid_coords_expanded = valid_coords.unsqueeze(0).expand(2*B, -1, -1)  # [2B, N, 3]
         valid_feats_projected_expanded = valid_feats_projected.unsqueeze(0).expand(2*B, -1, -1)
@@ -203,13 +207,13 @@ class Agent_global_multistep(nn.Module):
 
         hand_coords_world_flat_all = hand_coords_world_all.permute(0, 2, 3, 1).reshape(2*B*N, 3)
         feats_hand_flat_all = feats_hand_all.reshape(2*B*N, -1)
-        feats_hand_reduced_flat = self.clip_dim_reducer(feats_hand_flat_all, hand_coords_world_flat_all)
-        feats_hand_reduced_all = feats_hand_reduced_flat.view(2*B, N, -1)
+        # feats_hand_reduced_flat = self.clip_dim_reducer(feats_hand_flat_all, hand_coords_world_flat_all)
+        # feats_hand_reduced_all = feats_hand_reduced_flat.view(2*B, N, -1)
 
         head_coords_world_flat_all = head_coords_world_all.permute(0, 2, 3, 1).reshape(2*B*N, 3)
         feats_head_flat_all = feats_head_all.reshape(2*B*N, -1)
-        feats_head_reduced_flat = self.clip_dim_reducer(feats_head_flat_all, head_coords_world_flat_all)
-        feats_head_reduced_all = feats_head_reduced_flat.view(2*B, N, -1)
+        # feats_head_reduced_flat = self.clip_dim_reducer(feats_head_flat_all, head_coords_world_flat_all)
+        # feats_head_reduced_all = feats_head_reduced_flat.view(2*B, N, -1)
         
         # Query voxel features and cos simeilarity
         with torch.no_grad():
@@ -220,10 +224,10 @@ class Agent_global_multistep(nn.Module):
                 head_coords_world_flat_all, return_indices=False
             )
         
-        voxel_feat_points_hand_flat_proj_all, voxel_feat_points_hand_flat_final_all = self.implicit_decoder(
-            voxel_feat_points_hand_flat_all, hand_coords_world_flat_all, return_intermediate=True)
-        voxel_feat_points_head_flat_proj_all, voxel_feat_points_head_flat_final_all = self.implicit_decoder(
-            voxel_feat_points_head_flat_all, head_coords_world_flat_all, return_intermediate=True)
+        voxel_feat_points_hand_flat_final_all = self.implicit_decoder(
+            voxel_feat_points_hand_flat_all, hand_coords_world_flat_all, return_intermediate=False)
+        voxel_feat_points_head_flat_final_all = self.implicit_decoder(
+            voxel_feat_points_head_flat_all, head_coords_world_flat_all, return_intermediate=False)
         
         cos_sim_hand = F.cosine_similarity(voxel_feat_points_hand_flat_final_all, feats_hand_flat_all, dim=-1)
         cos_loss_hand = 1.0 - cos_sim_hand.mean()  
@@ -232,6 +236,20 @@ class Agent_global_multistep(nn.Module):
         cos_loss_head = 1.0 - cos_sim_head.mean()      
         
         total_cos_loss = cos_loss_hand + cos_loss_head 
+        
+        # Fuse voxel and CLIP features
+        fused_hand_all = self.feature_fusion_attn(
+            voxel_feat_points_hand_flat_final_all.view(2*B, N, -1),
+            feats_hand_flat_all.view(2*B, N, -1),
+        ).reshape(2*B*N, -1)
+        
+        fused_head_all = self.feature_fusion_attn(
+            voxel_feat_points_head_flat_final_all.view(2*B, N, -1),
+            feats_head_flat_all.view(2*B, N, -1),
+        ).reshape(2*B*N, -1)
+        
+        fused_hand_reduced_all = self.dim_reducer(fused_hand_all, hand_coords_world_flat_all).view(2*B, N, -1)
+        fused_head_reduced_all = self.dim_reducer(fused_head_all, head_coords_world_flat_all).view(2*B, N, -1)        
             
         # Text embeddings
         object_labels_all = torch.cat([object_labels, object_labels], dim=0)
@@ -242,8 +260,8 @@ class Agent_global_multistep(nn.Module):
 
         # Transformer forward
         out_transformer_all = self.transformer(
-            hand_token=feats_hand_reduced_all,
-            head_token=feats_head_reduced_all,
+            hand_token=fused_hand_reduced_all,
+            head_token=fused_head_reduced_all,
             coords_hand=hand_coords_world_flat_all.reshape(2*B, N, 3),
             coords_head=head_coords_world_flat_all.reshape(2*B, N, 3),
             state=state_proj_transformer_all, 
@@ -258,10 +276,10 @@ class Agent_global_multistep(nn.Module):
         state_projected_t, state_projected_m1 = torch.split(self.state_mlp(state_all), B, dim=0)
 
         # 9) Build final action_t using (state_t, out_t, out_t-1)
-        state_projected_delta = state_projected_t - state_projected_m1
-        out_transformer_delta = out_transformer_t - out_transformer_m1
+        # state_projected_delta = state_projected_t - state_projected_m1
+        # out_transformer_delta = out_transformer_t - out_transformer_m1
         
-        action_input_t = torch.cat([state_projected_t, state_projected_m1, state_projected_delta, out_transformer_t, out_transformer_m1, out_transformer_delta], dim=-1)
-        action_t = self.action_mlp(action_input_t)
+        action_input_t = torch.cat([state_projected_t, state_projected_m1, out_transformer_t, out_transformer_m1], dim=-1)
+        action_t = self.action_mlp_multi(action_input_t)
 
         return action_t, total_cos_loss
