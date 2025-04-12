@@ -11,7 +11,7 @@ OBJ=all
 
 # Change according to the task
 ALL_PLAN_COUNT=244
-NUM_ENVS=20
+NUM_ENVS=30
 
 # shellcheck disable=SC2001
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"

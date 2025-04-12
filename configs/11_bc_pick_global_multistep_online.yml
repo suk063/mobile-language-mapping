@@ -4,7 +4,7 @@ eval_env:
   make_env: True
 
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 20
+  num_envs: 30
   max_episode_steps: 200
   all_plan_count: 244
  

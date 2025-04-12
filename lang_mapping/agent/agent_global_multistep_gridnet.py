@@ -30,7 +30,7 @@ class ActionTransformerDecoder(nn.Module):
         dim_feedforward: int,
         dropout: float,
         action_dim: int,
-        action_horizon: int = 3,
+        action_horizon: int = 10,
     ):
         super().__init__()
         

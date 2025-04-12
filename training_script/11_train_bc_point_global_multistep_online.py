@@ -700,7 +700,7 @@ def train(cfg: TrainConfig):
     bc_dataset = TempTranslateToPointDataset(
         cfg.algo.data_dir_fp,
         obs_horizon=2,
-        pred_horizon=4,
+        pred_horizon=11,
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
