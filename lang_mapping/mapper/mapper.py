@@ -48,10 +48,10 @@ class VoxelHashTable(nn.Module):
             "used_mask",
             torch.zeros(self.total_voxels, dtype=torch.bool, device=device)
         )
-        self.register_buffer(
-            "valid_grid_coords",
-            torch.empty((29278, 3), device=device)
-        )
+        # self.register_buffer(
+        #     "valid_grid_coords",
+        #     torch.empty((0, 3), device=device)
+        # )
 
     def build_hash_grid(self):
         """

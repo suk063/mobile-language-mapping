@@ -211,7 +211,7 @@ class ImplicitDecoder(nn.Module):
     A simple MLP to decode a 3D coordinate (with positional encoding) and its corresponding
     voxel feature into another feature vector (default 768-D).
     """
-    def __init__(self, voxel_feature_dim=768, hidden_dim=768, output_dim=768, L=0):
+    def __init__(self, voxel_feature_dim=768, hidden_dim=768, output_dim=768, L=10):
         super().__init__()
         self.voxel_feature_dim = voxel_feature_dim
         self.hidden_dim = hidden_dim
@@ -237,7 +237,7 @@ class ImplicitDecoder(nn.Module):
         
         self.apply(init_weights_kaiming)
 
-    def forward(self, voxel_features, coords_3d=None, return_intermediate=False):
+    def forward(self, voxel_features, coords_3d, return_intermediate=False):
         """
         Args:
             voxel_features (Tensor): [N, voxel_feature_dim=768].
@@ -246,21 +246,17 @@ class ImplicitDecoder(nn.Module):
         Returns:
             Tensor: [N, output_dim=768]
         """
-        if coords_3d is not None:
-            pe = positional_encoding(coords_3d, L=self.L)  # [N, pe_dim]
-            x = torch.cat([voxel_features, pe], dim=-1)
-        else:
-            x = voxel_features
-        
+        pe = positional_encoding(coords_3d, L=self.L)  # [N, pe_dim]
+
         # 1) fc1
+        x = torch.cat([voxel_features, pe], dim=-1)
         x = F.relu(self.ln1(self.fc1(x)), inplace=True)
 
         # 2) fc2
         x = F.relu(self.ln2(self.fc2(x)), inplace=True)
 
         # 3) fc3 
-        if coords_3d is not None:
-            x = torch.cat([x, pe], dim=-1)
+        x = torch.cat([x, pe], dim=-1)
         x1 = self.fc3(x)
         x = F.relu(self.ln3(x1), inplace=True)
         
