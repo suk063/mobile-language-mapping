@@ -14,6 +14,13 @@ from ..utils import get_3d_coordinates, get_visual_features, transform, rotary_p
 import open_clip
 
 
+def generate_subsequent_mask(seq_len: int) -> torch.Tensor:
+    mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1) 
+    mask = mask.bool()  # True/False
+    mask = mask.masked_fill(mask, float('-inf')) 
+    return mask
+
+
 class ActionTransformerDecoder(nn.Module):
     def __init__(
         self,
@@ -22,11 +29,12 @@ class ActionTransformerDecoder(nn.Module):
         num_decoder_layers: int,
         dim_feedforward: int,
         dropout: float,
-        action_dim: int
+        action_dim: int,
+        action_horizon: int = 3,
     ):
         super().__init__()
         
-        self.query_embed = nn.Embedding(3, d_model)  # [3, d_model]
+        self.query_embed = nn.Embedding(action_horizon, d_model)  # [3, d_model]
         
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
@@ -38,6 +46,7 @@ class ActionTransformerDecoder(nn.Module):
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
         
         self.action_head = nn.Linear(d_model, action_dim)
+        self.action_horizon = action_horizon
         
     def forward(self, memory, state) -> torch.Tensor:
 
@@ -55,7 +64,13 @@ class ActionTransformerDecoder(nn.Module):
         state = state.permute(1, 0, 2).contiguous()
         tgt = torch.cat([state, query_pos], dim=0)
         
-        decoder_out = self.decoder(tgt=tgt, memory=memory)  # [4, B, d_model]
+        causal_mask = generate_subsequent_mask(self.action_horizon+1).to(memory.device)
+        
+        decoder_out = self.decoder(
+            tgt=tgt,    # [T, B, d_model]
+            memory=memory,      # [N, B, d_model]
+            tgt_mask=causal_mask
+        ) 
         
         decoder_out = decoder_out.permute(1, 0, 2)         # [B, 4, d_model]
         action_out = self.action_head(decoder_out)         # [B, 4, action_dim]
@@ -233,29 +248,29 @@ class Agent_global_multistep_gridnet(nn.Module):
         )
     
         # Global voxel query using each pose
-        hand_translation_all = hand_pose_all[:, 0, :3, 3]  # [2B, 3]
-        head_translation_all = head_pose_all[:, 0, :3, 3]  # [2B, 3]
+        # hand_translation_all = hand_pose_all[:, 0, :3, 3]  # [2B, 3]
+        # head_translation_all = head_pose_all[:, 0, :3, 3]  # [2B, 3]
                 
-        valid_feats = self.static_map.query_feature(self.valid_coords)
+        # valid_feats = self.static_map.query_feature(self.valid_coords)
         
-        valid_feats_projected = self.implicit_decoder(valid_feats, self.valid_coords, return_intermediate=False)
+        # valid_feats_projected = self.implicit_decoder(valid_feats, self.valid_coords, return_intermediate=False)
 
-        valid_feats_projected = self.voxel_proj(valid_feats_projected, self.valid_coords)
+        # valid_feats_projected = self.voxel_proj(valid_feats_projected, self.valid_coords)
 
-        valid_coords_expanded = self.valid_coords.unsqueeze(0).expand(B, -1, -1)  # [2B, N, 3]
-        valid_feats_projected_expanded = valid_feats_projected.unsqueeze(0).expand(B, -1, -1)
+        # valid_coords_expanded = self.valid_coords.unsqueeze(0).expand(B, -1, -1)  # [2B, N, 3]
+        # valid_feats_projected_expanded = valid_feats_projected.unsqueeze(0).expand(B, -1, -1)
         
-        # Project state
-        state_proj_perceiver_all = self.state_proj_perceiver(state_all)
+        # # Project state
+        # state_proj_perceiver_all = self.state_proj_perceiver(state_all)
         
         # 3) Run GlobalPerceiver
-        perceiver_out_all = self.global_perceiver(
-            state=state_proj_perceiver_all,
-            hand_translation_all=hand_translation_all,
-            head_translation_all=head_translation_all,
-            valid_coords=valid_coords_expanded,  
-            valid_feats_projected=valid_feats_projected_expanded 
-        )
+        # perceiver_out_all = self.global_perceiver(
+        #     state=state_proj_perceiver_all,
+        #     hand_translation_all=hand_translation_all,
+        #     head_translation_all=head_translation_all,
+        #     valid_coords=valid_coords_expanded,  
+        #     valid_feats_projected=valid_feats_projected_expanded 
+        # )
         
         # Reduce CLIP dimension for hand/head
         _, C_, Hf, Wf = hand_coords_world_all.shape
@@ -266,13 +281,13 @@ class Agent_global_multistep_gridnet(nn.Module):
 
         hand_coords_world_flat_all = hand_coords_world_all.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_hand_flat_all = feats_hand_all.reshape(B*N, -1)
-        # feats_hand_reduced_flat = self.clip_dim_reducer(feats_hand_flat_all, hand_coords_world_flat_all)
-        # feats_hand_reduced_all = feats_hand_reduced_flat.view(B, N, -1)
+        feats_hand_reduced_flat = self.dim_reducer(feats_hand_flat_all, hand_coords_world_flat_all)
+        feats_hand_reduced_all = feats_hand_reduced_flat.view(B, N, -1)
 
         head_coords_world_flat_all = head_coords_world_all.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_head_flat_all = feats_head_all.reshape(B*N, -1)
-        # feats_head_reduced_flat = self.clip_dim_reducer(feats_head_flat_all, head_coords_world_flat_all)
-        # feats_head_reduced_all = feats_head_reduced_flat.view(B, N, -1)
+        feats_head_reduced_flat = self.dim_reducer(feats_head_flat_all, head_coords_world_flat_all)
+        feats_head_reduced_all = feats_head_reduced_flat.view(B, N, -1)
         
         # Query voxel features and cos simeilarity
         with torch.no_grad():
@@ -293,18 +308,18 @@ class Agent_global_multistep_gridnet(nn.Module):
         total_cos_loss = cos_loss_hand + cos_loss_head 
         
         # Fuse voxel and CLIP features
-        fused_hand_all = self.feature_fusion_attn(
-            voxel_feat_points_hand_flat_final_all.view(B, N, -1),
-            feats_hand_flat_all.view(B, N, -1),
-        ).reshape(B*N, -1)
+        # fused_hand_all = self.feature_fusion_attn(
+        #     voxel_feat_points_hand_flat_final_all.view(B, N, -1),
+        #     feats_hand_flat_all.view(B, N, -1),
+        # ).reshape(B*N, -1)
         
-        fused_head_all = self.feature_fusion_attn(
-            voxel_feat_points_head_flat_final_all.view(B, N, -1),
-            feats_head_flat_all.view(B, N, -1),
-        ).reshape(B*N, -1)
+        # fused_head_all = self.feature_fusion_attn(
+        #     voxel_feat_points_head_flat_final_all.view(B, N, -1),
+        #     feats_head_flat_all.view(B, N, -1),
+        # ).reshape(B*N, -1)
         
-        fused_hand_reduced_all = self.dim_reducer(fused_hand_all, hand_coords_world_flat_all).view(B, N, -1)
-        fused_head_reduced_all = self.dim_reducer(fused_head_all, head_coords_world_flat_all).view(B, N, -1)        
+        # fused_hand_reduced_all = self.dim_reducer(fused_hand_all, hand_coords_world_flat_all).view(B, N, -1)
+        # fused_head_reduced_all = self.dim_reducer(fused_head_all, head_coords_world_flat_all).view(B, N, -1)        
             
         # Text embeddings
         # object_labels_all = torch.cat([object_labels, object_labels], dim=0)
@@ -315,15 +330,15 @@ class Agent_global_multistep_gridnet(nn.Module):
 
         # Transformer forward
         out_transformer_all = self.transformer(
-            hand_token=fused_hand_reduced_all,
-            head_token=fused_head_reduced_all,
+            hand_token=feats_hand_reduced_all,
+            head_token=feats_head_reduced_all,
             coords_hand=hand_coords_world_flat_all.reshape(B, N, 3),
             coords_head=head_coords_world_flat_all.reshape(B, N, 3),
             state=state_proj_transformer_all, 
             text_embeddings=selected_text_reduced_all,
-            perceiver_out_all=perceiver_out_all,
-            hand_translation_all=hand_translation_all,
-            head_translation_all=head_translation_all,
+            # perceiver_out_all=perceiver_out_all,
+            # hand_translation_all=hand_translation_all,
+            # head_translation_all=head_translation_all,
         ) # [B, N, 240]
         
         
