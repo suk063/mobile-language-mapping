@@ -716,7 +716,7 @@ def train(cfg: TrainConfig):
     #     param.requires_grad = False 
     
     
-    alpha = 0.4
+    alpha = 0.3
     time_indices = torch.arange(action_horizon).to(device)           # [0, 1, 2, ..., horizon-1]
     time_weights = torch.exp(-alpha * time_indices)                  # exp(-alpha * i)
     time_weights = time_weights / time_weights.sum()

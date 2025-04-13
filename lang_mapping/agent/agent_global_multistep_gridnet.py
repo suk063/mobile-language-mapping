@@ -302,8 +302,8 @@ class Agent_global_multistep_gridnet(nn.Module):
 
 
         # Reduce CLIP feature dimension
-        self.dim_reducer_hand = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
-        self.dim_reducer_head = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        self.dim_reducer_hand = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
+        self.dim_reducer_head = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
         # self.dim_reducer = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
         self.voxel_proj = DimReducer(clip_input_dim, voxel_feature_dim, L=10).to(self.device)
         
@@ -327,9 +327,9 @@ class Agent_global_multistep_gridnet(nn.Module):
         self.action_dim = np.prod(single_act_shape)
         
         self.action_transformer = ActionTransformerDecoder(
-            d_model=240,             # out_transformer 최종 dim=240이라 가정
+            d_model=240,         
             nhead=8,
-            num_decoder_layers=6,    # 필요에 따라 조정
+            num_decoder_layers=6,   
             dim_feedforward=1024,
             dropout=0.1,
             action_dim=self.action_dim
@@ -352,13 +352,7 @@ class Agent_global_multistep_gridnet(nn.Module):
         self.state_mlp_for_action = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
     
     def forward(self, observations, object_labels):
-        """
-        Forward pass that processes time t and t-1 in a single batch:
-         1) Merge data of t and t-1 to form batch=2B
-         2) Do feature extraction, depth, coordinates, voxel
-         3) Split back into t and t-1
-         4) Compute action_t = MLP(state_t, out_t, out_t-1)
-        """
+
         # 1) Extract data
         hand_rgb_t   = observations["pixels"]["fetch_hand_rgb"]
         head_rgb_t   = observations["pixels"]["fetch_head_rgb"]
@@ -447,7 +441,6 @@ class Agent_global_multistep_gridnet(nn.Module):
             self.fx, self.fy, self.cx, self.cy
         )
     
-    
         # Global voxel query using each pose
         # hand_translation_t = hand_pose_t[:, 0, :3, 3]  # [2B, 3]
         # head_translation_t = head_pose_t[:, 0, :3, 3]  # [2B, 3]
@@ -502,22 +495,22 @@ class Agent_global_multistep_gridnet(nn.Module):
                 
         hand_coords_world_flat_t = hand_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_hand_flat_t = feats_hand_t_gated.reshape(B*N, -1)
-        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_t, hand_coords_world_flat_t)
+        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_t)
         feats_hand_reduced_t = feats_hand_reduced_flat.view(B, N, -1)
 
         head_coords_world_flat_t = head_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_head_flat_t = feats_head_t_gated.reshape(B*N, -1)
-        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_t, head_coords_world_flat_t)
+        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_t)
         feats_head_reduced_t = feats_head_reduced_flat.view(B, N, -1)
         
         hand_coords_world_flat_m1 = hand_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_hand_flat_m1 = feats_hand_m1_gated.reshape(B*N, -1)
-        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_m1, hand_coords_world_flat_m1)
+        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_m1)
         feats_hand_reduced_m1 = feats_hand_reduced_flat.view(B, N, -1)
 
         head_coords_world_flat_m1 = head_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_head_flat_m1 = feats_head_m1_gated.reshape(B*N, -1)
-        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_m1, head_coords_world_flat_m1)
+        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_m1)
         feats_head_reduced_m1 = feats_head_reduced_flat.view(B, N, -1)
         
         # Query voxel features and cos simeilarity
