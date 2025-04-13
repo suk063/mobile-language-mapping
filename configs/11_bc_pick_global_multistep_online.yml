@@ -1,10 +1,10 @@
-seed: 0
+seed: 2
 
 eval_env:
   make_env: True
 
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 30
+  num_envs: 50
   max_episode_steps: 200
   all_plan_count: 244
  
@@ -34,8 +34,8 @@ eval_env:
 algo:
   name: bc
 
-  lr: 3e-4
-  batch_size: 32
+  lr: 5e-5
+  batch_size: 64
   
   epochs: 20
 
@@ -70,7 +70,7 @@ algo:
   cos_loss_weight: 0.01
 
   # Pre-trained Weights
-  pretrained_agent_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_grid_net/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/latest_agent.pt"
+  # pretrained_agent_path: "/home/sunghwan/workspace/mobile_language_mapping/latest_agent.pt"
 
 logger:
   workspace: mshab_exps

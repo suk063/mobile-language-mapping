@@ -272,14 +272,14 @@ class TransformerLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
         
         # Text cross-attention
-        self.cross_attn_text = CrossAttentionLayer(d_model, n_heads, dropout)
-        self.norm3 = nn.LayerNorm(d_model)
-        self.dropout3 = nn.Dropout(dropout)
+        # self.cross_attn_text = CrossAttentionLayer(d_model, n_heads, dropout)
+        # self.norm3 = nn.LayerNorm(d_model)
+        # self.dropout3 = nn.Dropout(dropout)
         
         # Perceiver cross-attention
-        self.cross_attn_perceiver = CrossAttentionLayer(d_model, n_heads, dropout)
-        self.norm4 = nn.LayerNorm(d_model)
-        self.dropout4 = nn.Dropout(dropout)
+        # self.cross_attn_perceiver = CrossAttentionLayer(d_model, n_heads, dropout)
+        # self.norm4 = nn.LayerNorm(d_model)
+        # self.dropout4 = nn.Dropout(dropout)
         
         # Activation
         self.activation = F.gelu
@@ -444,13 +444,13 @@ class TransformerEncoder(nn.Module):
                 coords_cam=coords_cam,
             )
 
-        # start_idx = 0
-        # if state is not None:
-        #     start_idx += 1
-        # if text_embeddings is not None:
-        #     start_idx += 1
-        # if perceiver_out_all is not None:
-        #     start_idx += M
+        start_idx = 0
+        if state is not None:
+            start_idx += 1
+        if text_embeddings is not None:
+            start_idx += 1
+        if perceiver_out_all is not None:
+            start_idx += M
 
         # # fused_tokens = src[:, start_idx:, :]  # [B, (N + ?), input_dim]
         
@@ -458,7 +458,7 @@ class TransformerEncoder(nn.Module):
         
         # data = fused_tokens.reshape(B2, -1)
         # out = self.post_fusion_mlp(data)  # [B, output_dim]
-        return src
+        return src[:, start_idx:, :]
 
 class LocalSelfAttentionFusion(nn.Module):
     """

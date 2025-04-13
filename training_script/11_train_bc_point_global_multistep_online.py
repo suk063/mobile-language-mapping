@@ -122,58 +122,6 @@ def get_object_labels_batch(
             labels.append(object_map[uid])
     return torch.stack(labels, dim=0)
                  
-def merge_t_m1(obs_m1: Dict[str, np.ndarray], obs_t: Dict[str, np.ndarray]):
-    agent_obs = {
-        "state": obs_t["state"],      # t
-        "state_m1": obs_m1["state"],    # t-1
-        "pixels": {
-            "fetch_hand_rgb": obs_t['pixels']["fetch_hand_rgb"],
-            "fetch_hand_rgb_m1": obs_m1['pixels']["fetch_hand_rgb"],
-            "fetch_hand_depth": obs_t['pixels']["fetch_hand_depth"],
-            "fetch_hand_depth_m1": obs_m1['pixels']["fetch_hand_depth"],
-            "fetch_hand_pose": obs_t['pixels']["fetch_hand_pose"],
-            "fetch_hand_pose_m1": obs_m1['pixels']["fetch_hand_pose"],
-
-            "fetch_head_rgb": obs_t['pixels']["fetch_head_rgb"],
-            "fetch_head_rgb_m1": obs_m1['pixels']["fetch_head_rgb"],
-            "fetch_head_depth": obs_t['pixels']["fetch_head_depth"],
-            "fetch_head_depth_m1": obs_m1['pixels']["fetch_head_depth"],
-            "fetch_head_pose": obs_t['pixels']["fetch_head_pose"],
-            "fetch_head_pose_m1": obs_m1['pixels']["fetch_head_pose"],
-        }
-    }
-    return agent_obs
-
-# def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
-#     """
-#     Run a single evaluation episode.
-#     Uses 'prev_obs' and 'current_obs' for merging observations.
-#     """
-#     device = eval_obs["state"].device
-#     max_steps = eval_envs.max_episode_steps
-#     prev_obs = eval_obs  # For the first step, prev_obs = current_obs = reset result
-
-#     # Get subtask info (labels and indices) for the episode
-#     plan0 = eval_envs.unwrapped.task_plan[0]
-#     subtask_labels = get_object_labels_batch(uid_to_label_map, plan0.composite_subtask_uids).to(device)
-
-#     # Batch size (number of parallel evaluation environments)
-#     B = subtask_labels.size(0)
-
-#     for t in range(max_steps):
-#         # Merge observations from time t and t-1
-#         agent_obs = merge_t_m1(prev_obs, eval_obs)
-
-#         with torch.no_grad():
-#             action, _ = agent(agent_obs, subtask_labels)
-
-#         # Environment step
-#         next_obs, _, _, _, _ = eval_envs.step(action[:,0,:])
-#         prev_obs = eval_obs
-#         eval_obs = next_obs
-
-#     return eval_obs
-
 @dataclass
 class BCConfig:
     name: str = "bc"
@@ -212,6 +160,7 @@ class BCConfig:
     num_layers_perceiver: int = 2
     num_learnable_tokens: int = 16
     pe_level: int = 10
+    action_horizon: int = 5
 
     num_eval_envs: int = field(init=False)
 
@@ -333,7 +282,7 @@ class DPDataset(ClosableDataset):
 
                 if truncate_trajectories_at_success:
                     success: List[bool] = f[k]["success"][:].tolist()
-                    success_cutoff = min(success.index(True) + 10, len(success))
+                    success_cutoff = min(success.index(True), len(success))
                     del success
                 else:
                     # success_cutoff = len(act)
@@ -519,36 +468,27 @@ class TempTranslateToPointDataset(DPDataset):
         # NOTE (arth): reformat DPDataset obs to work with current train code
 
         state_obs = item["observations"]["state"]
-        assert state_obs.size(0) == 2
-        state_obs = {"state_m1": state_obs[0], "state": state_obs[1]}
+        state_obs = {"state": state_obs[0]}
 
         pixel_obs = {
-            "fetch_hand_depth_m1": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][1].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb_m1": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth_m1": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth": item["observations"]["fetch_head_depth"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb_m1": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][1].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose_m1": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose_m1": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose": item["observations"]["fetch_head_pose"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
         }
 
         obs = {**state_obs, "pixels": pixel_obs}
 
         # NOTE (arth): we use start act and step_num since we use o_t and o_{t+1} for scene flow est
         
-        act = item["actions"][1:,:] # [1:] to remove the first action
-    
-        step_num = self.slices[index][2]
+        act = item["actions"] 
 
         subtask_uid = item["subtask_uid"]
         traj_idx = item["traj_idx"]
 
-        return (obs, act, subtask_uid, step_num, traj_idx)
+        return (obs, act, subtask_uid, traj_idx)
 
 def train(cfg: TrainConfig):
     # Seed
@@ -571,6 +511,7 @@ def train(cfg: TrainConfig):
     eval_obs, _ = eval_envs.reset(seed=cfg.seed + 1_000_000)
     # MARK: Here we try to save the plan indexes
     fixed_plan_idxs = eval_envs.unwrapped.task_plan_idxs.clone()
+    
     eval_envs.action_space.seed(cfg.seed + 1_000_000)
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
@@ -621,9 +562,6 @@ def train(cfg: TrainConfig):
 
     from lang_mapping.grid_net import GridNet
     static_map = GridNet(cfg=grid_cfg, device=device)
-
-    # import pdb
-    # pdb.set_trace()
     
     # Agent
     agent = Agent_global_multistep_gridnet(
@@ -688,19 +626,14 @@ def train(cfg: TrainConfig):
         torch.save(optimizer.state_dict(), optim_path)
 
     
-    # logger.print(
-    #     f"BC Dataset: {len(bc_dataset)} samples "
-    #     f"({cfg.algo.trajs_per_obj} trajs/obj) for "
-    #     f"{len(bc_dataset.obj_names_in_loaded_order)} objects",
-    #     flush=True,
-    # )
     assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
+    action_horizon = cfg.algo.action_horizon
     
     # Create BC dataset and dataloader
     bc_dataset = TempTranslateToPointDataset(
         cfg.algo.data_dir_fp,
-        obs_horizon=2,
-        pred_horizon=11,
+        obs_horizon=1,
+        pred_horizon=action_horizon,
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
@@ -753,20 +686,48 @@ def train(cfg: TrainConfig):
     # for name, param in agent.implicit_decoder.named_parameters():
     #     param.requires_grad = False 
     
+    
+    # alpha = 0.25
+    # time_indices = torch.arange(action_horizon).to(device)           # [0, 1, 2, ..., horizon-1]
+    # time_weights = torch.exp(-alpha * time_indices)                  # exp(-alpha * i)
+    # time_weights = time_weights / time_weights.sum()
+    # time_weights = time_weights.view(1, action_horizon, 1)
+
+    # def run_eval_episode(eval_envs, eval_obs, agent, uid_map):
+    #     max_steps = eval_envs.max_episode_steps
+
+    #     for t in range(max_steps):
+    #         plan0 = eval_envs.unwrapped.task_plan[0]
+    #         subtask_labels = get_object_labels_batch(uid_map, plan0.composite_subtask_uids).to(device)
+
+    #         with torch.no_grad():
+    #             time_step = torch.tensor([t], dtype=torch.int32, device=device).repeat(eval_envs.num_envs)
+    #             action, _ = agent(eval_obs, subtask_labels)
+    #         eval_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])
+
     def run_eval_episode(eval_envs, eval_obs, agent, uid_map):
         max_steps = eval_envs.max_episode_steps
-
-        for t in range(max_steps):
-            plan0 = eval_envs.unwrapped.task_plan[0]
-            subtask_labels = get_object_labels_batch(uid_map, plan0.composite_subtask_uids).to(device)
-
-            with torch.no_grad():
-                time_step = torch.tensor([t], dtype=torch.int32, device=device).repeat(eval_envs.num_envs)
-                action, _ = agent(eval_obs, subtask_labels)
-            eval_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])
+        plan0 = eval_envs.unwrapped.task_plan[0]
+        subtask_labels = get_object_labels_batch(uid_map, plan0.composite_subtask_uids).to(device)
+        agent.eval()
+    
+        while len(eval_envs.return_queue) < cfg.algo.num_eval_envs:
+            action, _  = agent(eval_obs, subtask_labels)
+            action = action.detach()
+                      
+            for i in range(action.shape[1]):
+                eval_obs, rew, terminated, truncated, info = eval_envs.step(
+                    action[:, i, :]
+                )
+                if truncated.any():
+                    break
+            if truncated.any():
+                assert (
+                    truncated.all() == truncated.any()
+                ), "all episodes should truncate at the same time for fair evaluation with other algorithms"
 
     params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
-    optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
+    optimizer = torch.optim.AdamW(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)
 
@@ -777,16 +738,19 @@ def train(cfg: TrainConfig):
         tot_loss, n_samples = 0, 0
         agent.train()
 
-        for obs, act, subtask_uids, step_nums, traj_idx in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
+        for obs, act, subtask_uids, traj_idx in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
-            subtask_indices = map_uids_to_indices_tensor(subtask_uids, uid2index_map).to(device)
-
+            
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
             pi, total_cos_loss = agent(obs, subtask_labels)
             cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
-            bc_loss = F.mse_loss(pi, act)
+            # bc_loss = F.mse_loss(pi, act, reduction='none')
+            bc_loss = F.l1_loss(pi, act)
             
+            # weighted_bc_loss = raw_bc_loss * time_weights
+            # bc_loss = 10 * weighted_bc_loss.mean()
+        
             loss = bc_loss
 
             optimizer.zero_grad()

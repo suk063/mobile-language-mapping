@@ -20,6 +20,20 @@ def generate_subsequent_mask(seq_len: int) -> torch.Tensor:
     mask = mask.masked_fill(mask, float('-inf')) 
     return mask
 
+class CrossAttention(nn.Module):
+    def __init__(self, d_model=768, nhead=8):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+
+    def forward(self, query_feats, context_feats):
+        attn_out, attn_weights = self.mha(
+            query=query_feats,
+            key=context_feats,
+            value=context_feats
+        )
+
+        attn_out = query_feats + attn_out
+        return attn_out, attn_weights
 
 class ActionTransformerDecoder(nn.Module):
     def __init__(
@@ -30,7 +44,7 @@ class ActionTransformerDecoder(nn.Module):
         dim_feedforward: int,
         dropout: float,
         action_dim: int,
-        action_horizon: int = 10,
+        action_horizon: int = 5,
     ):
         super().__init__()
         
@@ -54,7 +68,6 @@ class ActionTransformerDecoder(nn.Module):
 
         B, N, d_model = memory.shape
   
-        
         # memory = memory.view(B, fs*N, d_model)             # [B, 2*N, d_model]
         memory = memory.permute(1, 0, 2).contiguous()     # [N, B, d_model]
         
@@ -117,11 +130,15 @@ class Agent_global_multistep_gridnet(nn.Module):
         text_tokens = self.tokenizer(text_input).to(self.device)
         self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
         with torch.no_grad():
-            text_embeddings = self.clip_model.encode_text(text_tokens)
-            self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
+            self.text_embeddings = self.clip_model.encode_text(text_tokens)
+
+        self.cross_attn_hand = CrossAttention(d_model=clip_input_dim, nhead=8)
+        self.cross_attn_head = CrossAttention(d_model=clip_input_dim, nhead=8)
 
         # Reduce CLIP feature dimension
-        self.dim_reducer = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        self.dim_reducer_hand = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        self.dim_reducer_head = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        # self.dim_reducer = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
         self.voxel_proj = DimReducer(clip_input_dim, voxel_feature_dim, L=10).to(self.device)
         
         # Transformer for feature fusion
@@ -278,15 +295,25 @@ class Agent_global_multistep_gridnet(nn.Module):
 
         feats_hand_all = hand_visfeat_all.permute(0, 2, 3, 1).reshape(B, N, -1)
         feats_head_all = head_visfeat_all.permute(0, 2, 3, 1).reshape(B, N, -1)
-
+        
+        text_embed_batch = self.text_embeddings[object_labels, :].unsqueeze(1)
+        feats_hand_all_attn, attn_weights_hand = self.cross_attn_hand(
+            query_feats=feats_hand_all,
+            context_feats=text_embed_batch
+        )
+        feats_head_all_attn, attn_weights_head = self.cross_attn_head(
+            query_feats=feats_head_all,
+            context_feats=text_embed_batch
+        )
+        
         hand_coords_world_flat_all = hand_coords_world_all.permute(0, 2, 3, 1).reshape(B*N, 3)
-        feats_hand_flat_all = feats_hand_all.reshape(B*N, -1)
-        feats_hand_reduced_flat = self.dim_reducer(feats_hand_flat_all, hand_coords_world_flat_all)
+        feats_hand_flat_all = feats_hand_all_attn.reshape(B*N, -1)
+        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_all, hand_coords_world_flat_all)
         feats_hand_reduced_all = feats_hand_reduced_flat.view(B, N, -1)
 
         head_coords_world_flat_all = head_coords_world_all.permute(0, 2, 3, 1).reshape(B*N, 3)
-        feats_head_flat_all = feats_head_all.reshape(B*N, -1)
-        feats_head_reduced_flat = self.dim_reducer(feats_head_flat_all, head_coords_world_flat_all)
+        feats_head_flat_all = feats_head_all_attn.reshape(B*N, -1)
+        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_all, head_coords_world_flat_all)
         feats_head_reduced_all = feats_head_reduced_flat.view(B, N, -1)
         
         # Query voxel features and cos simeilarity
@@ -323,8 +350,8 @@ class Agent_global_multistep_gridnet(nn.Module):
             
         # Text embeddings
         # object_labels_all = torch.cat([object_labels, object_labels], dim=0)
-        text_emb_reduced = self.text_proj(self.text_embeddings)
-        selected_text_reduced_all = text_emb_reduced[object_labels, :]
+        # text_emb_reduced = self.text_proj(self.text_embeddings)
+        # selected_text_reduced_all = text_emb_reduced[object_labels, :]
 
         state_proj_transformer_all = self.state_proj_transformer(state_all)
 
@@ -335,7 +362,7 @@ class Agent_global_multistep_gridnet(nn.Module):
             coords_hand=hand_coords_world_flat_all.reshape(B, N, 3),
             coords_head=head_coords_world_flat_all.reshape(B, N, 3),
             state=state_proj_transformer_all, 
-            text_embeddings=selected_text_reduced_all,
+            # text_embeddings=selected_text_reduced_all,
             # perceiver_out_all=perceiver_out_all,
             # hand_translation_all=hand_translation_all,
             # head_translation_all=head_translation_all,

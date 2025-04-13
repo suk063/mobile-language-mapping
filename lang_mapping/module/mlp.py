@@ -331,7 +331,7 @@ class DimReducer(nn.Module):
         
         self.apply(init_weights_kaiming)
 
-    def forward(self, feat, coords_3d):
+    def forward(self, x, coords_3d=None):
         """
         Args:
             voxel_feat: (N, voxel_feature_dim)
@@ -339,8 +339,9 @@ class DimReducer(nn.Module):
         Returns:
             projected:  (N, voxel_feature_dim)
         """
-        pe = positional_encoding(coords_3d, L=self.L)  # (N, 2*L*3)
-        x = torch.cat([feat, pe], dim=-1)
+        if coords_3d is not None:
+            pe = positional_encoding(coords_3d, L=self.L)  # (N, 2*L*3)
+            x = torch.cat([x, pe], dim=-1)
         out = self.mlp(x)
         return out
 
