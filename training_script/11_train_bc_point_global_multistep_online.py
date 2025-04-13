@@ -36,6 +36,28 @@ from mshab.utils.dataset import ClosableDataLoader, ClosableDataset
 from mshab.utils.logger import Logger, LoggerConfig
 from mshab.utils.time import NonOverlappingTimeProfiler
 
+def merge_t_m1(obs_m1: Dict[str, np.ndarray], obs_t: Dict[str, np.ndarray]):
+    agent_obs = {
+        "state": obs_t["state"],      # t
+        "state_m1": obs_m1["state"],    # t-1
+        "pixels": {
+            "fetch_hand_rgb": obs_t['pixels']["fetch_hand_rgb"],
+            "fetch_hand_rgb_m1": obs_m1['pixels']["fetch_hand_rgb"],
+            "fetch_hand_depth": obs_t['pixels']["fetch_hand_depth"],
+            "fetch_hand_depth_m1": obs_m1['pixels']["fetch_hand_depth"],
+            "fetch_hand_pose": obs_t['pixels']["fetch_hand_pose"],
+            "fetch_hand_pose_m1": obs_m1['pixels']["fetch_hand_pose"],
+
+            "fetch_head_rgb": obs_t['pixels']["fetch_head_rgb"],
+            "fetch_head_rgb_m1": obs_m1['pixels']["fetch_head_rgb"],
+            "fetch_head_depth": obs_t['pixels']["fetch_head_depth"],
+            "fetch_head_depth_m1": obs_m1['pixels']["fetch_head_depth"],
+            "fetch_head_pose": obs_t['pixels']["fetch_head_pose"],
+            "fetch_head_pose_m1": obs_m1['pixels']["fetch_head_pose"],
+        }
+    }
+    return agent_obs
+
 def build_uid_mapping(task_plan_path: str):
     """
     Reads all composite_subtask_uids from the task_plan file located at task_plan_path,
@@ -160,7 +182,7 @@ class BCConfig:
     num_layers_perceiver: int = 2
     num_learnable_tokens: int = 16
     pe_level: int = 10
-    action_horizon: int = 5
+    action_horizon: int = 16
 
     num_eval_envs: int = field(init=False)
 
@@ -468,22 +490,29 @@ class TempTranslateToPointDataset(DPDataset):
         # NOTE (arth): reformat DPDataset obs to work with current train code
 
         state_obs = item["observations"]["state"]
-        state_obs = {"state": state_obs[0]}
-
+        assert state_obs.size(0) == 2
+        state_obs = {"state_m1": state_obs[0], "state": state_obs[1]}
+        
         pixel_obs = {
-            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_depth_m1": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb_m1": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth_m1": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_depth": item["observations"]["fetch_head_depth"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb_m1": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][1].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose_m1": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][1].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose_m1": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
+            "fetch_head_pose": item["observations"]["fetch_head_pose"][1].squeeze(-1).unsqueeze(0),
         }
 
         obs = {**state_obs, "pixels": pixel_obs}
 
         # NOTE (arth): we use start act and step_num since we use o_t and o_{t+1} for scene flow est
         
-        act = item["actions"] 
+        act = item["actions"][1:] 
 
         subtask_uid = item["subtask_uid"]
         traj_idx = item["traj_idx"]
@@ -632,8 +661,8 @@ def train(cfg: TrainConfig):
     # Create BC dataset and dataloader
     bc_dataset = TempTranslateToPointDataset(
         cfg.algo.data_dir_fp,
-        obs_horizon=1,
-        pred_horizon=action_horizon,
+        obs_horizon=2,
+        pred_horizon=action_horizon+1,
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
@@ -687,11 +716,41 @@ def train(cfg: TrainConfig):
     #     param.requires_grad = False 
     
     
-    # alpha = 0.25
-    # time_indices = torch.arange(action_horizon).to(device)           # [0, 1, 2, ..., horizon-1]
-    # time_weights = torch.exp(-alpha * time_indices)                  # exp(-alpha * i)
-    # time_weights = time_weights / time_weights.sum()
-    # time_weights = time_weights.view(1, action_horizon, 1)
+    alpha = 0.4
+    time_indices = torch.arange(action_horizon).to(device)           # [0, 1, 2, ..., horizon-1]
+    time_weights = torch.exp(-alpha * time_indices)                  # exp(-alpha * i)
+    time_weights = time_weights / time_weights.sum()
+    time_weights = time_weights.view(1, action_horizon, 1)
+
+    def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
+        """
+        Run a single evaluation episode.
+        Uses 'prev_obs' and 'current_obs' for merging observations.
+        """
+        device = eval_obs["state"].device
+        max_steps = eval_envs.max_episode_steps
+        prev_obs = eval_obs  # For the first step, prev_obs = current_obs = reset result
+
+        # Get subtask info (labels and indices) for the episode
+        plan0 = eval_envs.unwrapped.task_plan[0]
+        subtask_labels = get_object_labels_batch(uid_to_label_map, plan0.composite_subtask_uids).to(device)
+
+        # Batch size (number of parallel evaluation environments)
+        B = subtask_labels.size(0)
+
+        for t in range(max_steps):
+            # Merge observations from time t and t-1
+            agent_obs = merge_t_m1(prev_obs, eval_obs)
+
+            with torch.no_grad():
+                action, _ = agent(agent_obs, subtask_labels)
+
+            # Environment step
+            next_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])
+            prev_obs = eval_obs
+            eval_obs = next_obs
+
+        return eval_obs
 
     # def run_eval_episode(eval_envs, eval_obs, agent, uid_map):
     #     max_steps = eval_envs.max_episode_steps
@@ -705,26 +764,26 @@ def train(cfg: TrainConfig):
     #             action, _ = agent(eval_obs, subtask_labels)
     #         eval_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])
 
-    def run_eval_episode(eval_envs, eval_obs, agent, uid_map):
-        max_steps = eval_envs.max_episode_steps
-        plan0 = eval_envs.unwrapped.task_plan[0]
-        subtask_labels = get_object_labels_batch(uid_map, plan0.composite_subtask_uids).to(device)
-        agent.eval()
+    # def run_eval_episode(eval_envs, eval_obs, agent, uid_map):
+    #     max_steps = eval_envs.max_episode_steps
+    #     plan0 = eval_envs.unwrapped.task_plan[0]
+    #     subtask_labels = get_object_labels_batch(uid_map, plan0.composite_subtask_uids).to(device)
+    #     agent.eval()
     
-        while len(eval_envs.return_queue) < cfg.algo.num_eval_envs:
-            action, _  = agent(eval_obs, subtask_labels)
-            action = action.detach()
+    #     while len(eval_envs.return_queue) < cfg.algo.num_eval_envs:
+    #         action, _  = agent(eval_obs, subtask_labels)
+    #         action = action.detach()
                       
-            for i in range(action.shape[1]):
-                eval_obs, rew, terminated, truncated, info = eval_envs.step(
-                    action[:, i, :]
-                )
-                if truncated.any():
-                    break
-            if truncated.any():
-                assert (
-                    truncated.all() == truncated.any()
-                ), "all episodes should truncate at the same time for fair evaluation with other algorithms"
+    #         for i in range(action.shape[1]):
+    #             eval_obs, rew, terminated, truncated, info = eval_envs.step(
+    #                 action[:, i, :]
+    #             )
+    #             if truncated.any():
+    #                 break
+    #         if truncated.any():
+    #             assert (
+    #                 truncated.all() == truncated.any()
+    #             ), "all episodes should truncate at the same time for fair evaluation with other algorithms"
 
     params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.AdamW(params_to_optimize, lr=cfg.algo.lr)
@@ -744,12 +803,12 @@ def train(cfg: TrainConfig):
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
             pi, total_cos_loss = agent(obs, subtask_labels)
-            cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
-            # bc_loss = F.mse_loss(pi, act, reduction='none')
-            bc_loss = F.l1_loss(pi, act)
+            # cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
+            bc_loss = F.smooth_l1_loss(pi, act, reduction='none')
+            # bc_loss = F.l1_loss(pi, act)
             
-            # weighted_bc_loss = raw_bc_loss * time_weights
-            # bc_loss = 10 * weighted_bc_loss.mean()
+            weighted_bc_loss = bc_loss * time_weights
+            bc_loss = 10 * weighted_bc_loss.mean()
         
             loss = bc_loss
 
@@ -762,7 +821,7 @@ def train(cfg: TrainConfig):
             global_step += 1
 
             writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
-            writer.add_scalar("cos Loss/Iteration", cos_loss.item(), global_step)
+            # writer.add_scalar("cos Loss/Iteration", cos_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)

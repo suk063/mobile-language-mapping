@@ -35,7 +35,7 @@ algo:
   name: bc
 
   lr: 5e-5
-  batch_size: 64
+  batch_size: 32
   
   epochs: 20
 
