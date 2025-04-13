@@ -192,7 +192,7 @@ class TransformerEncoder(nn.Module):
                 coords_src=coords_src,
             )
 
-        start_idx = 1 + 512 + 1 # 1 for state, 512 for m1, 1 for state
+        start_idx = 1 + 512 # 1 for state, 512 for m1, 1 for state
 
         return src[:, start_idx:, :]
 
@@ -229,7 +229,6 @@ class ActionTransformerDecoder(nn.Module):
 
         B, N, d_model = memory.shape
   
-        
         # memory = memory.view(B, fs*N, d_model)             # [B, 2*N, d_model]
         memory = memory.permute(1, 0, 2).contiguous()     # [N, B, d_model]
         
