@@ -573,14 +573,14 @@ def train(cfg: TrainConfig):
     }
 
     # VoxelHashTable and ImplicitDecoder
-    # static_map = VoxelHashTable(
-    #     resolution=cfg.algo.resolution,
-    #     hash_table_size=cfg.algo.hash_table_size,
-    #     feature_dim=cfg.algo.voxel_feature_dim,
-    #     scene_bound_min=tuple(cfg.algo.scene_bound_min),
-    #     scene_bound_max=tuple(cfg.algo.scene_bound_max),
-    #     device=device
-    # ).to(device)
+    static_map = VoxelHashTable(
+        resolution=cfg.algo.resolution,
+        hash_table_size=cfg.algo.hash_table_size,
+        feature_dim=cfg.algo.voxel_feature_dim,
+        scene_bound_min=tuple(cfg.algo.scene_bound_min),
+        scene_bound_max=tuple(cfg.algo.scene_bound_max),
+        device=device
+    ).to(device)
     
     implicit_decoder = ImplicitDecoder(
         voxel_feature_dim=cfg.algo.voxel_feature_dim,
@@ -589,8 +589,8 @@ def train(cfg: TrainConfig):
         L=cfg.algo.pe_level
     ).to(device)
 
-    from lang_mapping.grid_net import GridNet
-    static_map = GridNet(cfg=grid_cfg, device=device)
+    # from lang_mapping.grid_net import GridNet
+    # static_map = GridNet(cfg=grid_cfg, device=device)
     
     # Agent
     agent = Agent_global_multistep_gridnet(
@@ -615,13 +615,13 @@ def train(cfg: TrainConfig):
         print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
         agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device), strict=False)
 
-    # if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
-    #     print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
-    #     static_map.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
+    if cfg.algo.pretrained_voxel_path is not None and os.path.exists(cfg.algo.pretrained_voxel_path):
+        print(f"[INFO] Loading pretrained voxel from {cfg.algo.pretrained_voxel_path}")
+        static_map.load_state_dict(torch.load(cfg.algo.pretrained_voxel_path, map_location=device), strict=False)
 
-    # if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
-    #     print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
-    #     implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
+    if cfg.algo.pretrained_implicit_path is not None and os.path.exists(cfg.algo.pretrained_implicit_path):
+        print(f"[INFO] Loading pretrained implicit decoder from {cfg.algo.pretrained_implicit_path}")
+        implicit_decoder.load_state_dict(torch.load(cfg.algo.pretrained_implicit_path, map_location=device), strict=True)
 
     # voxel_checkpoint = torch.load('pre-trained/hash_voxel.pt', map_location=device)
     # decoder_checkpoint = torch.load('pre-trained/implicit_decoder.pt', map_location=device)
@@ -636,10 +636,10 @@ def train(cfg: TrainConfig):
     #     loaded_param = decoder_checkpoint['model'][name]
     #     verify_load(param.data, loaded_param, f"implicit_decoder.{name}")
     
-    # buffers = torch.load('voxel_buffers.pt')
+    buffers = torch.load('voxel_buffers.pt')
     
-    # static_map.used_mask = buffers['used_mask'].to(static_map.device)
-    # static_map.valid_grid_coords = buffers['valid_grid_coords'].to(static_map.device)
+    static_map.used_mask = buffers['used_mask'].to(static_map.device)
+    static_map.valid_grid_coords = buffers['valid_grid_coords'].to(static_map.device)
     
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -803,14 +803,14 @@ def train(cfg: TrainConfig):
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 
             pi, total_cos_loss = agent(obs, subtask_labels)
-            # cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
+            cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
             bc_loss = F.smooth_l1_loss(pi, act, reduction='none')
             # bc_loss = F.l1_loss(pi, act)
             
             weighted_bc_loss = bc_loss * time_weights
             bc_loss = 10 * weighted_bc_loss.mean()
         
-            loss = bc_loss
+            loss = bc_loss + cos_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -821,7 +821,7 @@ def train(cfg: TrainConfig):
             global_step += 1
 
             writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
-            # writer.add_scalar("cos Loss/Iteration", cos_loss.item(), global_step)
+            writer.add_scalar("cos Loss/Iteration", cos_loss.item(), global_step)
 
         avg_loss = tot_loss / n_samples
         loss_logs = dict(loss=avg_loss)

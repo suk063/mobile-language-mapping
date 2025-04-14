@@ -14,6 +14,175 @@ from ..utils import get_3d_coordinates, get_visual_features, transform, rotary_p
 import open_clip
 import math
 
+class PerceiverAttentionLayer(nn.Module):
+    def __init__(
+        self, 
+        dim: int = 256, 
+        nhead: int = 8, 
+        dim_feedforward: int = 1024, 
+        dropout: float = 0.1
+    ):
+        super().__init__()
+        self.dim = dim
+        self.nhead = nhead
+        self.head_dim = dim // nhead
+
+        assert dim % nhead == 0, "dim must be divisible by nhead"
+
+        # Linear projections for Q, K, V
+        self.W_q = nn.Linear(dim, dim)
+        self.W_k = nn.Linear(dim, dim)
+        self.W_v = nn.Linear(dim, dim)
+
+        # Output projection after attention
+        self.out_proj = nn.Linear(dim, dim)
+
+        # Feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim_feedforward),
+            nn.GELU(),
+            nn.Linear(dim_feedforward, dim),
+        )
+
+        # LayerNorm layers
+        self.ln1 = nn.LayerNorm(dim)
+        self.ln2 = nn.LayerNorm(dim)
+
+        # Dropouts
+        self.dropout_attn = nn.Dropout(dropout)
+        self.dropout_ff = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        coords_q: torch.Tensor = None,
+        coords_kv: torch.Tensor = None
+    ) -> torch.Tensor:
+        B, Q_len, _ = q.shape
+        _, KV_len, _ = k.shape
+
+        # Linear projection
+        q_proj = self.W_q(q).view(B, Q_len, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, Q_len, head_dim]
+        k_proj = self.W_k(k).view(B, KV_len, self.nhead, self.head_dim).transpose(1, 2) # [B, nhead, KV_len, head_dim]
+        v_proj = self.W_v(v).view(B, KV_len, self.nhead, self.head_dim).transpose(1, 2) # [B, nhead, KV_len, head_dim]
+
+        # Apply Rotary Positional Embedding if provided
+        if coords_q is not None:
+            q_proj = rotary_pe_3d(q_proj, coords_q)
+        if coords_kv is not None:
+            k_proj = rotary_pe_3d(k_proj, coords_kv)
+
+        # 3) Scaled dot-product attention
+        scores = torch.matmul(q_proj, k_proj.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_output = torch.matmul(attn_weights, v_proj)
+
+        # Combine heads back into single tensor
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, Q_len, self.dim)
+
+        # 5) Residual + Norm
+        out = self.out_proj(attn_output)
+        x = self.ln1(q + self.dropout_attn(out))
+
+        # 6) Feed-forward
+        ffn_out = self.ffn(x)
+        x = self.ln2(x + self.dropout_ff(ffn_out))
+
+        return x
+
+class GlobalPerceiver(nn.Module):
+    """
+    - Query: state_projected -> shape [B, 1, hidden_dim]
+    - Key/Value: derived from valid_feats -> implicit_decoder -> [B, N, hidden_dim]
+    - coords_q: head_translation -> [B, 1, 3]
+    - coords_kv: valid_coords -> [B, N, 3]
+    """
+    def __init__(
+        self,
+        input_dim: int = 240,
+        nhead: int = 8,
+        num_layers: int = 2,
+        hidden_dim: int = 1024,
+        out_dim: int = 240,
+        num_learnable_tokens: int = 16,
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.num_layers = num_layers
+        self.nhead = nhead
+
+        # Learnable tokens (2 tokens = hand, head)
+        self.num_learnable_tokens = num_learnable_tokens
+        self.global_tokens = nn.Parameter(torch.zeros(1, self.num_learnable_tokens, input_dim))
+        nn.init.xavier_uniform_(self.global_tokens)
+
+        # Perceiver cross-attn layers
+        self.layers = nn.ModuleList([
+            PerceiverAttentionLayer(dim=input_dim, nhead=nhead, dim_feedforward=hidden_dim)
+            for _ in range(num_layers)
+        ])
+
+        # projection
+        self.out_proj = nn.Linear(input_dim, out_dim)
+        self.apply(init_weights_kaiming)
+
+    def forward(
+        self,
+        state,                     # [B, hidden_dim]
+        hand_translation_t: torch.Tensor,  # [B, 3]
+        head_translation_t: torch.Tensor,  # [B, 3]
+        valid_coords: torch.Tensor,          # [B, N, 3]
+        valid_feats_projected: torch.Tensor            # [B, N, feat_dim]
+    ) -> torch.Tensor:
+        """
+        Args:
+            hand_translation_all: [B, 3]
+            head_translation_all: [B, 3]
+            valid_coords:         [B, N, 3]
+            valid_feats:          [B, N, feat_dim]
+        Returns:
+            out: [B, 16, out_dim]
+        """
+        B2, N, _ = valid_feats_projected.shape
+
+        # (1) state token
+        state_token = state.unsqueeze(1)  # [B,1,hidden_dim]
+        coords_state = torch.zeros(B2, 1, 3, device=state.device)
+
+        # (2) learnable tokens
+        global_tokens = self.global_tokens.repeat(B2, 1, 1)  # [B,num_learnable_tokens,input_dim]
+        hand_coords = hand_translation_t.unsqueeze(1).repeat(1, self.num_learnable_tokens // 2, 1)  # [B,8,3]
+        head_coords = head_translation_t.unsqueeze(1).repeat(1, self.num_learnable_tokens // 2, 1)  # [B,8,3]
+        
+        coords_learned = torch.cat([hand_coords, head_coords], dim=1)  # [B,2,3]
+
+        # Combine them: total Q_len=3
+        q = torch.cat([state_token, global_tokens], dim=1)      
+        coords_q = torch.cat([coords_state, coords_learned], dim=1)
+
+        # K, V
+        k = valid_feats_projected
+        v = valid_feats_projected
+        coords_kv = valid_coords
+        
+        # (4) Pass through cross-attention layers
+        x = q
+        for layer in self.layers:
+            x = layer(
+                q=x,
+                k=k,
+                v=v,
+                coords_q=coords_q,
+                coords_kv=coords_kv
+            )
+        # x shape: [B,3,hidden_dim]
+        # The first token (index=0) is the state token; we only want the 2 learned tokens
+        # => [B,2,hidden_dim], then apply out_proj
+        out_tokens = x[:, 1:, :]
+        out = self.out_proj(out_tokens)  # [B, 16,out_dim]
+        return out   
 
 def generate_subsequent_mask(seq_len: int) -> torch.Tensor:
     mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1) 
@@ -27,11 +196,23 @@ def init_weights_kaiming(m):
         if m.bias is not None:
             nn.init.constant_(m.bias, 0.0)
 
-def make_causal_mask(seq_len, len_m1, device):
-    causal_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1)
-    causal_mask[:len_m1, len_m1:] = True
-
-    return causal_mask  # (S, S) 크기
+def make_casual_mask(
+    seq_len: int, 
+    len_perceiver: int, 
+    len_m1: int, 
+    device: torch.device
+) -> torch.BoolTensor:
+    mask = torch.triu(
+        torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), 
+        diagonal=1
+    )
+    
+    if len_m1 > 0:
+        start_m1 = len_perceiver
+        end_m1   = len_perceiver + len_m1
+        mask[start_m1:end_m1, end_m1:] = True
+    
+    return mask
 
 class TransformerLayer(nn.Module):
     def __init__(
@@ -73,7 +254,8 @@ class TransformerLayer(nn.Module):
         self, 
         src: torch.Tensor,             # (B, S, d_model)
         coords_src: torch.Tensor = None,  # (B, S, 3) or None
-        len_m1: int = 513
+        len_m1: int = 513,
+        len_perceiver: int = 16
     ) -> torch.Tensor:
         # src shape: (B, S, d_model)
         B, S, _ = src.shape
@@ -97,9 +279,13 @@ class TransformerLayer(nn.Module):
         
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
         
-        if len_m1 > 0:
-            attn_mask = make_causal_mask(S, len_m1, src.device)  # (S, S)
-            scores = scores.masked_fill(attn_mask.unsqueeze(0).unsqueeze(0), float('-inf'))   
+        combined_mask = make_casual_mask(
+            seq_len=S,
+            len_perceiver=len_perceiver,
+            len_m1=len_m1,
+            device=src.device
+        )
+        scores = scores.masked_fill(combined_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
     
         attn_weights = F.softmax(scores, dim=-1)
         attn_output = torch.matmul(attn_weights, v)
@@ -150,12 +336,25 @@ class TransformerEncoder(nn.Module):
         coords_head_m1: torch.Tensor = None,
         state_t: torch.Tensor = None,  # [B, input_dim] or None
         state_m1: torch.Tensor = None,  # [B, input_dim] or None
+        perceiver_out: torch.Tensor = None,
+        hand_translation: torch.Tensor = None,
+        head_translation: torch.Tensor = None,  
     ) -> torch.Tensor:
         B, N, D = hand_token_t.shape
         
         tokens = []
         coords_list = []
         coords_src = None
+        
+        if perceiver_out is not None:
+            M = perceiver_out.shape[1]
+            tokens.append(perceiver_out)
+            
+            hand_translation = hand_translation.unsqueeze(1).repeat(1, M // 2, 1)  # [B, M//2 ,3]
+            head_translation = head_translation.unsqueeze(1).repeat(1, M // 2, 1)  # [B, M//2, 3]
+            
+            coords_cam = torch.cat([hand_translation, head_translation], dim=1)
+            coords_list.append(coords_cam)
         
         if state_m1 is not None:
             state_token_m1 = state_m1.unsqueeze(1)  # [B, 1, D]
@@ -238,12 +437,12 @@ class ActionTransformerDecoder(nn.Module):
         state = state.permute(1, 0, 2).contiguous()
         tgt = torch.cat([state, query_pos], dim=0)
         
-        causal_mask = generate_subsequent_mask(self.action_horizon+1).to(memory.device)
+        casual_mask = generate_subsequent_mask(self.action_horizon+1).to(memory.device)
         
         decoder_out = self.decoder(
             tgt=tgt,    # [T, B, d_model]
             memory=memory,      # [N, B, d_model]
-            tgt_mask=causal_mask
+            tgt_mask=casual_mask
         ) 
         
         decoder_out = decoder_out.permute(1, 0, 2)         # [B, 4, d_model]
@@ -302,8 +501,8 @@ class Agent_global_multistep_gridnet(nn.Module):
 
 
         # Reduce CLIP feature dimension
-        self.dim_reducer_hand = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
-        self.dim_reducer_head = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
+        self.dim_reducer_hand = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
+        self.dim_reducer_head = DimReducer(clip_input_dim, voxel_feature_dim, L=10)
         # self.dim_reducer = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
         self.voxel_proj = DimReducer(clip_input_dim, voxel_feature_dim, L=10).to(self.device)
         
@@ -340,7 +539,8 @@ class Agent_global_multistep_gridnet(nn.Module):
         self.implicit_decoder = implicit_decoder
         
         # self.feature_fusion = ConcatMLPFusion(feat_dim=voxel_feature_dim, clip_embedding_dim=clip_input_dim)
-        self.feature_fusion_attn = LocalSelfAttentionFusion(feat_dim=clip_input_dim)
+        self.feature_fusion_attn_hand = LocalSelfAttentionFusion(feat_dim=clip_input_dim)
+        self.feature_fusion_attn_head = LocalSelfAttentionFusion(feat_dim=clip_input_dim)
 
         self.state_proj_perceiver =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device)   
         self.state_proj_transformer =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device)   
@@ -348,7 +548,7 @@ class Agent_global_multistep_gridnet(nn.Module):
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
         
-        self.valid_coords = self.static_map.features[0].vertex_positions().to(self.device)
+        # self.valid_coords = self.static_map.features[0].vertex_positions().to(self.device)
         self.state_mlp_for_action = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
     
     def forward(self, observations, object_labels):
@@ -442,30 +642,30 @@ class Agent_global_multistep_gridnet(nn.Module):
         )
     
         # Global voxel query using each pose
-        # hand_translation_t = hand_pose_t[:, 0, :3, 3]  # [2B, 3]
-        # head_translation_t = head_pose_t[:, 0, :3, 3]  # [2B, 3]
+        hand_translation_t = hand_pose_t[:, 0, :3, 3]  # [2B, 3]
+        head_translation_t = head_pose_t[:, 0, :3, 3]  # [2B, 3]
                 
-        # valid_feats = self.static_map.query_feature(self.valid_coords)
+        valid_coords, valid_feats = self.static_map.get_all_valid_voxel_data() # [N, 3], [N, D]  
         
-        # valid_feats_projected = self.implicit_decoder(valid_feats, self.valid_coords, return_intermediate=False)
+        valid_feats_projected = self.implicit_decoder(valid_feats, valid_coords, return_intermediate=False)      
+                
+        valid_feats_projected = self.voxel_proj(valid_feats_projected, valid_coords)
 
-        # valid_feats_projected = self.voxel_proj(valid_feats_projected, self.valid_coords)
-
-        # valid_coords_expanded = self.valid_coords.unsqueeze(0).expand(B, -1, -1)  # [2B, N, 3]
-        # valid_feats_projected_expanded = valid_feats_projected.unsqueeze(0).expand(B, -1, -1)
+        valid_coords_expanded = valid_coords.unsqueeze(0).expand(B, -1, -1)  # [2B, N, 3]
+        valid_feats_projected_expanded = valid_feats_projected.unsqueeze(0).expand(B, -1, -1)
         
-        # # Project state
-        # state_proj_perceiver_t = self.state_proj_perceiver(state_t)
+        # Project state
+        state_proj_perceiver_t = self.state_proj_perceiver(state_t)
         
         # 3) Run GlobalPerceiver
-        # perceiver_out_t = self.global_perceiver(
-        #     state=state_proj_perceiver_t,
-        #     hand_translation_t=hand_translation_t,
-        #     head_translation_t=head_translation_t,
-        #     valid_coords=valid_coords_expanded,  
-        #     valid_feats_projected=valid_feats_projected_expanded 
-        # )
-        
+        perceiver_out = self.global_perceiver(
+            state=state_proj_perceiver_t,
+            hand_translation_t=hand_translation_t,
+            head_translation_t=head_translation_t,
+            valid_coords=valid_coords_expanded,  
+            valid_feats_projected=valid_feats_projected_expanded 
+        )
+    
         # Reduce CLIP dimension for hand/head
         _, C_, Hf, Wf = hand_coords_world_t.shape
         N = Hf * Wf
@@ -495,55 +695,83 @@ class Agent_global_multistep_gridnet(nn.Module):
                 
         hand_coords_world_flat_t = hand_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_hand_flat_t = feats_hand_t_gated.reshape(B*N, -1)
-        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_t)
+        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_t, hand_coords_world_flat_t)
         feats_hand_reduced_t = feats_hand_reduced_flat.view(B, N, -1)
 
         head_coords_world_flat_t = head_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_head_flat_t = feats_head_t_gated.reshape(B*N, -1)
-        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_t)
+        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_t, head_coords_world_flat_t)
         feats_head_reduced_t = feats_head_reduced_flat.view(B, N, -1)
         
         hand_coords_world_flat_m1 = hand_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_hand_flat_m1 = feats_hand_m1_gated.reshape(B*N, -1)
-        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_m1)
+        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_m1, hand_coords_world_flat_m1)
         feats_hand_reduced_m1 = feats_hand_reduced_flat.view(B, N, -1)
 
         head_coords_world_flat_m1 = head_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
         feats_head_flat_m1 = feats_head_m1_gated.reshape(B*N, -1)
-        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_m1)
+        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_m1, head_coords_world_flat_m1)
         feats_head_reduced_m1 = feats_head_reduced_flat.view(B, N, -1)
         
         # Query voxel features and cos simeilarity
-        # with torch.no_grad():
-        #     voxel_feat_points_hand_flat_t = self.static_map.query_feature(hand_coords_world_flat_t)
-        #     voxel_feat_points_head_flat_t = self.static_map.query_feature(head_coords_world_flat_t)
+        with torch.no_grad():
+            voxel_feat_points_hand_flat_t, _ = self.static_map.query_voxel_feature(hand_coords_world_flat_t)
+            voxel_feat_points_head_flat_t, _ = self.static_map.query_voxel_feature(head_coords_world_flat_t)
+            
+            voxel_feat_points_hand_flat_m1, _ = self.static_map.query_voxel_feature(hand_coords_world_flat_m1)
+            voxel_feat_points_head_flat_m1, _ = self.static_map.query_voxel_feature(head_coords_world_flat_m1)
     
-        # voxel_feat_points_hand_flat_final_t = self.implicit_decoder(
-        #     voxel_feat_points_hand_flat_t, hand_coords_world_flat_t, return_intermediate=False)
-        # voxel_feat_points_head_flat_final_t = self.implicit_decoder(
-        #     voxel_feat_points_head_flat_t, head_coords_world_flat_t, return_intermediate=False)
+        voxel_feat_points_hand_flat_final_t = self.implicit_decoder(
+            voxel_feat_points_hand_flat_t, hand_coords_world_flat_t, return_intermediate=False)
+        voxel_feat_points_head_flat_final_t = self.implicit_decoder(
+            voxel_feat_points_head_flat_t, head_coords_world_flat_t, return_intermediate=False)
         
-        # cos_sim_hand = F.cosine_similarity(voxel_feat_points_hand_flat_final_t, feats_hand_flat_t, dim=-1)
-        # cos_loss_hand = 1.0 - cos_sim_hand.mean()  
+        voxel_feat_points_hand_flat_final_m1 = self.implicit_decoder(
+            voxel_feat_points_hand_flat_m1, hand_coords_world_flat_m1, return_intermediate=False)
+        voxel_feat_points_head_flat_final_m1 = self.implicit_decoder(
+            voxel_feat_points_head_flat_m1, head_coords_world_flat_m1, return_intermediate=False)
         
-        # cos_sim_head = F.cosine_similarity(voxel_feat_points_head_flat_final_t, feats_head_flat_t, dim=-1)
-        # cos_loss_head = 1.0 - cos_sim_head.mean()      
         
-        # total_cos_loss = cos_loss_hand + cos_loss_head 
+        cos_sim_hand_t = F.cosine_similarity(voxel_feat_points_hand_flat_final_t, feats_hand_flat_t, dim=-1)
+        cos_loss_hand_t = 1.0 - cos_sim_hand_t.mean()  
+        
+        cos_sim_head_t = F.cosine_similarity(voxel_feat_points_head_flat_final_t, feats_head_flat_t, dim=-1)
+        cos_loss_head_t = 1.0 - cos_sim_head_t.mean()      
+        
+        cos_sim_hand_m1 = F.cosine_similarity(voxel_feat_points_hand_flat_final_m1, feats_hand_flat_m1, dim=-1)
+        cos_loss_hand_m1 = 1.0 - cos_sim_hand_m1.mean()  
+        
+        cos_sim_head_m1 = F.cosine_similarity(voxel_feat_points_head_flat_final_m1, feats_head_flat_m1, dim=-1)
+        cos_loss_head_m1 = 1.0 - cos_sim_head_m1.mean()     
+        
+        total_cos_loss = cos_loss_hand_t + cos_loss_head_t + cos_loss_hand_m1 + cos_loss_head_m1
         
         # Fuse voxel and CLIP features
-        # fused_hand_t = self.feature_fusion_attn(
+        # fused_hand_t = self.feature_fusion_attn_hand(
         #     voxel_feat_points_hand_flat_final_t.view(B, N, -1),
         #     feats_hand_flat_t.view(B, N, -1),
         # ).reshape(B*N, -1)
         
-        # fused_head_t = self.feature_fusion_attn(
+        # fused_head_t = self.feature_fusion_attn_head(
         #     voxel_feat_points_head_flat_final_t.view(B, N, -1),
         #     feats_head_flat_t.view(B, N, -1),
         # ).reshape(B*N, -1)
         
-        # fused_hand_reduced_t = self.dim_reducer(fused_hand_t, hand_coords_world_flat_t).view(B, N, -1)
-        # fused_head_reduced_t = self.dim_reducer(fused_head_t, head_coords_world_flat_t).view(B, N, -1)        
+        # fused_hand_m1 = self.feature_fusion_attn_hand(
+        #     voxel_feat_points_hand_flat_final_m1.view(B, N, -1),
+        #     feats_hand_flat_m1.view(B, N, -1),
+        # ).reshape(B*N, -1)
+        
+        # fused_head_m1 = self.feature_fusion_attn_head(
+        #     voxel_feat_points_head_flat_final_m1.view(B, N, -1),
+        #     feats_head_flat_m1.view(B, N, -1),
+        # ).reshape(B*N, -1)
+        
+        # fused_hand_reduced_t = self.dim_reducer_hand(fused_hand_t, hand_coords_world_flat_t).view(B, N, -1)
+        # fused_head_reduced_t = self.dim_reducer_head(fused_head_t, head_coords_world_flat_t).view(B, N, -1)
+        
+        # fused_hand_reduced_m1 = self.dim_reducer_hand(fused_hand_m1, hand_coords_world_flat_m1).view(B, N, -1)
+        # fused_head_reduced_m1 = self.dim_reducer_head(fused_head_m1, head_coords_world_flat_m1).view(B, N, -1)                
 
         state_proj_transformer_t = self.state_proj_transformer(state_t)
         state_proj_transformer_m1 = self.state_proj_transformer(state_m1)
@@ -559,11 +787,14 @@ class Agent_global_multistep_gridnet(nn.Module):
             coords_hand_m1=hand_coords_world_flat_m1.reshape(B, N, 3),
             coords_head_m1=head_coords_world_flat_m1.reshape(B, N, 3),
             state_t=state_proj_transformer_t,
-            state_m1=state_proj_transformer_m1,  
+            state_m1=state_proj_transformer_m1,
+            perceiver_out = perceiver_out,
+            hand_translation = hand_translation_t,
+            head_translation = head_translation_t,  
         ) # [B, N, 240]
         
         
         state_t_proj  = self.state_mlp_for_action(state_t).unsqueeze(1)   # [B, 240]
         action_out = self.action_transformer(out_transformer, state_t_proj)
         
-        return action_out, None
+        return action_out, total_cos_loss

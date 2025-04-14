@@ -35,7 +35,7 @@ algo:
   name: bc
 
   lr: 5e-5
-  batch_size: 32
+  batch_size: 16
   
   epochs: 20
 
@@ -67,10 +67,12 @@ algo:
   text_input: ["bowl", "apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   state_mlp_dim: 128
-  cos_loss_weight: 0.01
+  cos_loss_weight: 0.001
 
   # Pre-trained Weights
   pretrained_agent_path: "/home/sunghwan/workspace/mobile_language_mapping/latest_agent.pt"
+  pretrained_voxel_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/stage1-final_voxel.pt"
+  pretrained_implicit_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-global-local-trajs_per_obj=1000/models/stage1-final_implicit.pt"
 
 logger:
   workspace: mshab_exps
