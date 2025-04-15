@@ -185,7 +185,7 @@ def train(cfg: TrainConfig):
 
     timer = NonOverlappingTimeProfiler()
 
-    EPOCHS_PER_TRAJ = 10
+    EPOCHS_PER_TRAJ = 30
 
     def check_freq(freq, epoch):
         return (epoch % freq) == 0

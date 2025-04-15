@@ -79,8 +79,10 @@ class Agent_global_multistep_gridnet_rel(nn.Module):
             _, fs, d2, H, W = hand_depth_t.shape
             hand_depth_t = hand_depth_t.view(B, fs * d2, H, W)
             head_depth_t = head_depth_t.view(B, fs * d2, H, W)
-            hand_depth_t = F.interpolate(hand_depth_t, (16, 16), mode="nearest")
-            head_depth_t = F.interpolate(head_depth_t, (16, 16), mode="nearest")
+            # hand_depth_t = F.interpolate(hand_depth_t, (16, 16), mode="nearest")
+            # head_depth_t = F.interpolate(head_depth_t, (16, 16), mode="nearest")
+            hand_depth_t = F.interpolate(hand_depth_t, (16, 16), mode="nearest-exact")
+            head_depth_t = F.interpolate(head_depth_t, (16, 16), mode="nearest-exact")
 
         # 3D world coords
         hand_coords_world_t, hand_coords_camera_t = get_3d_coordinates(
@@ -112,8 +114,8 @@ class Agent_global_multistep_gridnet_rel(nn.Module):
         hand_depth_flat_t = hand_depth_t.reshape(B*N)
         head_depth_flat_t = head_depth_t.reshape(B*N)
 
-        depth_mask_hand = hand_depth_flat_t > 0.5  
-        depth_mask_head = head_depth_flat_t > 0.5
+        depth_mask_hand = hand_depth_flat_t > 0.3  
+        depth_mask_head = head_depth_flat_t > 0.3
 
         # Query voxel features and cos simeilarity
         with torch.no_grad():
@@ -150,5 +152,4 @@ class Agent_global_multistep_gridnet_rel(nn.Module):
             cos_loss_head = 0.0
             
         total_cos_loss = cos_loss_hand + cos_loss_head
-        
         return total_cos_loss
