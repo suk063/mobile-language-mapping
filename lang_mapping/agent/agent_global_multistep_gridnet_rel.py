@@ -35,20 +35,24 @@ class Agent_global_multistep_gridnet_rel(nn.Module):
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
 
-    def forward_mapping(self, observations):
-
+    def forward_mapping(self, observations, is_grasp):
+        
+        bool_mask = (is_grasp < 0.5)  
+        if bool_mask.sum() == 0:
+            return torch.tensor(0.0, device=self.device)
+        
         # 1) Extract data
-        hand_rgb_t   = observations["pixels"]["fetch_hand_rgb"]
-        head_rgb_t   = observations["pixels"]["fetch_head_rgb"]
+        hand_rgb_t   = observations["pixels"]["fetch_hand_rgb"][bool_mask]
+        head_rgb_t   = observations["pixels"]["fetch_head_rgb"][bool_mask]
 
-        hand_depth_t  = observations["pixels"]["fetch_hand_depth"]
-        head_depth_t  = observations["pixels"]["fetch_head_depth"]
+        hand_depth_t  = observations["pixels"]["fetch_hand_depth"][bool_mask]
+        head_depth_t  = observations["pixels"]["fetch_head_depth"][bool_mask]
 
-        hand_pose_t   = observations["pixels"]["fetch_hand_pose"]
-        head_pose_t   = observations["pixels"]["fetch_head_pose"]
+        hand_pose_t   = observations["pixels"]["fetch_hand_pose"][bool_mask]
+        head_pose_t   = observations["pixels"]["fetch_head_pose"][bool_mask]
 
         B = hand_rgb_t.shape[0]
-       
+        
         # If needed, permute hand_rgb_t so channel=3
         if hand_rgb_t.shape[2] != 3:
             hand_rgb_t = hand_rgb_t.permute(0, 1, 4, 2, 3)
@@ -104,21 +108,47 @@ class Agent_global_multistep_gridnet_rel(nn.Module):
         hand_coords_camera_flat_t = hand_coords_camera_t.permute(0, 2, 3, 1).reshape(B*N, 3)
         head_coords_camera_flat_t = head_coords_camera_t.permute(0, 2, 3, 1).reshape(B*N, 3)
         
+        # filtering out points
+        hand_depth_flat_t = hand_depth_t.reshape(B*N)
+        head_depth_flat_t = head_depth_t.reshape(B*N)
+
+        depth_mask_hand = hand_depth_flat_t > 0.5  
+        depth_mask_head = head_depth_flat_t > 0.5
+
         # Query voxel features and cos simeilarity
         with torch.no_grad():
             voxel_feat_points_hand_flat_t = self.static_map.query_feature(hand_coords_world_flat_t)
             voxel_feat_points_head_flat_t = self.static_map.query_feature(head_coords_world_flat_t)
 
-        ### Mark to change here
-        voxel_feat_points_hand_flat_final_t = self.implicit_decoder(voxel_feat_points_hand_flat_t, hand_coords_camera_flat_t)
-        voxel_feat_points_head_flat_final_t = self.implicit_decoder(voxel_feat_points_head_flat_t, head_coords_camera_flat_t)
-        
-        cos_sim_hand_t = F.cosine_similarity(voxel_feat_points_hand_flat_final_t, feats_hand_flat_t, dim=-1)
-        cos_loss_hand_t = 1.0 - cos_sim_hand_t.mean()  
-        
-        cos_sim_head_t = F.cosine_similarity(voxel_feat_points_head_flat_final_t, feats_head_flat_t, dim=-1)
-        cos_loss_head_t = 1.0 - cos_sim_head_t.mean()      
-        
-        total_cos_loss = cos_loss_hand_t + cos_loss_head_t
+        # Implicit decoder
+        # hand
+        voxel_feat_points_hand_masked = voxel_feat_points_hand_flat_t[depth_mask_hand]
+        coords_camera_hand_masked     = hand_coords_camera_flat_t[depth_mask_hand]
+        feats_hand_masked            = feats_hand_flat_t[depth_mask_hand]
 
+        if voxel_feat_points_hand_masked.shape[0] > 0:
+            voxel_feat_points_hand_final = self.implicit_decoder(
+                voxel_feat_points_hand_masked, coords_camera_hand_masked
+            )
+            cos_sim_hand = F.cosine_similarity(voxel_feat_points_hand_final, feats_hand_masked, dim=-1)
+            cos_loss_hand = 1.0 - cos_sim_hand.mean()
+        else:
+            cos_loss_hand = 0.0
+
+        # head
+        voxel_feat_points_head_masked = voxel_feat_points_head_flat_t[depth_mask_head]
+        coords_camera_head_masked     = head_coords_camera_flat_t[depth_mask_head]
+        feats_head_masked            = feats_head_flat_t[depth_mask_head]
+
+        if voxel_feat_points_head_masked.shape[0] > 0:
+            voxel_feat_points_head_final = self.implicit_decoder(
+                voxel_feat_points_head_masked, coords_camera_head_masked
+            )
+            cos_sim_head = F.cosine_similarity(voxel_feat_points_head_final, feats_head_masked, dim=-1)
+            cos_loss_head = 1.0 - cos_sim_head.mean()
+        else:
+            cos_loss_head = 0.0
+            
+        total_cos_loss = cos_loss_hand + cos_loss_head
+        
         return total_cos_loss

@@ -131,6 +131,8 @@ class ImplicitDecoder(nn.Module):
             self.pe_dim = 2 * self.L * 3  
         elif self.pe_type == 'concat':
             self.pe_dim = 3 
+        elif self.pe_type == 'none':
+            self.pe_dim = 0
         else:
             raise ValueError(f"Unknown pe_type: {self.pe_type}. Use 'sinusoidal' or 'concat'.")
 
@@ -155,9 +157,11 @@ class ImplicitDecoder(nn.Module):
     def forward(self, voxel_features, coords_3d):
         if self.pe_type == 'sinusoidal':
             pe = positional_encoding(coords_3d, L=self.L)  # [N, 2 * L * 3]
-        else:  # self.pe_type == 'concat'
+        elif self.pe_type == 'concat':
             pe = coords_3d  # [N, 3]
-            
+        elif self.pe_type == 'none':
+            pe = torch.zeros((coords_3d.shape[0], 0), device=coords_3d.device)  # [N, 0]
+        
         # 1) fc1
         x = torch.cat([voxel_features, pe], dim=-1)
         x = F.relu(self.ln1(self.fc1(x)), inplace=True)

@@ -2,13 +2,13 @@ import json
 import os
 import random
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 import h5py
 from tqdm import tqdm
 import random
 import numpy as np
 import torch
-
+import copy
 
 from mshab.utils.array import to_tensor
 from mshab.utils.dataset import ClosableDataLoader, ClosableDataset
@@ -37,6 +37,7 @@ class DPDataset(ClosableDataset):
         trajs_per_obj="all",
         max_image_cache_size=0,
         truncate_trajectories_at_success=True,
+        single_traj_idx: Optional[int] = None,
     ):
         data_path = Path(data_path)
         if data_path.is_dir():
@@ -56,15 +57,26 @@ class DPDataset(ClosableDataset):
 
             f = h5py.File(fp, "r")
             num_uncached_this_file = 0
-
-            if trajs_per_obj == "all":
-                keys = list(f.keys())
+            
+            # Note (sh): sample based on trajectory idx
+            if single_traj_idx is not None:
+                possible_key = f"traj_{single_traj_idx}"
+                if possible_key in f:
+                    keys = [possible_key]
+                else:
+                    keys = []
             else:
-                keys = random.sample(list(f.keys()), k=trajs_per_obj)
+                if trajs_per_obj == "all":
+                    keys = list(f.keys())
+                else:
+                    keys = random.sample(list(f.keys()), k=trajs_per_obj)
 
             for k in tqdm(keys, desc=f"hf file {fp_num}"):
                 ep_num = int(k.replace("traj_", ""))
                 subtask_uid = json_file["episodes"][ep_num]["subtask_uid"]
+                
+                #f[k]['obs']['extra'].keys()
+                # <KeysViewHDF5 ['tcp_pose_wrt_base', 'obj_pose_wrt_base', 'goal_pos_wrt_base', 'is_grasped']>
 
                 obs, act = f[k]["obs"], f[k]["actions"][:]
 
@@ -73,8 +85,8 @@ class DPDataset(ClosableDataset):
                     success_cutoff = min(success.index(True), len(success))
                     del success
                 else:
-                    # success_cutoff = len(act)
-                    success_cutoff = 100
+                    success_cutoff = len(act)
+                    # success_cutoff = 100
 
                 # NOTE (arth): we always cache state obs and actions because they take up very little memory.
                 #       mostly constraints are on images, since those take up much more memory
@@ -133,7 +145,20 @@ class DPDataset(ClosableDataset):
                     ),
                     dtype=torch.float,
                 )
+                
                 pixel_obs.update(**cam_pose_obs)
+                
+                is_grasped_obs = to_tensor(
+                    recursive_h5py_to_numpy(
+                        dict(
+                            fetch_is_grasped=obs["extra"]["is_grasped"]
+                        ),
+                        slice=slice(success_cutoff + 1),
+                    ),
+                    dtype=torch.bool,
+                )
+                
+                pixel_obs.update(**is_grasped_obs)
 
                 trajectories["actions"].append(act)
                 trajectories["observations"].append(dict(state=state_obs, **pixel_obs))
@@ -238,7 +263,6 @@ class DPDataset(ClosableDataset):
         for h5_file in self.h5_files:
             h5_file.close()
 
-
 class TempTranslateToPointDataset(DPDataset):
     def __init__(self, *args, cat_state=True, cat_pixels=False, **kwargs):
         assert (
@@ -282,8 +306,10 @@ class TempTranslateToPointDataset(DPDataset):
 
         subtask_uid = item["subtask_uid"]
         traj_idx = item["traj_idx"]
+        
+        is_grasped = item["observations"]["fetch_is_grasped"][1]
 
-        return (obs, act, subtask_uid, traj_idx)
+        return (obs, act, subtask_uid, traj_idx, is_grasped)
 
 def merge_t_m1(obs_m1: Dict[str, np.ndarray], obs_t: Dict[str, np.ndarray]):
     agent_obs = {

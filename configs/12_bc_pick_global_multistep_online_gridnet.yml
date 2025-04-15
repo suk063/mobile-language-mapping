@@ -35,9 +35,9 @@ algo:
   name: bc
 
   lr: 5e-5
-  batch_size: 64
+  batch_size: 1
   
-  epochs: 10
+  epochs: 50
 
   eval_freq: 1
   log_freq: 1

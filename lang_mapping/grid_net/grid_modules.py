@@ -76,8 +76,7 @@ class FeatureGrid(FeatureGridBase):
                 self.feature,
                 sample_coords, 
                 align_corners=False,
-                padding_mode='zeros',
-                mode='nearest'
+                padding_mode='zeros'
             )[0, :, :, 0].transpose(0, 1)
         else:
             N = x.shape[0]
@@ -86,8 +85,7 @@ class FeatureGrid(FeatureGridBase):
                 self.feature,
                 sample_coords,
                 align_corners=False,
-                padding_mode='zeros',
-                mode='nearest'
+                padding_mode='zeros'
             )[0, :, :, 0, 0].transpose(0, 1)
         return feats
 

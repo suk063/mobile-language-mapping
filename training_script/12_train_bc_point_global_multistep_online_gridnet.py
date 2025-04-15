@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 from lang_mapping.grid_net import GridNet
 from lang_mapping.agent.agent_global_multistep_gridnet_rel import Agent_global_multistep_gridnet_rel
 from lang_mapping.module import ImplicitDecoder
-from lang_mapping.dataset import TempTranslateToPointDataset, build_object_map, get_object_labels_batch
+from lang_mapping.dataset import TempTranslateToPointDataset
 
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
@@ -74,7 +74,7 @@ class BCConfig:
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
     hidden_dim: int = 240
     cos_loss_weight: float = 0.1
-    pe_type: str = "sinusoidal"
+    pe_type: str = "none"
     pe_level: int = 10
 
     num_eval_envs: int = field(init=False)
@@ -155,7 +155,7 @@ def train(cfg: TrainConfig):
     eval_envs.action_space.seed(cfg.seed + 1_000_000)
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
-    static_map = GridNet(cfg=asdict(cfg.algo.grid_cfg), device=device)
+    dummy_grid = GridNet(cfg=asdict(cfg.algo.grid_cfg), device=device)
     
     implicit_decoder = ImplicitDecoder(
         voxel_feature_dim=cfg.algo.grid_cfg.grid.feature_dim * cfg.algo.grid_cfg.grid.n_levels,
@@ -170,41 +170,14 @@ def train(cfg: TrainConfig):
         device=device,
         open_clip_model=(cfg.algo.open_clip_model_name, cfg.algo.open_clip_model_pretrained),
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        static_map=static_map,
+        static_map=dummy_grid,
         implicit_decoder=implicit_decoder,
     ).to(device)
     
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
-
-    def save_checkpoint(name="latest"):
-        """
-        Save the agent, voxel table, decoder, and optimizer states.
-        """
-        agent_path = logger.model_path / f"{name}_agent.pt"
-        optim_path = logger.model_path / f"{name}_optimizer.pt"
-
-        torch.save(agent.state_dict(), agent_path)
-        torch.save(optimizer.state_dict(), optim_path)
     
     assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
-    
-    # Create BC dataset and dataloader
-    bc_dataset = TempTranslateToPointDataset(
-        cfg.algo.data_dir_fp,
-        obs_horizon=2,
-        pred_horizon=2,
-        control_mode=eval_envs.unwrapped.control_mode,
-        trajs_per_obj=cfg.algo.trajs_per_obj,
-        max_image_cache_size=cfg.algo.max_cache_size,
-        truncate_trajectories_at_success=True,
-        cat_state=cfg.eval_env.cat_state,
-        cat_pixels=cfg.eval_env.cat_pixels,
-    )
-
-    bc_dataloader = ClosableDataLoader(
-        bc_dataset, batch_size=cfg.algo.batch_size, shuffle=True, num_workers=0
-    )
 
     global_step = 0
     logger_start_log_step = logger.last_log_step + 1 if logger.last_log_step > 0 else 0
@@ -212,70 +185,95 @@ def train(cfg: TrainConfig):
 
     timer = NonOverlappingTimeProfiler()
 
+    EPOCHS_PER_TRAJ = 10
+
     def check_freq(freq, epoch):
         return (epoch % freq) == 0
 
     # ------------------------------------------------
     # Mapping
     # ------------------------------------------------
-    for name, param in agent.named_parameters():
-        param.requires_grad = True 
-    
-    for name, param in agent.clip_model.named_parameters():
-        param.requires_grad = False 
-    
-    params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
-    optimizer = torch.optim.AdamW(params_to_optimize, lr=cfg.algo.lr)
-    
-    agent.to(device)
-
-    for epoch in range(cfg.algo.epochs):
-        global_epoch = logger_start_log_step + epoch
+    for t_idx in range(1000):
+        dataset_single = TempTranslateToPointDataset(
+            data_path=cfg.algo.data_dir_fp,
+            obs_horizon=2,
+            pred_horizon=2,
+            control_mode=eval_envs.unwrapped.control_mode,
+            trajs_per_obj=cfg.algo.trajs_per_obj,
+            max_image_cache_size=cfg.algo.max_cache_size,
+            truncate_trajectories_at_success=True,
+            cat_state=cfg.eval_env.cat_state,
+            cat_pixels=cfg.eval_env.cat_pixels,
+            single_traj_idx=t_idx, 
+        )
         
-        logger.print(f"[Stage 1] Epoch: {global_epoch}")
-        tot_loss, n_samples = 0, 0
-        agent.train()
+        dloader_single = ClosableDataLoader(
+            dataset_single,
+            batch_size=cfg.algo.batch_size,
+            shuffle=True,
+            num_workers=0
+        )
 
-        for obs, act, subtask_uids, traj_idx in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
-            obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
+        new_grid_net = GridNet(cfg=asdict(cfg.algo.grid_cfg), device=device)
+        agent.static_map = new_grid_net
 
-            total_cos_loss = agent.forward_mapping(obs)
-            cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
+        for name, param in agent.clip_model.named_parameters():
+            param.requires_grad = False 
+        
+        params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
+        optimizer = torch.optim.AdamW(params_to_optimize, lr=cfg.algo.lr)
+        
+        agent.to(device)
 
-            loss = cos_loss
+        print(f"\n=== Train traj_idx = {t_idx} ===")
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        for epoch in range(EPOCHS_PER_TRAJ):
+            agent.train()
+            tot_loss, n_samples = 0.0, 0
 
-            tot_loss += loss.item()
-            n_samples += act.size(0)
-            global_step += 1
+            for obs, act, subtask_uids, traj_idx_batch, is_grasped in tqdm(
+                dloader_single,
+                desc=f"[traj={t_idx}] epoch={epoch}",
+                unit="batch"
+            ):
+                obs = to_tensor(obs, device=device, dtype="float")
+                act = to_tensor(act, device=device, dtype="float")
+                is_grasped = to_tensor(is_grasped, device=device, dtype="float")
 
-            writer.add_scalar("cos Loss/Iteration", cos_loss.item(), global_step)
+                total_cos_loss = agent.forward_mapping(obs, is_grasped)
+                if total_cos_loss == 0:
+                    continue
 
-        avg_loss = tot_loss / n_samples
-        loss_logs = dict(loss=avg_loss)
-        timer.end(key="train")
+                cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
+                loss = cos_loss
 
-        # Logging
-        if check_freq(cfg.algo.log_freq, epoch):
-            logger.store(tag="losses", **loss_logs)
-            if epoch > 0:
-                logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(global_epoch)
-            timer.end(key="log")
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-        # Saving
-        if check_freq(cfg.algo.save_freq, epoch):
-            save_checkpoint(name="latest")
-            timer.end(key="checkpoint")
+                tot_loss += loss.item()
+                n_samples += act.size(0)
+                global_step += 1
 
-    bc_dataloader.close()
+                writer.add_scalar(f"Loss/traj_{t_idx}", loss.item(), global_step)
+
+            avg_loss = tot_loss / n_samples
+
+            print(f"[traj={t_idx}] epoch={epoch}, avg_loss={avg_loss:.6f}")
+            timer.end(key="train")
+            
+        dloader_single.close()
+        dataset_single.close()
+
+    print("Done training for all trajectories.")
+
+    final_save_path = logger.model_path / "implicit_decoder_final.pt"
+    torch.save(agent.implicit_decoder.state_dict(), final_save_path)
+    print(f"Final implicit_decoder saved at {final_save_path}")
+
     eval_envs.close()
     logger.close()
     writer.close()
-
 
 if __name__ == "__main__":
     PASSED_CONFIG_PATH = sys.argv[1]
