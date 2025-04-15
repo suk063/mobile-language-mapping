@@ -9,7 +9,7 @@ def init_weights_kaiming(m):
         nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.constant_(m.bias, 0.0)
- 
+
 class PerceiverAttentionLayer(nn.Module):
     def __init__(
         self, 
@@ -87,7 +87,7 @@ class PerceiverAttentionLayer(nn.Module):
         x = self.ln2(x + self.dropout_ff(ffn_out))
 
         return x
-
+ 
 class GlobalPerceiver(nn.Module):
     """
     - Query: state_projected -> shape [B, 1, hidden_dim]
@@ -127,8 +127,8 @@ class GlobalPerceiver(nn.Module):
     def forward(
         self,
         state,                     # [B, hidden_dim]
-        hand_translation_all: torch.Tensor,  # [B, 3]
-        head_translation_all: torch.Tensor,  # [B, 3]
+        hand_translation_t: torch.Tensor,  # [B, 3]
+        head_translation_t: torch.Tensor,  # [B, 3]
         valid_coords: torch.Tensor,          # [B, N, 3]
         valid_feats_projected: torch.Tensor            # [B, N, feat_dim]
     ) -> torch.Tensor:
@@ -149,8 +149,8 @@ class GlobalPerceiver(nn.Module):
 
         # (2) learnable tokens
         global_tokens = self.global_tokens.repeat(B2, 1, 1)  # [B,num_learnable_tokens,input_dim]
-        hand_coords = hand_translation_all.unsqueeze(1).repeat(1, self.num_learnable_tokens // 2, 1)  # [B,8,3]
-        head_coords = head_translation_all.unsqueeze(1).repeat(1, self.num_learnable_tokens // 2, 1)  # [B,8,3]
+        hand_coords = hand_translation_t.unsqueeze(1).repeat(1, self.num_learnable_tokens // 2, 1)  # [B,8,3]
+        head_coords = head_translation_t.unsqueeze(1).repeat(1, self.num_learnable_tokens // 2, 1)  # [B,8,3]
         
         coords_learned = torch.cat([hand_coords, head_coords], dim=1)  # [B,2,3]
 
@@ -178,7 +178,7 @@ class GlobalPerceiver(nn.Module):
         # => [B,2,hidden_dim], then apply out_proj
         out_tokens = x[:, 1:, :]
         out = self.out_proj(out_tokens)  # [B, 16,out_dim]
-        return out   
+        return out 
 
 class CrossAttentionLayer(nn.Module):
     def __init__(self, d_model=256, n_heads=8, dropout=0.1):
@@ -237,6 +237,23 @@ class CrossAttentionLayer(nn.Module):
         out = self.out_proj(out)
         return out
 
+def generate_subsequent_mask(seq_len: int) -> torch.Tensor:
+    mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1) 
+    mask = mask.bool()  # True/False
+    mask = mask.masked_fill(mask, float('-inf')) 
+    return mask
+
+def init_weights_kaiming(m):
+    if isinstance(m, nn.Linear):
+        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.0)
+
+def make_casual_mask(seq_len, len_m1, device):
+    causal_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1)
+    causal_mask[:len_m1, len_m1:] = True
+
+    return causal_mask 
 
 class TransformerLayer(nn.Module):
     def __init__(
@@ -271,16 +288,6 @@ class TransformerLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         
-        # Text cross-attention
-        # self.cross_attn_text = CrossAttentionLayer(d_model, n_heads, dropout)
-        # self.norm3 = nn.LayerNorm(d_model)
-        # self.dropout3 = nn.Dropout(dropout)
-        
-        # Perceiver cross-attention
-        # self.cross_attn_perceiver = CrossAttentionLayer(d_model, n_heads, dropout)
-        # self.norm4 = nn.LayerNorm(d_model)
-        # self.dropout4 = nn.Dropout(dropout)
-        
         # Activation
         self.activation = F.gelu
 
@@ -288,9 +295,7 @@ class TransformerLayer(nn.Module):
         self, 
         src: torch.Tensor,             # (B, S, d_model)
         coords_src: torch.Tensor = None,  # (B, S, 3) or None
-        text: torch.Tensor = None,         # (B, T, d_model) or None
-        perceiver: torch.Tensor = None,    # (B, P, d_model) or None
-        coords_cam: torch.Tensor = None    # (B, P, 3) or None
+        len_m1: int = 513
     ) -> torch.Tensor:
         # src shape: (B, S, d_model)
         B, S, _ = src.shape
@@ -313,41 +318,23 @@ class TransformerLayer(nn.Module):
             # v is often unchanged in RoPE
         
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        
+        if len_m1 > 0:
+            attn_mask = make_casual_mask(S, len_m1, src.device)  # (S, S)
+            scores = scores.masked_fill(attn_mask.unsqueeze(0).unsqueeze(0), float('-inf')) 
+    
         attn_weights = F.softmax(scores, dim=-1)
         attn_output = torch.matmul(attn_weights, v)
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, S, self.d_model)
         
         src2 = self.norm1(src + self.dropout_attn(self.out_proj(attn_output)))
         
-        if text is not None:    
-            B_txt, T, _ = text.shape
-            text_coords = torch.zeros(B_txt, T, 3, device=text.device)
-            
-            attn_text = self.cross_attn_text(
-                query=src2,
-                key=text,
-                value=text, 
-                coords_query=coords_src,  
-                coords_key=text_coords  
-            )
-            src2 = self.norm3(src2 + self.dropout3(attn_text))
-        
-        if perceiver is not None:
-            attn_perceiver = self.cross_attn_perceiver(
-                query=src2,
-                key=perceiver,
-                value=perceiver,
-                coords_query=coords_src,    
-                coords_key=coords_cam  
-            )
-            src2 = self.norm4(src2 + self.dropout4(attn_perceiver))
-        
         # Feed froward network
         ff_out = self.linear2(self.activation(self.linear1(src2)))
         out2 = self.norm2(src2 + self.dropout_ff(ff_out))
         
         return out2
-    
+
 class TransformerEncoder(nn.Module):
     def __init__(
         self,
@@ -355,7 +342,6 @@ class TransformerEncoder(nn.Module):
         hidden_dim=1024,
         num_layers=4,
         num_heads=8,
-        output_dim=128,
         proj_dim=16,
     ):
         super().__init__()
@@ -372,93 +358,120 @@ class TransformerEncoder(nn.Module):
         
         self.output_proj= nn.Linear(input_dim, proj_dim)
         
-        # Post-fusion MLP
-        self.post_fusion_mlp = nn.Sequential(
-            nn.Linear(proj_dim * (256 * 2), 2048),
-            nn.LayerNorm(2048),
-            nn.ReLU(inplace=True),
-            nn.Linear(2048, 512),
-            nn.LayerNorm(512),
-            nn.ReLU(inplace=True),
-            nn.Linear(512, output_dim)
-        )
-        
         self.apply(init_weights_kaiming)
-        
+               
     def forward(
         self,
-        hand_token: torch.Tensor,  # [B, N, input_dim]
-        head_token: torch.Tensor,  # [B, N, input_dim] 
-        coords_hand: torch.Tensor = None,
-        coords_head: torch.Tensor = None,
-        state: torch.Tensor = None,  # [B, input_dim] or None
-        text_embeddings: torch.Tensor = None,  # [B, input_dim] or None
-        perceiver_out_all: torch.Tensor = None,
-        hand_translation_all: torch.Tensor = None,
-        head_translation_all: torch.Tensor = None,
+        hand_token_t: torch.Tensor,  # [B, N, input_dim]
+        head_token_t: torch.Tensor,  # [B, N, input_dim] 
+        hand_token_m1: torch.Tensor,  # [B, N, input_dim]
+        head_token_m1: torch.Tensor,  # [B, N, input_dim]
+        coords_hand_t: torch.Tensor = None,
+        coords_head_t: torch.Tensor = None, 
+        coords_hand_m1: torch.Tensor = None,
+        coords_head_m1: torch.Tensor = None,
+        state_t: torch.Tensor = None,  # [B, input_dim] or None
+        state_m1: torch.Tensor = None,  # [B, input_dim] or None
     ) -> torch.Tensor:
-        B2, N, D = hand_token.shape
+        B, N, D = hand_token_t.shape
         
         tokens = []
         coords_list = []
-        
-        if state is not None:
-            state_token = state.unsqueeze(1)  # [B, 1, D]
-            tokens.append(state_token)
-            coords_list.append(torch.zeros(B2, 1, 3, device=state.device))
-        
-        text_token = None
-        if text_embeddings is not None:
-            text_token = text_embeddings.unsqueeze(1)  # [B, 1, D]
-            tokens.append(text_token)
-            coords_list.append(torch.zeros(B2, 1, 3, device=state.device))
-
-        coords_cam = None
-        if perceiver_out_all is not None:
-            M = perceiver_out_all.shape[1]
-            tokens.append(perceiver_out_all)    # [B, M, D]
-            
-            hand_translation_all = hand_translation_all.unsqueeze(1).repeat(1, M // 2, 1)  # [B,8,3]
-            head_translation_all = head_translation_all.unsqueeze(1).repeat(1, M // 2, 1)  # [B,8,3]
-            
-            coords_cam = torch.cat([hand_translation_all, head_translation_all], dim=1)         # [B,16,3]
-            coords_list.append(coords_cam)  # [B, 2, 3]
-
-        tokens.append(hand_token)     # [B, N, D]
-        tokens.append(head_token) 
-        src = torch.cat(tokens, dim=1)
-        
         coords_src = None
-        if coords_hand is not None:
-            coords_list.append(coords_hand)
-            coords_list.append(coords_head)
-            coords_src = torch.cat(coords_list, dim=1) # [B, S+N, 3]
+        
+        if state_m1 is not None:
+            state_token_m1 = state_m1.unsqueeze(1)  # [B, 1, D]
+            tokens.append(state_token_m1)
+            coords_list.append(torch.zeros(B, 1, 3, device=state_t.device))
+        
+        tokens.append(hand_token_m1)     # [B, N, D]
+        tokens.append(head_token_m1) 
+        
+        if coords_hand_m1 is not None:
+            coords_list.append(coords_hand_m1)
+            coords_list.append(coords_head_m1)
+        
+        if state_t is not None:
+            state_token_t = state_t.unsqueeze(1)  # [B, 1, D]
+            tokens.append(state_token_t)
+            coords_list.append(torch.zeros(B, 1, 3, device=state_t.device))
+
+        tokens.append(hand_token_t)     # [B, N, D]
+        tokens.append(head_token_t) 
+        
+        if coords_hand_t is not None:
+            coords_list.append(coords_hand_t)
+            coords_list.append(coords_head_t)
+        
+        src = torch.cat(tokens, dim=1)
+        if len(coords_list) > 0:
+            coords_src = torch.cat(coords_list, dim=1)  # (B, S, 3)
         
         # Pass through Transformer layers
         for layer in self.layers:
             src = layer(
                 src=src,
                 coords_src=coords_src,
-                text=text_token,
-                perceiver=perceiver_out_all,
-                coords_cam=coords_cam,
             )
 
-        start_idx = 0
-        if state is not None:
-            start_idx += 1
-        if text_embeddings is not None:
-            start_idx += 1
-        if perceiver_out_all is not None:
-            start_idx += M
+        start_idx = 1 + 512 # 1 for state, 512 for m1, 1 for state
 
-        # # fused_tokens = src[:, start_idx:, :]  # [B, (N + ?), input_dim]
-        
-        # fused_tokens = self.output_proj(src[:, start_idx:, :])
-        
-        # data = fused_tokens.reshape(B2, -1)
-        # out = self.post_fusion_mlp(data)  # [B, output_dim]
         return src[:, start_idx:, :]
+
+class ActionTransformerDecoder(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        num_decoder_layers: int,
+        dim_feedforward: int,
+        dropout: float,
+        action_dim: int,
+        action_horizon: int = 16,
+    ):
+        super().__init__()
+        
+        self.query_embed = nn.Embedding(action_horizon, d_model)  # [3, d_model]
+        
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="relu"
+        )
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
+        
+        self.action_head = nn.Linear(d_model, action_dim)
+        self.action_horizon = action_horizon
+        
+    def forward(self, memory, state) -> torch.Tensor:
+
+        # state # [B, 1, d_model]
+
+        B, N, d_model = memory.shape
+  
+        # memory = memory.view(B, fs*N, d_model)             # [B, 2*N, d_model]
+        memory = memory.permute(1, 0, 2).contiguous()     # [N, B, d_model]
+        
+        query_pos = self.query_embed.weight                # [3, d_model]
+        query_pos = query_pos.unsqueeze(1).repeat(1, B, 1) # [3, B, d_model]
+        
+        state = state.permute(1, 0, 2).contiguous()
+        tgt = torch.cat([state, query_pos], dim=0)
+        
+        casual_mask = generate_subsequent_mask(self.action_horizon+1).to(memory.device)
+        
+        decoder_out = self.decoder(
+            tgt=tgt,    # [T, B, d_model]
+            memory=memory,      # [N, B, d_model]
+            tgt_mask=casual_mask
+        ) 
+        
+        decoder_out = decoder_out.permute(1, 0, 2)         # [B, 4, d_model]
+        action_out = self.action_head(decoder_out)         # [B, 4, action_dim]
+        return action_out[:,1:, :]
+
 
 class LocalSelfAttentionFusion(nn.Module):
     """

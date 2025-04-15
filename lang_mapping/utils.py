@@ -57,7 +57,6 @@ def positional_encoding(x: torch.Tensor, L: int = 10) -> torch.Tensor:
     return torch.cat(pe, dim=-1)
 
 def get_3d_coordinates(
-    feature_maps: torch.Tensor,
     depth: torch.Tensor,
     camera_extrinsic: torch.Tensor,
     fx: float,
@@ -79,12 +78,13 @@ def get_3d_coordinates(
     Returns:
         coords_world or coords_cam: [B, 3, H_feat, W_feat].
     """
-    device = feature_maps.device
-    B, C, H_feat, W_feat = feature_maps.shape
+    device = depth.device
 
     # Adjust depth shape if needed
     if depth.dim() == 4 and depth.shape[1] == 1:
         depth = depth.squeeze(1)
+    
+    B, H_feat, W_feat = depth.shape  
 
     # Scale intrinsics
     scale_x = W_feat / float(original_size)
