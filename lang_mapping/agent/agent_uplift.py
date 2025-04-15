@@ -225,7 +225,6 @@ class Agent_uplift(nn.Module):
         feats_head_flat_m1 = feats_head_m1_gated.reshape(B*N, -1)
         feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_m1)
         feats_head_reduced_m1 = feats_head_reduced_flat.view(B, N, -1)
-               
 
         state_proj_transformer_t = self.state_proj_transformer(state_t)
         state_proj_transformer_m1 = self.state_proj_transformer(state_m1)
