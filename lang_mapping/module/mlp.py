@@ -154,13 +154,13 @@ class ImplicitDecoder(nn.Module):
         
         self.apply(init_weights_kaiming)
 
-    def forward(self, voxel_features, coords_3d):
+    def forward(self, voxel_features, coords_3d=None):
         if self.pe_type == 'sinusoidal':
             pe = positional_encoding(coords_3d, L=self.L)  # [N, 2 * L * 3]
         elif self.pe_type == 'concat':
             pe = coords_3d  # [N, 3]
         elif self.pe_type == 'none':
-            pe = torch.zeros((coords_3d.shape[0], 0), device=coords_3d.device)  # [N, 0]
+            pe = torch.zeros((voxel_features.shape[0], 0), device=voxel_features.device)  # [N, 0]
         
         # 1) fc1
         x = torch.cat([voxel_features, pe], dim=-1)
