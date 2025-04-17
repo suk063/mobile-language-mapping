@@ -117,8 +117,8 @@ class ImplicitDecoder(nn.Module):
         voxel_feature_dim=768,
         hidden_dim=768,
         output_dim=768,
-        L=10,
-        pe_type='sinusoidal'
+        L=0,
+        pe_type='none'
     ):
         super().__init__()
         self.voxel_feature_dim = voxel_feature_dim
