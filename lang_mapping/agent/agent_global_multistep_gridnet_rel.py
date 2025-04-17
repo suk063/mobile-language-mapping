@@ -115,7 +115,7 @@ class Agent_global_multistep_gridnet_rel(nn.Module):
         head_depth_flat_t = head_depth_t.reshape(B*N)
 
         depth_mask_hand = hand_depth_flat_t > 0.3  
-        depth_mask_head = head_depth_flat_t > 0.3
+        depth_mask_head = head_depth_flat_t > 0.6
 
         # Query voxel features and cos simeilarity
         voxel_feat_points_hand_flat_t = self.static_map.query_feature(hand_coords_world_flat_t)

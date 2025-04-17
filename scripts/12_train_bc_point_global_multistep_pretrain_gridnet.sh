@@ -65,14 +65,14 @@ args=(
 
 if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
     echo "RESUMING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.12_train_bc_point_global_multistep_online_gridnet "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.12_train_bc_point_global_multistep_pretrain_gridnet "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
         logger.clear_out="False" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.12_train_bc_point_global_multistep_online_gridnet configs/12_bc_pick_global_multistep_online_gridnet.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.12_train_bc_point_global_multistep_pretrain_gridnet configs/12_bc_pick_global_multistep_pretrain_gridnet.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"

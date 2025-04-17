@@ -3,12 +3,15 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Union
+import os
 
+import json
 import h5py
 from dacite import from_dict
 from omegaconf import OmegaConf
 from tqdm import tqdm
 import random
+from collections import defaultdict
 
 import gymnasium as gym
 import numpy as np
@@ -26,6 +29,93 @@ from mshab.utils.config import parse_cfg
 from mshab.utils.dataset import ClosableDataLoader
 from mshab.utils.logger import Logger, LoggerConfig
 from mshab.utils.time import NonOverlappingTimeProfiler
+
+def build_uid_mapping(task_plan_path: str):
+    """
+    Reads all composite_subtask_uids from the task_plan file located at task_plan_path,
+    and returns a dictionary mapping each unique uid to a unique integer from 0 to N-1.
+    """
+    with open(task_plan_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    all_uids = []
+    # Iterate over all plans
+    for plan in data["plans"]:
+        # Iterate over all subtasks within each plan
+        for subtask in plan["subtasks"]:
+            # Add each composite_subtask_uid from the current subtask to the list
+            for c_uid in subtask["composite_subtask_uids"]:
+                all_uids.append(c_uid)
+
+    # Extract a sorted list of unique uids
+    unique_uids = sorted(list(set(all_uids)))
+    print(f"Total unique subtask_uids (N) = {len(unique_uids)}")
+
+    # Create a mapping from uid to an integer index (0 to N-1)
+    uid2index = {uid: idx for idx, uid in enumerate(unique_uids)}
+    return uid2index
+
+
+def build_episode_traj_idxs(episodes_json_path: str, episode2subtasks: dict):
+    uid2episode = {}
+    for episode, subtask_list in episode2subtasks.items():
+        for uid in subtask_list:
+            uid2episode[uid] = episode
+
+    with open(episodes_json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    episode2traj_idxs = defaultdict(list)
+
+    for i, ep_data in enumerate(data.get("episodes", [])):
+        subtask_uid = ep_data.get("subtask_uid", None)
+        if subtask_uid is None:
+            continue  
+
+        episode = uid2episode.get(subtask_uid, None)
+        if episode is not None:
+            episode2traj_idxs[episode].append(i)
+        else:
+            pass
+
+    return dict(episode2traj_idxs)
+
+
+def build_episode_subtask_mapping(task_plan_path: str):
+    """
+    Reads the task plan JSON file at `task_plan_path` and builds a dictionary
+    mapping each episode (parsed from 'init_config_name') to a list of
+    composite_subtask_uids associated with that episode.
+
+    Returns:
+        dict:
+            {
+                "episode_XXXX": [c_uid_1, c_uid_2, ...],
+                "episode_YYYY": [...],
+                ...
+            }
+    """
+
+    # Load the JSON data
+    with open(task_plan_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Dictionary to store episode -> list of subtask_uids
+    episode2subtasks = {}
+
+    # Iterate over all plans
+    for plan in data["plans"]:
+        init_config_name = plan["init_config_name"]
+        episode = os.path.splitext(os.path.basename(init_config_name))[0]
+
+        if episode not in episode2subtasks:
+            episode2subtasks[episode] = []
+
+        for subtask in plan["subtasks"]:
+            for c_uid in subtask["composite_subtask_uids"]:
+                episode2subtasks[episode].append(c_uid)
+
+    return episode2subtasks
 
 @dataclass
 class GridDefinition:
@@ -145,7 +235,13 @@ def train(cfg: TrainConfig):
     torch.backends.cudnn.deterministic = cfg.algo.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+    
+    episode2uid_map = build_episode_subtask_mapping(cfg.eval_env.task_plan_fp)    
+    
+    data_fp = "/home/sunghwan/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange-dataset/set_table/pick/all.json"
+    episode2traj_indices = build_episode_traj_idxs(data_fp, episode2uid_map)
+
+    
     # Make eval env
     print("Making eval env...")
     eval_envs = make_env(cfg.eval_env, video_path=cfg.logger.eval_video_path)
@@ -185,7 +281,7 @@ def train(cfg: TrainConfig):
 
     timer = NonOverlappingTimeProfiler()
 
-    EPOCHS_PER_TRAJ = 30
+    EPOCHS_PER_TRAJ = 10
 
     def check_freq(freq, epoch):
         return (epoch % freq) == 0
@@ -193,7 +289,10 @@ def train(cfg: TrainConfig):
     # ------------------------------------------------
     # Mapping
     # ------------------------------------------------
-    for t_idx in range(1000):
+    for episode, t_idxs in episode2traj_indices.items():
+        if len(t_idxs) == 0:
+            continue
+
         dataset_single = TempTranslateToPointDataset(
             data_path=cfg.algo.data_dir_fp,
             obs_horizon=2,
@@ -204,7 +303,7 @@ def train(cfg: TrainConfig):
             truncate_trajectories_at_success=True,
             cat_state=cfg.eval_env.cat_state,
             cat_pixels=cfg.eval_env.cat_pixels,
-            single_traj_idx=t_idx, 
+            single_traj_idx=t_idxs, 
         )
         
         dloader_single = ClosableDataLoader(
@@ -225,15 +324,22 @@ def train(cfg: TrainConfig):
         
         agent.to(device)
 
-        print(f"\n=== Train traj_idx = {t_idx} ===")
+        print(f"\n=== Train episode = {episode} ===")
 
         for epoch in range(EPOCHS_PER_TRAJ):
             agent.train()
             tot_loss, n_samples = 0.0, 0
-
+            
+            if epoch <= 4:
+                for name, param in agent.implicit_decoder.named_parameters():
+                    param.requires_grad = False
+            else:
+                for name, param in agent.implicit_decoder.named_parameters():
+                    param.requires_grad = True 
+ 
             for obs, act, subtask_uids, traj_idx_batch, is_grasped in tqdm(
                 dloader_single,
-                desc=f"[traj={t_idx}] epoch={epoch}",
+                desc=f"[episode={episode}] epoch={epoch}",
                 unit="batch"
             ):
                 obs = to_tensor(obs, device=device, dtype="float")
@@ -255,11 +361,11 @@ def train(cfg: TrainConfig):
                 n_samples += act.size(0)
                 global_step += 1
 
-                writer.add_scalar(f"Loss/traj_{t_idx}", loss.item(), global_step)
+                writer.add_scalar(f"Loss/episode_{episode}", loss.item(), global_step)
 
             avg_loss = tot_loss / n_samples
 
-            print(f"[traj={t_idx}] epoch={epoch}, avg_loss={avg_loss:.6f}")
+            print(f"[episode={episode}] epoch={epoch}, avg_loss={avg_loss:.6f}")
             timer.end(key="train")
             
         dloader_single.close()

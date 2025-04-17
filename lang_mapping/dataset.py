@@ -60,11 +60,11 @@ class DPDataset(ClosableDataset):
             
             # Note (sh): sample based on trajectory idx
             if single_traj_idx is not None:
-                possible_key = f"traj_{single_traj_idx}"
-                if possible_key in f:
-                    keys = [possible_key]
-                else:
-                    keys = []
+                keys = []
+                for t_idx in single_traj_idx:
+                    key_str = f"traj_{t_idx}"
+                    if key_str in f:
+                        keys.append(key_str)
             else:
                 if trajs_per_obj == "all":
                     keys = list(f.keys())
