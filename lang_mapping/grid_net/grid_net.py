@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from .base_net import BaseNet
 from .grid_modules import *
 import logging
+from typing import Optional
 from .utils import grid_interp_regular, grid_decode
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -30,6 +31,7 @@ class GridNet(BaseNet):
         self.fdim = cfg['grid']['feature_dim']
         self.features = nn.ModuleList()
         self.grid_type = cfg['grid']['type']
+        n_scenes = cfg['grid']['n_scenes']
         self.cell_sizes = []
 
         for level in range(self.num_levels):
@@ -45,6 +47,7 @@ class GridNet(BaseNet):
                     fdim=self.fdim,
                     bound=self.bound,
                     cell_size=cell_size,
+                    n_scenes=n_scenes,
                     name=f"feat-{level}",
                     dtype=self.dtype,
                     initial_feature=init_feature,
@@ -94,10 +97,25 @@ class GridNet(BaseNet):
         for grid in self.features:
             grid.randn_features(std)
     
-    def query_feature(self, x: torch.Tensor):
+    def query_feature(
+        self,
+        x: torch.Tensor,
+        scene_ids: Optional[torch.Tensor] = None,
+    ):
         assert x.ndim == 2, f"Invalid input coords shape {x.shape}!"
-        assert x.shape[-1] == self.d
+        assert x.size(1) in {self.d, self.d + 1}
 
+        if scene_ids is not None:
+            if x.size(1) != self.d:
+                raise ValueError("When scene_ids is given, x must be xyz only")
+            x = torch.cat([scene_ids, x], dim=1)
+        else:
+            if x.size(1) == self.d:
+                zeros = x.new_zeros(x.size(0), 1, dtype=torch.long)
+                x = torch.cat([zeros, x], dim=1)
+            elif x.size(1) == self.d + 1:
+                pass    
+            
         # Interpolate feature grid
         if self.grid_type == 'regular':
             feats = grid_interp_regular(self.features, x, self.ignore_level_)
