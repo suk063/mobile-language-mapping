@@ -39,22 +39,19 @@ class FeatureGrid(FeatureGridBase):
     """Regular (dense) 2D/3D feature grid, where each voxel stores a latent feature of
     dimension fdim.
     """
-    def __init__(self, d, fdim, bound, cell_size, name="grid", dtype=torch.float32, initial_feature=None, init_stddev=0.0, second_order_grid_sample=False, n_scenes = 1):
+    def __init__(self, d, fdim, bound, cell_size, name="grid", dtype=torch.float32, initial_feature=None, init_stddev=0.0, second_order_grid_sample=False):
         super().__init__(d=d, fdim=fdim, bound=bound, cell_size=cell_size, name=name, dtype=dtype)
         grid_len = (self.bound[:,1] - self.bound[:,0]).cpu().numpy()
         grid_size = np.ceil(grid_len / cell_size).astype(int)
-        
         # Initialize 2D or 3D feature grid
         # Notice that we change the order of grid_size due to the behavior of grid_sample
         # See discussion here: https://discuss.pytorch.org/t/surprising-convention-for-grid-sample-coordinates/79997
         # In short, x-axis is along the width of an image and the y-axis is along its height.
         # This is the opposite of the coordinate system used in our implementation.
-        if d == 3:
-            feature_shape = (n_scenes, fdim, grid_size[2], grid_size[1], grid_size[0])
+        if self.d == 2:
+            feature_shape = (1, self.fdim, grid_size[1], grid_size[0])
         else:
-            feature_shape = (n_scenes, fdim, grid_size[1], grid_size[0])
-
-
+            feature_shape = (1, self.fdim, grid_size[2], grid_size[1], grid_size[0])
         init_avail = initial_feature is not None
         if initial_feature is None:
             initial_feature = torch.randn(feature_shape, dtype=self.dtype) * init_stddev
@@ -71,28 +68,25 @@ class FeatureGrid(FeatureGridBase):
 
     def interpolate(self, x):
         # Normalize query coordinates (required by F.grid_sample)
-        if x.size(-1) == self.d + 1:          # (scene, x, y, z)
-            scene_idx = x[:, 0].long()
-            coords    = x[:, 1:]
-        else:                                 # 단일 scene
-            scene_idx = torch.zeros(len(x), dtype=torch.long, device=x.device)
-            coords    = x
-        
-        coords_nrm = normalize_coordinates(coords, self.bound)
-        
+        x = normalize_coordinates(x, self.bound)
         if self.d == 2:
-            sample_grid   = coords_nrm.view(-1, 1, 1, 2)        # (N,1,1,2)
+            N = x.shape[0]
+            sample_coords = x.reshape(1, N, 1, 2)
+            feats = self.grid_sample_func(
+                self.feature,
+                sample_coords, 
+                align_corners=False,
+                padding_mode='zeros'
+            )[0, :, :, 0].transpose(0, 1)
         else:
-            sample_grid   = coords_nrm.view(-1, 1, 1, 1, 3)     # (N,1,1,1,3)
-        
-        feat_selected = self.feature[scene_idx]                 # (N,C,D,H,W) or (N,C,H,W)
-        
-        out = self.grid_sample_func(feat_selected, sample_grid,
-                                    align_corners=False, padding_mode='zeros')
-        if self.d == 2:
-            feats = out[:, :, 0, 0]       # (N, C)
-        else:
-            feats = out[:, :, 0, 0, 0]    # (N, C)
+            N = x.shape[0]
+            sample_coords = x.reshape(1, N, 1, 1, 3)
+            feats = self.grid_sample_func(
+                self.feature,
+                sample_coords,
+                align_corners=False,
+                padding_mode='zeros'
+            )[0, :, :, 0, 0].transpose(0, 1)
         return feats
 
     def norm(self):
