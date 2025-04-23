@@ -2,7 +2,7 @@ import json
 import os
 import random
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -391,7 +391,7 @@ def train(cfg: TrainConfig):
 
                     plan_idxs_tensor = torch.tensor(chunk, dtype=torch.int)
 
-                    eval_obs, info = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
+                    eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
 
                     # DEBUG
                     # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
