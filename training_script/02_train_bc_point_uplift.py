@@ -342,7 +342,7 @@ def train(cfg: TrainConfig):
             agent.eval()
 
             # If not last epoch
-            if epoch < (cfg.algo.stage1_epochs - 1):
+            if epoch < (cfg.algo.epochs - 1):
                 eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
                 # DEBUG
                 # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
