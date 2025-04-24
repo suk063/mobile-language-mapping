@@ -107,6 +107,26 @@ class GridNet(BaseNet):
 
         return all_feats
     
+    def inter_scene_consistency_loss(self) -> torch.Tensor:
+        """
+        Encourage feature grids of the same level (across scenes) to share
+        similar values at identical voxel indices.
+
+        Returns
+        -------
+        torch.Tensor  Scalar loss (requires_grad=True)
+        """
+        loss = 0.0
+        for lvl in range(self.num_levels):
+            # [S, C, D3, D2, D1]  (S = n_scenes)
+            grids_lvl = torch.stack(
+                [self.features[s][lvl].feature for s in range(self.n_scenes)]
+            )                                            
+
+            mean_lvl  = grids_lvl.mean(dim=0, keepdim=True)          # broadcast
+            loss     += ((grids_lvl - mean_lvl) ** 2).mean()         # MSE over all voxels
+        return loss
+    
     def snapshot(self):
         """
         Take a deep copy of each scene and level feature grid onto the CPU.

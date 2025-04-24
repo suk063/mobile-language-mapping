@@ -427,7 +427,7 @@ class ActionTransformerDecoder(nn.Module):
         dim_feedforward: int,
         dropout: float,
         action_dim: int,
-        action_horizon: int = 16,
+        action_horizon: int = 24,
     ):
         super().__init__()
         
@@ -473,36 +473,100 @@ class ActionTransformerDecoder(nn.Module):
         return action_out[:,1:, :]
 
 
+# class LocalSelfAttentionFusion(nn.Module):
+#     """
+#     Fuses two feature vectors via self-attention with a residual connection.
+#     Each voxel is treated independently as a 2-token sequence.
+#     """
+#     def __init__(self, feat_dim=120, num_heads=8):
+#         super().__init__()
+#         self.mha = nn.MultiheadAttention(embed_dim=feat_dim, num_heads=num_heads, batch_first=True)
+#         self.layernorm = nn.LayerNorm(feat_dim)
+
+#     def forward(self, feat1, feat2):
+#         """
+#         Args:
+#             feat1, feat2: (B, N, feat_dim).
+#               - In typical usage here, N=1 and feat_dim=384.
+#         Returns:
+#             (B, N, feat_dim): fused feature after 2-token self-attention with residual connection.
+#         """
+
+#         # Stack feat1 and feat2 into a 2-token sequence: (B, N, 2, feat_dim)
+#         x_stacked = torch.stack([feat1, feat2], dim=2)  # shape: (B, N, 2, feat_dim)
+#         B, N, T, D = x_stacked.shape  # T=2 (token sequence length is 2)
+#         x = x_stacked.view(B*N, T, D)  # Reshape to (B*N, 2, D) for MHA (batch_first=True)
+
+#         # Self-attention on the 2 tokens
+#         attn_output, _ = self.mha(x, x, x) # MHA output shape: (B*N, 2, D)
+
+#         # --- Add Residual Connection ---
+#         x = x + attn_output # Residual connection
+
+#         # --- Apply Layer Normalization ---
+#         y = self.layernorm(x)  # LayerNorm output shape: (B*N, 2, D)
+
+#         # --- Select Output Token ---
+#         # fused = y.mean(dim=1).view(B, N, D) # Alternative: Average the 2 output tokens.
+#         fused = y[:, 0, :].view(B, N, D) # Take the feature of the first token.
+
+#         return fused
+
 class LocalSelfAttentionFusion(nn.Module):
     """
-    Fuses two feature vectors via self-attention.
-    Each voxel is treated independently as a 2-token sequence.
+    Fuse two per-voxel feature vectors with a minimal Transformer encoder block
+    and project the result to `output_dim` (default: 240).
     """
-    def __init__(self, feat_dim=120, num_heads=8):
+    def __init__(
+        self,
+        feat_dim: int = 768,
+        num_heads: int = 8,
+        ffn_multiplier: int = 2,
+        dropout: float = 0.1,
+        output_dim: int = 384,
+    ):
         super().__init__()
-        self.mha = nn.MultiheadAttention(embed_dim=feat_dim, num_heads=num_heads, batch_first=True)
-        self.layernorm = nn.LayerNorm(feat_dim)
 
-    def forward(self, feat1, feat2):
-        """
-        Args:
-            feat1, feat2: (B, N, feat_dim). 
-              - In typical usage here, N=1 and feat_dim=384.
-        Returns:
-            (B, N, feat_dim): fused feature after 2-token self-attention.
-        """
-        
-        # Stack feat1 and feat2 into a 2-token sequence: (B, N, 2, feat_dim)
-        x = torch.stack([feat1, feat2], dim=2)  # shape: (B, N, 2, feat_dim)
-        B, N, T, D = x.shape  # T=2
-        x = x.view(B*N, T, D)  # (B*N, 2, D)
+        # ─── Self-attention sub-layer ──────────────────────────────
+        self.ln_1   = nn.LayerNorm(feat_dim)
+        self.mha    = nn.MultiheadAttention(
+            embed_dim=feat_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.drop_1 = nn.Dropout(dropout)
 
-        # Self-attention on the 2 tokens
-        y, _ = self.mha(x, x, x)
-        y = self.layernorm(y)  # (B*N, 2, D)
+        # ─── Feed-forward sub-layer ───────────────────────────────
+        self.ln_2   = nn.LayerNorm(feat_dim)
+        self.ffn    = nn.Sequential(
+            nn.Linear(feat_dim, ffn_multiplier * feat_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_multiplier * feat_dim, feat_dim),
+        )
+        self.drop_2 = nn.Dropout(dropout)
 
-        # Average the 2 tokens to get a single feature vector
-        fused = y.mean(dim=1).view(B, N, D)
-        # fused = y[:, 0, :].view(B, N, D)
-        
-        return fused
+        # ─── Final projection ─────────────────────────────────────
+        self.output_proj = nn.Linear(feat_dim, output_dim)
+
+    def forward(self, feat1: torch.Tensor, feat2: torch.Tensor) -> torch.Tensor:
+        B, N, _ = feat1.shape            # (B, N, D)
+
+        # (B, N, 2, D) → (B·N, 2, D)
+        x = torch.stack([feat1, feat2], dim=2).flatten(0, 1)
+
+        # ── Self-attention ─────────────────────────────
+        qkv = self.ln_1(x)     # one LN call
+        y, _ = self.mha(qkv, qkv, qkv)
+        x = x + self.drop_1(y)
+
+        # ── FFN ───────────────────────────────────────
+        y = self.ffn(self.ln_2(x))
+        x = x + self.drop_2(y)
+
+        # first token → (B·N, D) → (B, N, D)
+        fused = x[:, 0, :].contiguous().view(B, N, -1)
+
+        # projection to output_dim
+        return self.output_proj(fused)
