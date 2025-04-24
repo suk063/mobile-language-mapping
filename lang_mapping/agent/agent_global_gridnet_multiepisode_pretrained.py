@@ -142,8 +142,16 @@ class TransformerEncoder(nn.Module):
         hidden_dim=1024,
         num_layers=4,
         num_heads=8,
+        num_learn_tokens = 4,
     ):
         super().__init__()
+        
+        self.num_learn_tokens = num_learn_tokens
+        
+        self.tokens_m1 = nn.Parameter(torch.zeros(1, num_learn_tokens, input_dim))
+        self.tokens_t  = nn.Parameter(torch.zeros(1, num_learn_tokens, input_dim))
+        nn.init.xavier_uniform_(self.tokens_m1)
+        nn.init.xavier_uniform_(self.tokens_t)
         
         # Transformer layers
         self.layers = nn.ModuleList([
@@ -171,14 +179,18 @@ class TransformerEncoder(nn.Module):
         zeros1 = lambda: torch.zeros(B, 1, 3, device=hand_token_t.device)
         
         
-        # 1) m‑1 state
+        # ── (A) m-1 segment ───────────────────────────────────────────
         if state_m1 is not None:
             tokens.append(state_m1.unsqueeze(1))
             coords.append(trans_head_m1.unsqueeze(1) if trans_head_m1 is not None else zeros1())
-
-        # 4‑5) m‑1 visual
+            
         tokens += [hand_token_m1, head_token_m1]
         coords += [coords_hand_m1, coords_head_m1]
+        
+        tok_m1   = self.tokens_m1.expand(B, -1, -1)                      # (B,ℓ,D)
+        coord_m1 = trans_head_m1.unsqueeze(1).expand(-1, self.num_learn_tokens, -1)
+        tokens.append(tok_m1)
+        coords.append(coord_m1)
         
         # 6)  current state
         if state_t is not None:
@@ -189,15 +201,22 @@ class TransformerEncoder(nn.Module):
         tokens += [hand_token_t, head_token_t]
         coords += [coords_hand_t, coords_head_t]
         
+        tok_t   = self.tokens_t.expand(B, -1, -1)                        # (B,ℓ,D)
+        coord_t = trans_head_t.unsqueeze(1).expand(-1, self.num_learn_tokens, -1)
+        tokens.append(tok_t)
+        coords.append(coord_t)
         
-        src = torch.cat(tokens, 1)                # (B, S, D)
+        src        = torch.cat(tokens,  1)                               # (B,S,D)
         coords_src = torch.cat(coords, 1) if coords_hand_t is not None else None
-        S = src.size(1)
         
-        len_m1     = 1 + hand_token_m1.size(1)*2                                 # state + 2 poses + 2×visual
-        len_t      = 1 + hand_token_t.size(1)*2
+        len_m1 = self.num_learn_tokens                  # learnable m-1
+        if state_m1 is not None: len_m1 += 1
+        len_m1 += hand_token_m1.size(1) * 2
 
-        S = len_m1 + len_t
+        len_t  = self.num_learn_tokens                  # learnable t
+        if state_t is not None: len_t  += 1
+        len_t  += hand_token_t.size(1) * 2
+
         causal_mask = build_causal_mask(len_m1, len_t, src.device) 
 
         for layer in self.layers:
@@ -206,7 +225,7 @@ class TransformerEncoder(nn.Module):
                 causal_mask=causal_mask
             )
         
-        return src[:,len_m1+1:,:]    # (B, N*? + 1, D)
+        return src[:,-self.num_learn_tokens:,:]    # (B, N*? + 1, D)
 
 def init_weights_kaiming(m):
     if isinstance(m, nn.Linear):
@@ -330,7 +349,6 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
         num_layers_perceiver: int = 4,
         num_learnable_tokens: int = 16,
         num_action_layer: int = 6,
-        neighbor_k: int = 512,
         action_horizon: int = 16
     ):
         super().__init__()
@@ -374,6 +392,7 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
             hidden_dim=1024,
             num_layers=num_layers_transformer,
             num_heads=num_heads,
+            num_learn_tokens=num_learnable_tokens
         )
         
         # Action MLP
@@ -408,6 +427,17 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
             num_layers        = num_layers_perceiver,
             hidden_dim        = 1024,
             num_learn_tokens  = num_learnable_tokens,
+        )
+        
+        self.visual_fuser = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model      = transf_input_dim,
+                nhead        = num_heads,
+                dim_feedforward = 1024,  
+                dropout      = 0.1,
+                batch_first  = True,
+            ),
+            num_layers = 4,     
         )
     
     @staticmethod
@@ -770,6 +800,7 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
         )    
         
         visual_tokens = torch.cat([out_transformer,  perceiver_out],  dim=1)
+        visual_tokens = self.visual_fuser(visual_tokens)
         
         state_t_proj  = self.state_mlp_for_action(state_t_cat).unsqueeze(1)    # [B, 240]
         
