@@ -122,13 +122,13 @@ class BCConfig:
     num_heads: int = 8
     num_layers_transformer: int = 4
     num_layers_perceiver: int = 4
-    num_learnable_tokens: int = 16
+    num_learnable_tokens: int = 32
     num_action_layer: int = 6
     pe_level: int = 10
     action_horizon: int = 16
     neighbor_k: int = 512
     action_temp_weights: float = 0.25
-    transf_input_dim: int = 384
+    transf_input_dim: int = 768
 
     num_eval_envs: int = field(init=False)
     grid_cfg: GridCfg = field(default_factory=GridCfg)
@@ -299,8 +299,8 @@ def train(cfg: TrainConfig):
             raise FileNotFoundError(f"No center files found in {root_dir}")
         return centers
         
-    agent.valid_coords = load_changed_centers(device=device)[0]
-    
+    agent.valid_coords = load_changed_centers(device=device)[1]
+
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
 

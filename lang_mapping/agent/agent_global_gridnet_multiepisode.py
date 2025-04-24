@@ -552,7 +552,7 @@ class Agent_global_gridnet_multiepisode(nn.Module):
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
         
-        self.valid_coords = self.static_map.features[0].vertex_positions().to(self.device)
+        # self.valid_coords = self.static_map.features[0].vertex_positions().to(self.device)
         self.state_mlp_for_action = nn.Linear(state_dim, transf_input_dim).to(self.device)
         
         self.perceiver = GlobalPerceiver(input_dim = 240,
