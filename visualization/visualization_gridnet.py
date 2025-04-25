@@ -34,8 +34,8 @@ def default_grid_cfg() -> Dict:
             "feature_dim": 60,
             "init_stddev": 0.2,
             "bound": [[-2.6, 4.6], [-8.1, 4.7], [0.0, 3.1]],
-            "base_cell_size": 0.4,
-            "per_level_scale": 2.0,
+            "base_cell_size": 0.6,
+            "per_level_scale": 5.0,
             "n_levels": 2,
             "n_scenes": 122,
             "second_order_grid_sample": False,
@@ -211,7 +211,7 @@ def main():
     parser = argparse.ArgumentParser("GridNet Open3D visualizer")
     parser.add_argument("--ckpt_dir", type=Path, default="pre-trained")
     parser.add_argument("--mode", choices=["pca", "sim"], default="sim")
-    parser.add_argument("--query", type=str, default="apple")
+    parser.add_argument("--query", type=str, default="bowl")
     parser.add_argument("--scene", type=int, default=1)
     parser.add_argument("--level", type=int, default=1)
     parser.add_argument("--point_size", type=float, default=10.0)
@@ -225,16 +225,31 @@ def main():
     # Gather voxel centres + raw voxel features
     # ------------------------------------------------------------------
     if args.changed_only:
+        # Load {scene_id: centres} dict from the level-specific *.npz file
         cntrs_dict = load_changed_centers_npz(args.ckpt_dir, args.level)
-        pts_all, feats_all = [], []
-        for s_id, pts in cntrs_dict.items():
-            sid_tensor = torch.full((pts.shape[0], 1), s_id, device=device, dtype=torch.long)
-            with torch.no_grad():
-                feats = gridnet.query_feature(torch.as_tensor(pts, device=device), sid_tensor).cpu().numpy()
-            pts_all.append(pts)
-            feats_all.append(feats)
-        points = np.concatenate(pts_all, axis=0)
-        raw_features = np.concatenate(feats_all, axis=0)
+
+        # Raise an error if the requested scene is not present
+        if args.scene not in cntrs_dict:
+            raise KeyError(
+                f"Scene {args.scene} is missing in the level-{args.level} changed-centres file."
+            )
+
+        pts = cntrs_dict[args.scene]                # (N, 3) voxel centres
+        sid_tensor = torch.full(
+            (pts.shape[0], 1), args.scene,
+            device=device, dtype=torch.long
+        )
+
+        with torch.no_grad():
+            raw_features = (
+                gridnet.query_feature(
+                    torch.as_tensor(pts, device=device),
+                    sid_tensor
+                ).cpu()
+                .numpy()
+            )
+
+        points = pts   
     else:
         points, raw_features = extract_grid_centers_features(gridnet, scene_id=args.scene, level=args.level)
 
