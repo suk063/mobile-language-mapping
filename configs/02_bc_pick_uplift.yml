@@ -3,10 +3,10 @@ seed: 0
 eval_env:
   make_env: True
 
-  env_id: "PickSubtaskTrain-v0"
-  num_envs: 20
+  env_id: "PlaceSubtaskTrain-v0"
+  num_envs: 50
   max_episode_steps: 200
-  all_plan_count: 244
+  all_plan_count: 519
  
   continuous_task: True
 
@@ -18,8 +18,8 @@ eval_env:
   stationary_torso: False
   stationary_head: True
 
-  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all.json
-  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt"
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/place/train/all.json
+  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/place/train/spawn_data.pt"
 
   record_video: False
   info_on_video: True
@@ -35,8 +35,8 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 32
-  epochs: 20
+  batch_size: 8
+  epochs: 2
 
   eval_freq: 1
   log_freq: 1
@@ -55,7 +55,7 @@ algo:
   clip_input_dim: 768
   open_clip_model_name: "EVA02-L-14"
   open_clip_model_pretrained: "merged2b_s4b_b131k"
-  text_input: ["bowl", "apple"]
+  text_input: ["tomato_soup_can", "cracker_box", "tuna_fish_can", "bowl", "sugar_box", "master_chef_can", "pudding_box", "potted_meat_can", "gelatin_box"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   state_mlp_dim: 128
 

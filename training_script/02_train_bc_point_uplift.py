@@ -1,12 +1,9 @@
-import json
-import os
 import random
 import sys
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union
 
-import h5py
 from dacite import from_dict
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -14,12 +11,10 @@ from tqdm import tqdm
 import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 # ManiSkill imports
-import mani_skill.envs
 from mani_skill.utils import common
 
 from lang_mapping.agent.agent_uplift import Agent_uplift
@@ -88,8 +83,6 @@ class BCConfig:
     hidden_dim: int = 240
     num_heads: int = 8
     num_layers_transformer: int = 4
-    num_learnable_tokens: int = 16
-    pe_level: int = 10
     action_horizon: int = 16
     scaling_factor: float = 0.3
     bc_loss_weights: float = 10.0
@@ -391,7 +384,7 @@ def train(cfg: TrainConfig):
 
                     plan_idxs_tensor = torch.tensor(chunk, dtype=torch.int)
 
-                    eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
+                    eval_obs, info = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
 
                     # DEBUG
                     # for i, plan in enumerate(eval_envs.unwrapped.task_plan):

@@ -1,18 +1,5 @@
-#!/usr/bin/env python3
-"""
-For every trajectory in .h5 file (or in an entire directory tree) it
-computes:
-
-* final camera pose (xyz + roll‑pitch‑yaw) for head & hand sensors
-* distance‑to‑goal stats (min / final)
-* VISIBILITY‑centric measures that highlight “goal out‑of‑view” periods
-    - vis_frac_*            : fraction of frames where the goal is inside FOV
-    - longest_invis_gap_*   : longest contiguous run of frames with the goal out‑of‑view
-    - t_since_view_to_grasp : # steps between last sight of goal and grasp time
-* task outcome flags
-"""
-
 import argparse
+import itertools
 from pathlib import Path
 import h5py, numpy as np, pandas as pd
 from scipy.spatial.transform import Rotation as R
@@ -26,15 +13,27 @@ def rpy_deg(R_3x3: np.ndarray):
     return R.from_matrix(R_3x3).as_euler("xyz", degrees=True)
 
 
-def cam_pose(extrinsic_3x4: np.ndarray):
+def cam_pose(ext_3x4: np.ndarray):
     """
-    Split a 3×4 OpenCV extrinsic [R | t] (cam→base) into position (xyz) and
-    orientation (r,p,y°) expressed in the *base* frame.
+    Interpret a 3×4 OpenCV extrinsic [R | t] as *base→camera* and invert
+    it to get *camera→base*. Then extract the camera position (xyz) and
+    orientation (r,p,y in degrees) in the *base* frame.
+
+    ext_3x4 : 3×4 matrix that takes a point from base frame to camera frame.
+    Returns:
+        xyz: (3,) camera position in base frame
+        rpy: (3,) camera orientation (roll, pitch, yaw in degrees)
     """
-    T = np.eye(4, dtype=float)
-    T[:3, :4] = extrinsic_3x4
-    xyz = T[:3, 3]
-    rpy = rpy_deg(T[:3, :3])
+    # 1) Make a 4×4
+    T_bc = np.eye(4, dtype=float)
+    T_bc[:3, :4] = ext_3x4  # base→camera
+
+    # 2) Invert to get camera→base
+    T_cb = np.linalg.inv(T_bc)
+
+    # 3) Camera position/orientation in base frame
+    xyz = T_cb[:3, 3]
+    rpy = rpy_deg(T_cb[:3, :3])
     return xyz, rpy
 
 
@@ -43,46 +42,57 @@ def cam_pose(extrinsic_3x4: np.ndarray):
 # --------------------------------------------------------------------------- #
 def in_view(goal_xyz, ext_3x4, K, img_h=224, img_w=224):
     """
-    Returns True if the 3‑D goal projects inside the image bounds of this
-    camera frame.
+    Returns True if the 3D goal (in base frame) projects inside the image
+    bounds of this camera. We assume `ext_3x4` is a base→camera transform
+    under the OpenCV convention (i.e. R right-handed, +Z forward).
 
-    goal_xyz : (3,)         in *base* frame
-    ext_3x4  : 3×4 cam→base OpenCV matrix (right‑handed, Z forward)
-    K        : 3×3 intrinsics (fx, fy, cx, cy)
+    Args:
+        goal_xyz : (3,) in base frame
+        ext_3x4  : 3×4 base→camera matrix (OpenCV extrinsic)
+        K        : 3×3 intrinsics (fx, fy, cx, cy)
+        img_h, img_w : image size
     """
-    # Build homogeneous transform and invert to get base→cam
-    T_cb = np.eye(4);  T_cb[:3, :4] = ext_3x4
-    T_bc = np.linalg.inv(T_cb)
+    # --- Convert from base to camera frame directly (no inversion) ---
+    R_bc = ext_3x4[:3, :3]  # rotation
+    t_bc = ext_3x4[:3, 3]   # translation
+    g_cam = R_bc @ goal_xyz + t_bc  # (3,)
 
-    # Transform goal into camera frame
-    g_cam = T_bc[:3, :3] @ goal_xyz + T_bc[:3, 3]           # (3,)
-
-    if g_cam[2] <= 0:                    # behind camera
+    # behind camera?
+    if g_cam[2] <= 0:
         return False
 
-    # Project
+    # --- Project to 2D pixel coords
     u = (K[0, 0] * g_cam[0] / g_cam[2]) + K[0, 2]
     v = (K[1, 1] * g_cam[1] / g_cam[2]) + K[1, 2]
-    return (0 <= u < img_w) and (0 <= v < img_h)
 
+    return (0 <= u < img_w) and (0 <= v < img_h)
 
 # --------------------------------------------------------------------------- #
 #  Metric extraction for a single trajectory                                  #
 # --------------------------------------------------------------------------- #
 def visibility_series(goal, ext, K):
-    """Return visibility stats for an entire trajectory (bool per frame)."""
+    """
+    Return:
+        vis_frac      : fraction of frames goal is in FOV   (0–1)
+        longest_gap   : longest run of *invisible* frames   (int)
+        first_seen    : first timestep goal becomes visible (–1 if never)
+        last_seen     : last  timestep goal is visible      (–1 if never)
+        vis           : boolean array (T,)
+    """
     vis = np.array([in_view(g, e, K) for g, e in zip(goal, ext)], dtype=bool)
-    # longest contiguous False stretch
-    if (~vis).any():
-        # run‑length encoding of visibility changes
-        edges = np.where(np.concatenate(([vis[0]], vis[:-1] != vis[1:], [True])))[0]
-        gap_lengths = np.diff(edges)[::2]  # lengths of False segments
-        longest_gap = int(gap_lengths.max())
-    else:
-        longest_gap = 0
 
-    first_seen  = int(np.argmax(vis)) if vis.any() else -1
-    last_seen   = int(len(vis) - 1 - np.argmax(vis[::-1])) if vis.any() else -1
+    if vis.all():                        # always visible
+        longest_gap = 0
+    elif (~vis).all():                   # never visible
+        longest_gap = len(vis)
+    else:
+        # find longest contiguous False segment
+        longest_gap = max(len(list(group))
+                          for val, group in itertools.groupby(vis) if not val)
+
+    first_seen = int(np.argmax(vis)) if vis.any() else -1
+    last_seen  = int(len(vis) - 1 - np.argmax(vis[::-1])) if vis.any() else -1
+
     return vis.mean(), longest_gap, first_seen, last_seen, vis
 
 
@@ -96,7 +106,7 @@ def extract_metrics(traj):
     head_ext = traj["obs/sensor_param/fetch_head/extrinsic_cv"][:]  # (T,3,4)
     hand_ext = traj["obs/sensor_param/fetch_hand/extrinsic_cv"][:]
 
-    # Distance series
+    # Distance series (camera center to goal)
     head_xyz = head_ext[..., 3]                              # (T,3)
     hand_xyz = hand_ext[..., 3]
     head_dist = np.linalg.norm(goal - head_xyz, axis=1)
@@ -121,12 +131,12 @@ def extract_metrics(traj):
         grasp_step, t_since_view_head, t_since_view_hand = -1, -1, -1
 
     final = -1  # last timestep
-    head_xyz_f, head_rpy_f = cam_pose(head_ext[final])
+    head_xyz_f, head_rpy_f = cam_pose(head_ext[final])  # now returns the pose in base frame
     hand_xyz_f, hand_rpy_f = cam_pose(hand_ext[final])
 
     return dict(
         traj_id                  = traj.name,
-        # final camera pose
+        # final camera pose in base frame
         head_xyz_final           = head_xyz_f,
         head_rpy_final_deg       = head_rpy_f,
         hand_xyz_final           = hand_xyz_f,
@@ -140,7 +150,7 @@ def extract_metrics(traj):
         vis_frac_head            = float(head_vis_frac),
         vis_frac_hand            = float(hand_vis_frac),
         longest_invis_gap_head   = head_long_gap,
-        longest_invis_gap_hand   = hand_long_gap,
+        longest_invis_gap_hand   = head_long_gap,
         t_since_view_to_grasp_h  = t_since_view_head,
         t_since_view_to_grasp_d  = t_since_view_hand,
         # outcome
@@ -151,7 +161,7 @@ def extract_metrics(traj):
 
 
 default_demo = Path.home() / ".maniskill/data/scene_datasets/replica_cad_dataset" \
-                            "/rearrange-dataset/set_table/pick/all.h5"
+                            "/rearrange-dataset/tidy_house/place/all.h5"
 
 ap = argparse.ArgumentParser()
 ap.add_argument("path", nargs="?", default=str(default_demo),
@@ -169,7 +179,10 @@ rows = []
 for fp in files:
     with h5py.File(fp, "r") as f:
         for traj in f.values():
-            rows.append(extract_metrics(traj))
+            metrics = extract_metrics(traj)
+            # Only store if overall success
+            if metrics["overall_success"]:
+                rows.append(metrics)
 
 df = pd.DataFrame(rows)
 

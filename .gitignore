@@ -183,6 +183,8 @@ my_debug_vis/
 
 static_mapping/
 
+lang_mapping/traj_explore/
+
 */RL/*
 *.npy
 *.pt
