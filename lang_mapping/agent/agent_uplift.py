@@ -1,3 +1,4 @@
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -19,6 +20,7 @@ class Agent_uplift(nn.Module):
         text_input: list = ["bowl", "apple"],
         clip_input_dim: int = 768,
         voxel_feature_dim: int = 128,
+        state_mlp_dim: int = 128,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         num_heads: int = 8,
@@ -31,6 +33,9 @@ class Agent_uplift(nn.Module):
         # Prepare state dimension
         state_obs: torch.Tensor = sample_obs["state"]
         state_dim = state_obs.shape[1]
+
+        # MLP for raw state
+        self.state_mlp = nn.Linear(state_dim, state_mlp_dim).to(self.device)
 
         # Load CLIP model
         clip_model, _, _ = open_clip.create_model_and_transforms(
@@ -65,6 +70,7 @@ class Agent_uplift(nn.Module):
             num_heads=num_heads,
         )
         
+        # Action MLP
         self.action_dim = np.prod(single_act_shape)
         
         self.action_transformer = ActionTransformerDecoder(

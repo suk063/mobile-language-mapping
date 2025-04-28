@@ -4,13 +4,13 @@ SEED=1
 
 TRAJS_PER_OBJ=10
 
-TASK=prepare_groceries
-SUBTASK=place
+TASK=set_table
+SUBTASK=pick
 SPLIT=train
 OBJ=all
 
 # Change according to the task
-ALL_PLAN_COUNT=519
+ALL_PLAN_COUNT=244
 NUM_ENVS=10
 
 # shellcheck disable=SC2001

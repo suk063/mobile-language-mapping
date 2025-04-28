@@ -3,7 +3,7 @@ seed: 0
 eval_env:
   make_env: True
 
-  env_id: "PlaceSubtaskTrain-v0"
+  env_id: "PickSubtaskTrain-v0"
   num_envs: 10
   max_episode_steps: 200
   all_plan_count: 244
@@ -18,8 +18,8 @@ eval_env:
   stationary_torso: False
   stationary_head: True
 
-  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/place/train/all.json
-  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/place/train/spawn_data.pt"
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all.json
+  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt"
 
   record_video: False
   info_on_video: True
