@@ -2,16 +2,16 @@
 
 SEED=1
 
-TRAJS_PER_OBJ=10
+TRAJS_PER_OBJ=1000
 
 TASK=set_table
-SUBTASK=place
+SUBTASK=pick
 SPLIT=train
 OBJ=all
 
 # Change according to the task
 ALL_PLAN_COUNT=244
-NUM_ENVS=10
+NUM_ENVS=30
 
 # shellcheck disable=SC2001
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
