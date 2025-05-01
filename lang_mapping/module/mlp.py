@@ -22,7 +22,7 @@ class ConcatMLPFusion(nn.Module):
     """
     (feat1, feat2, coords_3d) -> [concat + sinusoidal PE] -> MLP -> fused
     """
-    def __init__(self, feat_dim=768, clip_embedding_dim=768, L=10):
+    def __init__(self, feat_dim=768, clip_embedding_dim=768, output_dim=384, L=10):
         super().__init__()
         self.feat_dim = feat_dim
         self.L = L
@@ -43,6 +43,8 @@ class ConcatMLPFusion(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim)
         )
+        
+        self.output_proj = nn.Linear(feat_dim, output_dim)
 
     def forward(self, feat1, feat2, coords_3d=None):
         """
@@ -62,8 +64,8 @@ class ConcatMLPFusion(nn.Module):
             x = torch.cat([x, pe], dim=-1)
 
         # MLP 
-        fused = self.mlp(x)  # (B, N, feat_dim)
-        return fused
+        fused = self.mlp(x) + feat1 # (B, N, feat_dim)
+        return self.output_proj(fused)
     
 class ActionMLP(nn.Module):
     """
@@ -183,14 +185,14 @@ class ImplicitDecoder(nn.Module):
         return out
 
 class StateProj(nn.Module):
-    def __init__(self, state_dim=42, output_dim=120):
+    def __init__(self, state_dim=42, output_dim=768):
         super().__init__()
 
         self.mlp = nn.Sequential(
-            nn.Linear(state_dim, state_dim),
-            nn.ReLU(),
-            nn.LayerNorm(state_dim),
             nn.Linear(state_dim, output_dim),
+            nn.ReLU(),
+            nn.LayerNorm(output_dim),
+            nn.Linear(output_dim, output_dim)
         )
         
         self.apply(init_weights_kaiming)
@@ -200,13 +202,11 @@ class StateProj(nn.Module):
         return out
 
 class VoxelProj(nn.Module):
-    def __init__(self, voxel_feature_dim=120, L=10):
+    def __init__(self, voxel_feature_dim=768):
         super().__init__()
-        self.L = L
-        self.pos_enc_dim = 2 * self.L * 3
-
+        
         self.mlp = nn.Sequential(
-            nn.Linear(voxel_feature_dim + self.pos_enc_dim, voxel_feature_dim),
+            nn.Linear(voxel_feature_dim, voxel_feature_dim),
             nn.ReLU(),
             nn.LayerNorm(voxel_feature_dim),
             nn.Linear(voxel_feature_dim, voxel_feature_dim),
@@ -214,27 +214,27 @@ class VoxelProj(nn.Module):
         
         self.apply(init_weights_kaiming)
 
-    def forward(self, voxel_feat, coords_3d):
+    def forward(self, voxel_feat):
         """
         Args:
             voxel_feat: (N, voxel_feature_dim)
-            coords_3d:  (N, 3)
         Returns:
             projected:  (N, voxel_feature_dim)
         """
-        pe = positional_encoding(coords_3d, L=self.L)  # (N, 2*L*3)
-        x = torch.cat([voxel_feat, pe], dim=-1)
-        out = self.mlp(x)
+        out = self.mlp(voxel_feat)
         return out
 
 class DimReducer(nn.Module):
-    def __init__(self, input_dim=768, output_dim=240, L=10):
+    def __init__(self, input_dim=768, output_dim=768, L=10):
         super().__init__()
         self.L = L
         self.pos_enc_dim = 2 * self.L * 3
 
         self.mlp = nn.Sequential(
             nn.Linear(input_dim + self.pos_enc_dim, output_dim),
+            nn.ReLU(),
+            nn.LayerNorm(output_dim),
+            nn.Linear(output_dim, output_dim),
             nn.ReLU(),
             nn.LayerNorm(output_dim),
             nn.Linear(output_dim, output_dim),

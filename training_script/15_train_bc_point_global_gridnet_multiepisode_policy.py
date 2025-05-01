@@ -144,7 +144,7 @@ class BCConfig:
     num_learnable_tokens: int = 16
     num_action_layer: int = 6
     pe_level: int = 10
-    action_horizon: int = 16
+    action_horizon: int = 32
     neighbor_k: int = 512
 
     num_eval_envs: int = field(init=False)
@@ -284,7 +284,8 @@ def train(cfg: TrainConfig):
         action_horizon=cfg.algo.action_horizon
     ).to(device) 
     
-    # agent.static_map.load_state_dict(torch.load('pre-trained/latest_static_map.pt', map_location=device), strict=False)
+    agent.load_state_dict(torch.load('pre-trained/latest_agent.pt', map_location=device), strict=True)
+    agent.static_map.load_state_dict(torch.load('pre-trained/latest_static_map.pt', map_location=device), strict=False)
     agent.implicit_decoder.load_state_dict(torch.load('pre-trained/latest_decoder.pt', map_location=device), strict=True)
     
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
@@ -296,9 +297,11 @@ def train(cfg: TrainConfig):
         """
         static_map_path = logger.model_path / f"{name}_static_map.pt"
         decoder_path = logger.model_path / f"{name}_decoder.pt"
+        agent_path = logger.model_path / f"{name}_agent.pt"
 
-        torch.save(static_map.state_dict(), static_map_path)
-        torch.save(implicit_decoder.state_dict(), decoder_path)
+        # torch.save(static_map.state_dict(), static_map_path)
+        # torch.save(implicit_decoder.state_dict(), decoder_path)
+        torch.save(agent.state_dict(), agent_path)
 
     assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
     action_horizon = cfg.algo.action_horizon
@@ -333,8 +336,14 @@ def train(cfg: TrainConfig):
         """
         Store env stats in logger (evaluation only).
         """
-        assert key == "eval"
-        log_env = eval_envs
+
+        if key == "eval":
+            log_env = eval_envs
+        elif key == "eval_all":
+            log_env = eval_envs
+        else:
+            raise ValueError(f"Unsupported key: {key}")
+        
         logger.store(
             key,
             return_per_step=common.to_tensor(log_env.return_queue, device=device).float().mean()
@@ -344,6 +353,7 @@ def train(cfg: TrainConfig):
             len=common.to_tensor(log_env.length_queue, device=device).float().mean(),
         )
         log_env.reset_queues()
+
 
     # ------------------------------------------------
     # Mapping
@@ -370,7 +380,6 @@ def train(cfg: TrainConfig):
     ## SH
     # centers_by_level = load_logged_centers()
     # lvl1_centers = centers_by_level[1]          # shape (M_1, 3)
-
     # lvl1_centers_torch = torch.from_numpy(lvl1_centers).to(device)
 
     def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
@@ -410,9 +419,46 @@ def train(cfg: TrainConfig):
     
     params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.AdamW(params_to_optimize, lr=cfg.algo.lr)
-    
+
     agent.to(device)
 
+    # Evaluate in chunks
+    chunk_start = 0
+    plan_count = 244
+    
+    batch_size = eval_envs.num_envs
+    all_plan_idxs_list = list(range(plan_count))
+
+    print("Evaluating all tasks in chunks...")
+    agent.eval()
+    pbar = tqdm(total=plan_count, desc="Evaluating all tasks (last epoch)")
+    while chunk_start < plan_count:
+        chunk_end = min(chunk_start + batch_size, plan_count)
+        chunk_size = chunk_end - chunk_start
+        chunk = all_plan_idxs_list[chunk_start:chunk_end]
+
+        # If chunk is smaller than batch_size, pad it with the last element
+        if chunk_size < batch_size:
+            chunk += [chunk[-1]] * (batch_size - chunk_size)
+
+        plan_idxs_tensor = torch.tensor(chunk, dtype=torch.int)
+
+        eval_obs, info = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
+        run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+        
+        chunk_start += batch_size
+        pbar.update(chunk_size)
+        
+    total_success_once = sum(eval_envs.success_once_queue)  
+    total_episodes_seen  = len(eval_envs.success_once_queue)  
+        
+    sr = total_success_once / total_episodes_seen    
+    pbar.set_postfix_str(f"SR={sr:.2%}")      
+
+    if len(eval_envs.return_queue) > 0:
+        store_env_stats("eval_all")
+
+    # Training loop
     for epoch in range(cfg.algo.epochs):
         global_epoch = logger_start_log_step + epoch
         
@@ -422,12 +468,11 @@ def train(cfg: TrainConfig):
 
         for obs, act, subtask_uids, traj_idx, is_grasped in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
-            # epi_ids = torch.tensor(
-            #     [uid2episode_id[uid] for uid in subtask_uids],
-            #     device=device,
-            #     dtype=torch.long,
-            # )    
-            epi_ids = torch.zeros(act.shape[0], device=device, dtype=torch.long)
+            epi_ids = torch.tensor(
+                [uid2episode_id[uid] for uid in subtask_uids],
+                device=device,
+                dtype=torch.long,
+            )    
             
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 

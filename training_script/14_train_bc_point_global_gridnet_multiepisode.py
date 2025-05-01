@@ -86,7 +86,7 @@ class GridDefinition:
     bound: List[List[float]] = field(
         default_factory=lambda: [[-2.6, 4.6], [-8.1, 4.7], [0.0, 3.1]]
     )
-    base_cell_size: float = 0.4
+    base_cell_size: float = 0.3
     per_level_scale: float = 2.0
     n_levels: int = 2
     n_scenes: int = 122
@@ -268,6 +268,7 @@ def train(cfg: TrainConfig):
     ).to(device)
     
     agent.implicit_decoder.load_state_dict(torch.load('pre-trained/latest_decoder.pt', map_location=device), strict=True)
+    agent.static_map.load_state_dict(torch.load('pre-trained/latest_static_map.pt', mmap=True), strict=True)
     
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -342,7 +343,7 @@ def train(cfg: TrainConfig):
     
     agent.to(device)
     
-    # static_map.snapshot()
+    static_map.snapshot()
 
     for epoch in range(cfg.algo.epochs):
         global_epoch = logger_start_log_step + epoch
@@ -365,14 +366,14 @@ def train(cfg: TrainConfig):
             if total_cos_loss == 0:
                 continue
             cos_loss = total_cos_loss * cfg.algo.cos_loss_weight
+            # consistency = static_map.inter_scene_consistency_loss()
+            # consistency_loss  = consistency
             
-            if epoch <= 5:
-                consistency = static_map.inter_scene_consistency_loss()
-                consistency_loss  = consistency
-            
-                loss = cos_loss + consistency_loss
-            else:
-                loss = cos_loss
+            loss = cos_loss            
+            # if epoch <= 4:
+            #     loss = cos_loss + consistency_loss
+            # else:
+            #     loss = cos_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -381,8 +382,8 @@ def train(cfg: TrainConfig):
             n_samples += act.size(0)
             global_step += 1
 
-            writer.add_scalar("cos Loss/Iteration", cos_loss.item(), global_step)
-            writer.add_scalar("consistency Loss/Iteration", consistency_loss.item(), global_step)
+            writer.add_scalar("Cos Loss/Iteration", cos_loss.item(), global_step)
+            # writer.add_scalar("Consistency Loss/Iteration", consistency_loss.item(), global_step)
 
 
         avg_loss = tot_loss / n_samples
@@ -418,7 +419,7 @@ def train(cfg: TrainConfig):
     
     
     ### SH: save
-    # static_map.dump_changed_centers() 
+    static_map.dump_changed_centers() 
     
     
     # Now evaluate all task plans in chunks

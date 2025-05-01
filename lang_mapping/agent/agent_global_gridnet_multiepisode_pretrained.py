@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Local imports
-from ..module.transformer import ActionTransformerDecoder
+from ..module.transformer import ActionTransformerDecoder, TransformerLayer
 from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, StateProj, ConcatMLPFusion
 from lang_mapping.grid_net import GridNet
 
@@ -13,6 +13,73 @@ import open_clip
 import math
 from typing import Optional
 import timm
+import copy
+
+class RGBiCA(nn.Module):
+    """
+    Bidirectional cross-attention with a learnable gate so that
+    global tokens update local tokens *residually* without erasing
+    their content.
+
+    L_in : (B, S_L, C)  – local  stream (e.g. TransformerEncoder output)
+    G_in : (B, S_G, C)  – global stream (e.g. ScenePerceiver output)
+    returns (L_out, G_out) with same shapes
+    """
+    def __init__(self, dim: int, heads: int = 8,
+                 ff_mult: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.ca_gl = nn.MultiheadAttention(dim, heads, dropout=dropout,
+                                           batch_first=True)   # G ← L
+        self.ca_lg = nn.MultiheadAttention(dim, heads, dropout=dropout,
+                                           batch_first=True)   # L ← G
+        self.gate   = nn.Parameter(torch.zeros(1, 1, dim))     # α, init 0
+
+        ffn_dim     = ff_mult * dim
+        self.ff_L   = nn.Sequential(nn.LayerNorm(dim),
+                                    nn.Linear(dim, ffn_dim), nn.GELU(),
+                                    nn.Linear(ff_mult*dim, dim))
+        self.ff_G   = copy.deepcopy(self.ff_L)
+
+    def forward(self, L, G):
+        # --- (1)  G ← G + CA(G ⇐ L) ---------------------------
+        delta_G, _ = self.ca_gl(G, L, L)          # key/value = L
+        G     = G + delta_G
+
+        # --- (2)  L ← L + σ(α)·CA(L ⇐ G) ----------------------
+        sig     = torch.sigmoid(self.gate)     # 0…1, broadcastable
+        delta_L, _ = self.ca_lg(L, G, G)          # key/value = G
+        L     = L + sig * delta_L                   # gated residual
+
+        # --- (3)  independent FFN clean-up --------------------
+        return self.ff_L(L), self.ff_G(G)
+
+class DP3Encoder(nn.Module):
+    """
+    3-Layer MLP + LayerNorm + MaxPool + Projection
+    Input : (B, N, in_dim)
+    Output: (B, out_dim)               # 전역 1-벡터
+    """
+    def __init__(self, in_dim=768,   # transf_input_dim 와 맞춰둡니다
+                 hidden_dim=1024,
+                 out_dim=768):
+        super().__init__()
+
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),  nn.LayerNorm(hidden_dim), nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim,  hidden_dim),     nn.LayerNorm(hidden_dim), nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim,  hidden_dim),     nn.LayerNorm(hidden_dim), nn.ReLU(inplace=True),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(hidden_dim, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+
+    def forward(self, pts, pad_mask=None):        # pts: (B,N,C)
+        x = self.mlp(pts)                         # (B,N,H3)
+        if pad_mask is not None:
+            x = x.masked_fill(pad_mask.unsqueeze(-1), -1e9)
+        g = x.max(dim=1)[0]                       # (B,H3)  Max-Pool
+        return self.proj(g)                       # (B,out_dim)
 
 # ──────────────────────────────────────────────────────────────────────
 # 2.  Perceiver cross-attention (learnable query, RoPE, padding mask)
@@ -60,81 +127,6 @@ class ScenePerceiver(nn.Module):
 
         return x                                   # (B,T,C)
 
-class TransformerLayer(nn.Module):
-    def __init__(
-        self, 
-        d_model=256, 
-        n_heads=8, 
-        dim_feedforward=1024, 
-        dropout=0.1
-    ):
-        super().__init__()
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        
-        # Q, K, V projection layers
-        self.W_q = nn.Linear(d_model, d_model)
-        self.W_k = nn.Linear(d_model, d_model)
-        self.W_v = nn.Linear(d_model, d_model)
-        
-        # Output projection after attention
-        self.out_proj = nn.Linear(d_model, d_model)
-        
-        # Feed-forward network
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-        
-        # Dropouts
-        self.dropout_attn = nn.Dropout(dropout)
-        self.dropout_ff = nn.Dropout(dropout)
-        
-        # Layer norms
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        
-        # Activation
-        self.activation = F.gelu
-
-    def forward(
-        self, 
-        src: torch.Tensor,             # (B, S, d_model)
-        coords_src: torch.Tensor = None,  # (B, S, 3) or None
-        causal_mask=None,
-    ) -> torch.Tensor:
-        # src shape: (B, S, d_model)
-        B, S, _ = src.shape
-        
-        # 1) Q, K, V projections
-        q = self.W_q(src)  # (B, S, d_model)
-        k = self.W_k(src)
-        v = self.W_v(src)
-        
-        # 2) Reshape and transpose for multi-head
-        # => (B, n_heads, S, head_dim)
-        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        
-        # 3) Apply RoPE if coords_src is provided
-        if coords_src is not None:
-            q = rotary_pe_3d(q, coords_src)
-            k = rotary_pe_3d(k, coords_src)
-            # v is often unchanged in RoPE
-        
-        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
-        
-        if causal_mask is not None:
-            scores = scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
-    
-        attn = torch.matmul(F.softmax(scores, -1), v)
-        attn = attn.transpose(1, 2).contiguous().view(B, S, self.d_model)
-        src2 = self.norm1(src + self.dropout_attn(self.out_proj(attn)))
-        ff = self.linear2(self.activation(self.linear1(src2)))
-        
-        return self.norm2(src2 + self.dropout_ff(ff))
-
-
 class TransformerEncoder(nn.Module):
     def __init__(
         self,
@@ -146,12 +138,12 @@ class TransformerEncoder(nn.Module):
     ):
         super().__init__()
         
-        self.num_learn_tokens = num_learn_tokens
+        # self.num_learn_tokens = num_learn_tokens
         
-        self.tokens_m1 = nn.Parameter(torch.zeros(1, num_learn_tokens, input_dim))
-        self.tokens_t  = nn.Parameter(torch.zeros(1, num_learn_tokens, input_dim))
-        nn.init.xavier_uniform_(self.tokens_m1)
-        nn.init.xavier_uniform_(self.tokens_t)
+        # self.tokens_m1 = nn.Parameter(torch.zeros(1, num_learn_tokens, input_dim))
+        # self.tokens_t  = nn.Parameter(torch.zeros(1, num_learn_tokens, input_dim))
+        # nn.init.xavier_uniform_(self.tokens_m1)
+        # nn.init.xavier_uniform_(self.tokens_t)
         
         # Transformer layers
         self.layers = nn.ModuleList([
@@ -187,10 +179,10 @@ class TransformerEncoder(nn.Module):
         tokens += [hand_token_m1, head_token_m1]
         coords += [coords_hand_m1, coords_head_m1]
         
-        tok_m1   = self.tokens_m1.expand(B, -1, -1)                      # (B,ℓ,D)
-        coord_m1 = trans_head_m1.unsqueeze(1).expand(-1, self.num_learn_tokens, -1)
-        tokens.append(tok_m1)
-        coords.append(coord_m1)
+        # tok_m1   = self.tokens_m1.expand(B, -1, -1)                      # (B,ℓ,D)
+        # coord_m1 = trans_head_m1.unsqueeze(1).expand(-1, self.num_learn_tokens, -1)
+        # tokens.append(tok_m1)
+        # coords.append(coord_m1)
         
         # 6)  current state
         if state_t is not None:
@@ -201,21 +193,21 @@ class TransformerEncoder(nn.Module):
         tokens += [hand_token_t, head_token_t]
         coords += [coords_hand_t, coords_head_t]
         
-        tok_t   = self.tokens_t.expand(B, -1, -1)                        # (B,ℓ,D)
-        coord_t = trans_head_t.unsqueeze(1).expand(-1, self.num_learn_tokens, -1)
-        tokens.append(tok_t)
-        coords.append(coord_t)
+        # tok_t   = self.tokens_t.expand(B, -1, -1)                        # (B,ℓ,D)
+        # coord_t = trans_head_t.unsqueeze(1).expand(-1, self.num_learn_tokens, -1)
+        # tokens.append(tok_t)
+        # coords.append(coord_t)
         
         src        = torch.cat(tokens,  1)                               # (B,S,D)
         coords_src = torch.cat(coords, 1) if coords_hand_t is not None else None
         
-        len_m1 = self.num_learn_tokens                  # learnable m-1
+        len_m1 = 0                  # learnable m-1
         if state_m1 is not None: len_m1 += 1
-        len_m1 += hand_token_m1.size(1) * 2
+        len_m1 += hand_token_m1.size(1) + head_token_m1.size(1)
 
-        len_t  = self.num_learn_tokens                  # learnable t
+        len_t  = 0                  # learnable t
         if state_t is not None: len_t  += 1
-        len_t  += hand_token_t.size(1) * 2
+        len_t  += hand_token_t.size(1) + head_token_t.size(1)
 
         causal_mask = build_causal_mask(len_m1, len_t, src.device) 
 
@@ -225,7 +217,7 @@ class TransformerEncoder(nn.Module):
                 causal_mask=causal_mask
             )
         
-        return src[:,-self.num_learn_tokens:,:]    # (B, N*? + 1, D)
+        return src[:,len_m1+1:,:]    # (B, N*? + 1, D)
 
 def init_weights_kaiming(m):
     if isinstance(m, nn.Linear):
@@ -242,7 +234,6 @@ def build_causal_mask(n_m1, n_t, device):
     mask[0:n_m1, n_m1:] = True
 
     return mask
-
 
 class PerceiverAttentionLayer(nn.Module):
     def __init__(
@@ -349,7 +340,7 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
         num_layers_perceiver: int = 4,
         num_learnable_tokens: int = 16,
         num_action_layer: int = 6,
-        action_horizon: int = 16
+        action_pred_horizon: int = 16,
     ):
         super().__init__()
 
@@ -381,15 +372,11 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
             
             text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
             self.text_embeddings = text_embeddings - redundant_emb
-
-
-        # Reduce CLIP feature dimension
-        self.dim_reducer_global = nn.Linear(clip_input_dim, transf_input_dim)
         
         # Transformer for feature fusion
         self.transformer = TransformerEncoder(
             input_dim=transf_input_dim,
-            hidden_dim=1024,
+            hidden_dim=transf_input_dim * 4,
             num_layers=num_layers_transformer,
             num_heads=num_heads,
             num_learn_tokens=num_learnable_tokens
@@ -402,10 +389,10 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
             d_model=transf_input_dim,         
             nhead=8,
             num_decoder_layers=num_action_layer,   
-            dim_feedforward=1024,
+            dim_feedforward=transf_input_dim * 4,
             dropout=0.1,
             action_dim=self.action_dim,
-            action_horizon=action_horizon
+            action_pred_horizon=action_pred_horizon
         )
 
         # Voxel hashing and implicit decoder
@@ -425,20 +412,18 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
             input_dim         = transf_input_dim,
             nhead             = num_heads,
             num_layers        = num_layers_perceiver,
-            hidden_dim        = 1024,
+            hidden_dim        = transf_input_dim * 4,
             num_learn_tokens  = num_learnable_tokens,
         )
         
-        self.visual_fuser = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model      = transf_input_dim,
-                nhead        = num_heads,
-                dim_feedforward = 1024,  
-                dropout      = 0.1,
-                batch_first  = True,
-            ),
-            num_layers = 4,     
+        self.dp3_encoder = DP3Encoder(
+            in_dim  = transf_input_dim,
+            out_dim = transf_input_dim,
         )
+        
+        self.gl_fuser = RGBiCA(dim=transf_input_dim,
+                       heads=num_heads,
+                       ff_mult=4, dropout=0.1)
     
     @staticmethod
     def _flatten_pose(p):            # p: [B, 1, 3, 4]
@@ -568,8 +553,11 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
         hand_depth_flat_t = hand_depth_t.reshape(B*N)
         head_depth_flat_t = head_depth_t.reshape(B*N)
 
-        depth_mask_hand = hand_depth_flat_t > 0.3  
-        depth_mask_head = head_depth_flat_t > 0.6
+        # depth_mask_hand = hand_depth_flat_t > 0.3  
+        # depth_mask_head = head_depth_flat_t > 0.6
+        
+        depth_mask_hand = hand_depth_flat_t > 0.0 
+        depth_mask_head = head_depth_flat_t > 0.0
         
         scene_ids_flat = batch_valid_episode_ids.view(-1, 1).expand(-1, N).reshape(-1, 1)       # (B*N,1)
 
@@ -723,21 +711,7 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
         hand_coords_world_flat_m1 = hand_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
         head_coords_world_flat_m1 = head_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
         
-        # Query voxel features and cos simeilarity
-        scene_ids_flat = batch_episode_ids.view(-1, 1).expand(-1, N).reshape(-1, 1)
-        
-        # with torch.no_grad():
-        #     voxel_feat_points_hand_flat_t = self.static_map.query_feature(hand_coords_world_flat_t, scene_ids_flat)
-        #     voxel_feat_points_head_flat_t = self.static_map.query_feature(head_coords_world_flat_t, scene_ids_flat)
-            
-        #     voxel_feat_points_hand_flat_m1 = self.static_map.query_feature(hand_coords_world_flat_m1, scene_ids_flat)
-        #     voxel_feat_points_head_flat_m1 = self.static_map.query_feature(head_coords_world_flat_m1, scene_ids_flat)
-    
-        # voxel_feat_points_hand_flat_final_t = self.implicit_decoder(voxel_feat_points_hand_flat_t)
-        # voxel_feat_points_head_flat_final_t = self.implicit_decoder(voxel_feat_points_head_flat_t)
-        
-        # voxel_feat_points_hand_flat_final_m1 = self.implicit_decoder(voxel_feat_points_hand_flat_m1)
-        # voxel_feat_points_head_flat_final_m1 = self.implicit_decoder(voxel_feat_points_head_flat_m1)
+        0
         
         # --------------------------------------------------------------------- #
         # 1)  text embeddings for this batch
@@ -792,20 +766,15 @@ class Agent_global_gridnet_multiepisode_pretrained(nn.Module):
         ) # [B, N, 240]
         
         kv_coords, kv_feats, kv_pad = self._gather_scene_kv(batch_episode_ids, text_emb)
-        perceiver_out = self.scene_perceiver(     # nn.Module registered in __init__
-            kv_coords = kv_coords,
-            kv_feats  = kv_feats,
-            kv_pad_mask = kv_pad,
-            head_trans  = trans_head_t,
-        )    
-        
-        visual_tokens = torch.cat([out_transformer,  perceiver_out],  dim=1)
-        visual_tokens = self.visual_fuser(visual_tokens)
+        g_vec = self.dp3_encoder(kv_feats, kv_pad)
+        global_tokens = g_vec.unsqueeze(1)
+
+        local_feats, global_feats = self.gl_fuser(out_transformer, global_tokens)
+        visual_tokens = torch.cat([local_feats, global_feats], dim=1)
         
         state_t_proj  = self.state_mlp_for_action(state_t_cat).unsqueeze(1)    # [B, 240]
         
         action_out = self.action_transformer(visual_tokens, state_t_proj)
         
         return action_out
-    
 
