@@ -295,7 +295,7 @@ class TransformerLayer(nn.Module):
         self, 
         src: torch.Tensor,             # (B, S, d_model)
         coords_src: torch.Tensor = None,  # (B, S, 3) or None
-        len_m1: int = 513
+        causal_mask=None,
     ) -> torch.Tensor:
         # src shape: (B, S, d_model)
         B, S, _ = src.shape
@@ -319,21 +319,15 @@ class TransformerLayer(nn.Module):
         
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
         
-        if len_m1 > 0:
-            attn_mask = make_casual_mask(S, len_m1, src.device)  # (S, S)
-            scores = scores.masked_fill(attn_mask.unsqueeze(0).unsqueeze(0), float('-inf')) 
+        if causal_mask is not None:
+            scores = scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
     
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, v)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, S, self.d_model)
+        attn = torch.matmul(F.softmax(scores, -1), v)
+        attn = attn.transpose(1, 2).contiguous().view(B, S, self.d_model)
+        src2 = self.norm1(src + self.dropout_attn(self.out_proj(attn)))
+        ff = self.linear2(self.activation(self.linear1(src2)))
         
-        src2 = self.norm1(src + self.dropout_attn(self.out_proj(attn_output)))
-        
-        # Feed froward network
-        ff_out = self.linear2(self.activation(self.linear1(src2)))
-        out2 = self.norm2(src2 + self.dropout_ff(ff_out))
-        
-        return out2
+        return self.norm2(src2 + self.dropout_ff(ff))
 
 class TransformerEncoder(nn.Module):
     def __init__(
@@ -427,11 +421,11 @@ class ActionTransformerDecoder(nn.Module):
         dim_feedforward: int,
         dropout: float,
         action_dim: int,
-        action_horizon: int = 24,
+        action_pred_horizon: int = 16,
     ):
         super().__init__()
         
-        self.query_embed = nn.Embedding(action_horizon, d_model)  # [3, d_model]
+        self.query_embed = nn.Embedding(action_pred_horizon, d_model)  # [3, d_model]
         
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
@@ -443,7 +437,8 @@ class ActionTransformerDecoder(nn.Module):
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
         
         self.action_head = nn.Linear(d_model, action_dim)
-        self.action_horizon = action_horizon
+        self.action_pred_horizon = action_pred_horizon
+        self.casual_mask = generate_subsequent_mask(self.action_pred_horizon+1)
         
     def forward(self, memory, state) -> torch.Tensor:
 
@@ -460,17 +455,15 @@ class ActionTransformerDecoder(nn.Module):
         state = state.permute(1, 0, 2).contiguous()
         tgt = torch.cat([state, query_pos], dim=0)
         
-        casual_mask = generate_subsequent_mask(self.action_horizon+1).to(memory.device)
-        
         decoder_out = self.decoder(
             tgt=tgt,    # [T, B, d_model]
             memory=memory,      # [N, B, d_model]
-            tgt_mask=casual_mask
+            tgt_mask=self.casual_mask
         ) 
         
         decoder_out = decoder_out.permute(1, 0, 2)         # [B, 4, d_model]
         action_out = self.action_head(decoder_out)         # [B, 4, action_dim]
-        return action_out[:,1:, :]
+        return action_out[:, 1:, :]
 
 
 # class LocalSelfAttentionFusion(nn.Module):
@@ -523,7 +516,7 @@ class LocalSelfAttentionFusion(nn.Module):
         num_heads: int = 8,
         ffn_multiplier: int = 2,
         dropout: float = 0.1,
-        output_dim: int = 384,
+        output_dim: int = 368,
     ):
         super().__init__()
 

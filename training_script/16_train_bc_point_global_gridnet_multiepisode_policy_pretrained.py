@@ -125,7 +125,8 @@ class BCConfig:
     num_learnable_tokens: int = 32
     num_action_layer: int = 6
     pe_level: int = 10
-    action_horizon: int = 16
+    action_pred_horizon: int = 16
+    action_exec_horizon: int = 4
     neighbor_k: int = 512
     action_temp_weights: float = 0.25
     transf_input_dim: int = 768
@@ -262,8 +263,7 @@ def train(cfg: TrainConfig):
         num_layers_perceiver=cfg.algo.num_layers_perceiver,
         num_learnable_tokens=cfg.algo.num_learnable_tokens,
         num_action_layer=cfg.algo.num_action_layer,
-        neighbor_k=cfg.algo.neighbor_k,
-        action_horizon=cfg.algo.action_horizon
+        action_pred_horizon=cfg.algo.action_pred_horizon
     ).to(device) 
     
     # agent.load_state_dict(torch.load('pre-trained/latest_agent.pt', map_location=device), strict=True)
@@ -299,7 +299,7 @@ def train(cfg: TrainConfig):
             raise FileNotFoundError(f"No center files found in {root_dir}")
         return centers
         
-    agent.valid_coords = load_changed_centers(device=device)[1]
+    agent.valid_coords = load_changed_centers(device=device)[0]
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -317,13 +317,13 @@ def train(cfg: TrainConfig):
         torch.save(agent.state_dict(), agent_path)
 
     assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
-    action_horizon = cfg.algo.action_horizon
+    action_pred_horizon = cfg.algo.action_pred_horizon
     
     # Create BC dataset and dataloader
     bc_dataset = TempTranslateToPointDataset(
         cfg.algo.data_dir_fp,
         obs_horizon=2,
-        pred_horizon=action_horizon+1,
+        pred_horizon=action_pred_horizon+1,
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
@@ -383,11 +383,11 @@ def train(cfg: TrainConfig):
     for name, param in agent.implicit_decoder.named_parameters():
         param.requires_grad = False  
     
-    alpha = cfg.algo.action_temp_weights
-    time_indices = torch.arange(action_horizon).to(device)           # [0, 1, 2, ..., horizon-1]
-    time_weights = torch.exp(-alpha * time_indices)                  # exp(-alpha * i)
-    time_weights = time_weights / time_weights.sum()
-    time_weights = time_weights.view(1, action_horizon, 1)
+    # alpha = cfg.algo.action_temp_weights
+    # time_indices = torch.arange(action_pred_horizon).to(device)           # [0, 1, 2, ..., horizon-1]
+    # time_weights = torch.exp(-alpha * time_indices)                  # exp(-alpha * i)
+    # time_weights = time_weights / time_weights.sum()
+    # time_weights = time_weights.view(1, action_pred_horizon, 1)
     
 
     def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
@@ -398,6 +398,7 @@ def train(cfg: TrainConfig):
         device = eval_obs["state"].device
         max_steps = eval_envs.max_episode_steps
         prev_obs = eval_obs  # For the first step, prev_obs = current_obs = reset result
+        step_cnt  = 0   
 
         # Get subtask info (labels and indices) for the episode
         plan0 = eval_envs.unwrapped.task_plan[0]
@@ -411,17 +412,23 @@ def train(cfg: TrainConfig):
         # Batch size (number of parallel evaluation environments)
         B = subtask_labels.size(0)
 
-        for t in range(max_steps):
-            # Merge observations from time t and t-1
+        while step_cnt < max_steps:
             agent_obs = merge_t_m1(prev_obs, eval_obs)
 
             with torch.no_grad():
-                action = agent.forward_policy(agent_obs, subtask_labels, epi_ids)
+                action_seq = agent.forward_policy(agent_obs, subtask_labels, epi_ids)
+                exec_action_seq = action_seq[:, :cfg.algo.action_exec_horizon, :]
+                # action_seq : [B, action_exec_horizon, action_dim]
+            
+            for i in range(exec_action_seq.shape[1]):          # exec horizon 만큼 실행
+                next_obs, _, terminated, truncated, _ = eval_envs.step(exec_action_seq[:, i, :])
+                step_cnt += 1
 
-            # Environment step
-            next_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])
-            prev_obs = eval_obs
-            eval_obs = next_obs
+                prev_obs = eval_obs
+                eval_obs = next_obs
+
+                if terminated.any() or truncated.any() or step_cnt >= max_steps:
+                    break
 
         return eval_obs
     
@@ -451,8 +458,9 @@ def train(cfg: TrainConfig):
             pi = agent.forward_policy(obs, subtask_labels, epi_ids)
             
             total_bc_loss = F.smooth_l1_loss(pi, act, reduction='none')
-            weighted_bc_loss = total_bc_loss * time_weights
-            bc_loss = 10 * weighted_bc_loss.mean()
+            # weighted_bc_loss = total_bc_loss * time_weights
+            # bc_loss = 10 * weighted_bc_loss.mean()
+            bc_loss = total_bc_loss.mean()
         
             loss = bc_loss
 

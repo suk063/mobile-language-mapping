@@ -82,7 +82,7 @@ class DPDataset(ClosableDataset):
 
                 if truncate_trajectories_at_success:
                     success: List[bool] = f[k]["success"][:].tolist()
-                    success_cutoff = min(success.index(True), len(success))
+                    success_cutoff = min(success.index(True)+5, len(success))
                     del success
                 else:
                     success_cutoff = len(act)
@@ -208,9 +208,8 @@ class DPDataset(ClosableDataset):
                     start,
                     start + pred_horizon,
                 )
-                # for start in range(-pad_before, L - pred_horizon + pad_after)
-                # NOTE (arth): start at 0 since we use o_t and o_{t+1} for scene flow est
-                for start in range(0, L - pred_horizon + pad_after)
+
+                for start in range(-pad_before, L-pred_horizon+pad_after)
             ]  # slice indices follow convention [start, end)
 
         print(
@@ -301,8 +300,8 @@ class TempTranslateToPointDataset(DPDataset):
         obs = {**state_obs, "pixels": pixel_obs}
 
         # NOTE (arth): we use start act and step_num since we use o_t and o_{t+1} for scene flow est
-        
-        act = item["actions"][1:] 
+
+        act = item["actions"][1:]
 
         subtask_uid = item["subtask_uid"]
         traj_idx = item["traj_idx"]
