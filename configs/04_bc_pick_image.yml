@@ -4,7 +4,7 @@ eval_env:
   make_env: True
 
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 20
+  num_envs: 30
   max_episode_steps: 200
   all_plan_count: 244
  
@@ -18,8 +18,8 @@ eval_env:
   stationary_torso: False
   stationary_head: True
 
-  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/prepare_groceries/pick/train/all.json
-  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/prepare_groceries/pick/train/spawn_data.pt"
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all.json
+  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt"
 
   record_video: False
   info_on_video: True
@@ -35,9 +35,8 @@ algo:
   name: bc
 
   lr: 3e-4
-  batch_size: 8
-  
-  stage1_epochs: 2
+  batch_size: 32
+  epochs: 20
 
   eval_freq: 1
   log_freq: 1

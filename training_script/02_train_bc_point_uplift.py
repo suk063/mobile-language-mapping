@@ -1,12 +1,9 @@
-import json
-import os
 import random
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union
 
-import h5py
 from dacite import from_dict
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -14,12 +11,10 @@ from tqdm import tqdm
 import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 # ManiSkill imports
-import mani_skill.envs
 from mani_skill.utils import common
 
 from lang_mapping.agent.agent_uplift import Agent_uplift
@@ -88,8 +83,6 @@ class BCConfig:
     hidden_dim: int = 240
     num_heads: int = 8
     num_layers_transformer: int = 4
-    num_learnable_tokens: int = 16
-    pe_level: int = 10
     action_horizon: int = 16
     scaling_factor: float = 0.3
     bc_loss_weights: float = 10.0
@@ -246,8 +239,6 @@ def train(cfg: TrainConfig):
 
         if key == "eval":
             log_env = eval_envs
-        elif key == "eval_all":
-            log_env = eval_envs
         else:
             raise ValueError(f"Unsupported key: {key}")
         logger.store(
@@ -259,6 +250,25 @@ def train(cfg: TrainConfig):
             len=common.to_tensor(log_env.length_queue, device=device).float().mean(),
         )
         log_env.reset_queues()
+        
+    # dict to keep track of the totals outside the loop
+    agg = dict(ret_sum=0.0, suc1_sum=0.0, sucE_sum=0.0, len_sum=0.0, n=0)
+    
+    # Helper method to flush the stats
+    def flush_env_stats(env):
+        r  = torch.tensor(env.return_queue,          dtype=torch.float32)
+        s1 = torch.tensor(env.success_once_queue,    dtype=torch.float32)
+        sE = torch.tensor(env.success_at_end_queue,  dtype=torch.float32)
+        L  = torch.tensor(env.length_queue,          dtype=torch.float32)
+
+        agg["ret_sum"] += r.sum().item()
+        agg["suc1_sum"] += s1.sum().item()
+        agg["sucE_sum"] += sE.sum().item()
+        agg["len_sum"] += L.sum().item()
+        agg["n"]       += r.numel()
+
+        # clear for next env or next chunk
+        env.reset_queues()    
 
     # ------------------------------------------------
     # Stage 1:  Policy only (BC loss)
@@ -284,7 +294,7 @@ def train(cfg: TrainConfig):
     for epoch in range(cfg.algo.epochs):
         global_epoch = logger_start_log_step + epoch
         
-        logger.print(f"[Stage 1] Epoch: {global_epoch}")
+        logger.print(f"Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
         agent.train()
 
@@ -325,7 +335,7 @@ def train(cfg: TrainConfig):
             agent.eval()
 
             # If not last epoch
-            if epoch < (cfg.algo.stage1_epochs - 1):
+            if epoch < (cfg.algo.epochs - 1):
                 eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
                 # DEBUG
                 # for i, plan in enumerate(eval_envs.unwrapped.task_plan):
@@ -362,8 +372,15 @@ def train(cfg: TrainConfig):
                     chunk_size = chunk_end - chunk_start
                     chunk = all_plan_idxs_list[chunk_start:chunk_end]
 
+                    # MARK: (woojeh) If it's a last chunk (maybe smaller than batch_size) than we flush and rebuild the env
                     if chunk_size < batch_size:
-                        chunk += [chunk[-1]] * (batch_size - chunk_size)
+                        flush_env_stats(eval_envs)
+                        eval_envs.close()
+                        # # DEBUG
+                        # print(f"We create last env with {chunk_size} envs.")
+                        temp_cfg = replace(cfg.eval_env, num_envs=chunk_size)
+                        eval_envs = make_env(temp_cfg, video_path=cfg.logger.eval_video_path)
+                        batch_size = chunk_size
 
                     plan_idxs_tensor = torch.tensor(chunk, dtype=torch.int)
 
@@ -374,16 +391,24 @@ def train(cfg: TrainConfig):
                     #     print(f"[Eval Env {i}] subtask UIDs = {plan.composite_subtask_uids}")
 
                     run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
-
+                    
+                    flush_env_stats(eval_envs)
+                    
                     chunk_start += batch_size
                     pbar.update(chunk_size)
-                
-                if len(eval_envs.return_queue) > 0:
-                    store_env_stats("eval_all")
 
                 pbar.close() 
 
-                # Done with all tasks
+                # Done with all tasks so we store from the agg
+                logger.store(
+                    "eval_all",
+                    return_per_step = agg["ret_sum"]/agg["len_sum"],
+                    success_once    = agg["suc1_sum"]/agg["n"],
+                    success_at_end  = agg["sucE_sum"]/agg["n"],
+                    len         = agg["len_sum"]/agg["n"],
+                    len_sum             = agg["len_sum"],
+                    n               = agg["n"],
+                )
                 logger.log(global_epoch)
                 timer.end(key="eval")
 
