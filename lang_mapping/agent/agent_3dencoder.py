@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from lang_mapping.module.transformer import TransformerEncoder, ActionTransformerDecoder
+from ..module.transformer import TransformerEncoder, ActionTransformerDecoder
 from ..module.mlp import StateProj
 
 from ..utils import get_3d_coordinates, transform
@@ -53,7 +53,7 @@ class Agent_3dencoder(nn.Module):
         open_clip_model: tuple = ("EVA02-L-14", "merged2b_s4b_b131k"),
         text_input: list = ["bowl", "apple"],
         clip_input_dim: int = 768,
-        voxel_feature_dim: int = 240,
+        transf_input_dim: int = 768,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         num_heads: int = 8,
@@ -68,8 +68,7 @@ class Agent_3dencoder(nn.Module):
         state_dim = state_obs.shape[1]
 
         # MLP for raw state
-        # self.state_mlp = nn.Linear(state_dim, state_mlp_dim).to(self.device)
-        self.dp3_encoder = DP3Encoder(in_dim=3, out_dim=voxel_feature_dim).to(self.device)
+        self.dp3_encoder = DP3Encoder(in_dim=3, out_dim=transf_input_dim)
 
         # Load CLIP model
         clip_model, _, _ = open_clip.create_model_and_transforms(
@@ -81,37 +80,41 @@ class Agent_3dencoder(nn.Module):
 
         
         text_tokens = self.tokenizer(text_input).to(self.device)
-        self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
+        self.text_proj = nn.Linear(clip_input_dim, transf_input_dim)
         with torch.no_grad():
             text_embeddings = self.clip_model.encode_text(text_tokens)
             self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
+            
+            text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
+            self.text_embeddings = text_embeddings - redundant_emb
 
-        self.state_proj_transformer =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device)   
+
+        self.state_proj =  StateProj(state_dim=state_dim, output_dim=transf_input_dim)   
 
         # Transformer for feature fusion
         self.transformer = TransformerEncoder(
-            input_dim=voxel_feature_dim,
-            hidden_dim=1024,
+            input_dim=transf_input_dim,
+            hidden_dim=transf_input_dim * 4,
             num_layers=num_layers_transformer,
             num_heads=num_heads
         )
 
         self.action_dim = np.prod(single_act_shape)
         self.action_transformer = ActionTransformerDecoder(
-            d_model=240,         
+            d_model=transf_input_dim,         
             nhead=8,
             num_decoder_layers=6,   
-            dim_feedforward=1024,
+            dim_feedforward=transf_input_dim * 4,
             dropout=0.1,
             action_dim=self.action_dim
-        ).to(self.device)
+        )
 
-        self.state_proj_transformer =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device) 
+        self.state_proj =  StateProj(state_dim=state_dim, output_dim=transf_input_dim)
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
 
-        self.state_mlp_for_action = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
+        self.state_mlp_action = StateProj(state_dim, transf_input_dim)
         
     def forward(self, observations, object_labels):
         
@@ -215,13 +218,14 @@ class Agent_3dencoder(nn.Module):
         hand_dp3_feat_m1 = self.dp3_encoder(batch_hand_coords_m1) 
         head_dp3_feat_m1 = self.dp3_encoder(batch_head_coords_m1) 
         
-        # Text embeddings
-        object_labels_all = torch.cat([object_labels, object_labels], dim=0)
-        text_emb_reduced = self.text_proj(self.text_embeddings)
-        selected_text_reduced_all = text_emb_reduced[object_labels_all, :]
+        state_proj_t = self.state_proj(state_t)
+        state_proj_m1 = self.state_proj(state_m1)
+        
+        coords_hand_t = hand_coords_world_flat_t.view(B, N, 3)
+        coords_head_t = head_coords_world_flat_t.view(B, N, 3)   
 
-        state_proj_transformer_t = self.state_proj_transformer(state_t)
-        state_proj_transformer_m1 = self.state_proj_transformer(state_m1)
+        coords_hand_m1 = hand_coords_world_flat_m1.view(B, N, 3)
+        coords_head_m1 = head_coords_world_flat_m1.view(B, N, 3)   
 
         # Transformer forward
         out_transformer = self.transformer(
@@ -229,15 +233,15 @@ class Agent_3dencoder(nn.Module):
             head_token_t=head_dp3_feat_t,
             hand_token_m1=hand_dp3_feat_m1,
             head_token_m1=head_dp3_feat_m1,
-            coords_hand_t=hand_coords_world_flat_t.reshape(B, N, 3),
-            coords_head_t=head_coords_world_flat_t.reshape(B, N, 3),
-            coords_hand_m1=hand_coords_world_flat_m1.reshape(B, N, 3),
-            coords_head_m1=head_coords_world_flat_m1.reshape(B, N, 3),
-            state_t=state_proj_transformer_t,
-            state_m1=state_proj_transformer_m1, 
+            coords_hand_t=coords_hand_t,
+            coords_head_t=coords_head_t,
+            coords_hand_m1=coords_hand_m1,
+            coords_head_m1=coords_head_m1,
+            state_t=state_proj_t.unsqueeze(1),
+            state_m1=state_proj_m1.unsqueeze(1), 
         ) # [B, N, 240]
 
-        state_t_proj  = self.state_mlp_for_action(state_t).unsqueeze(1)   # [B, 240]
+        state_t_proj  = self.state_mlp_action(state_t).unsqueeze(1)  
         action_out = self.action_transformer(out_transformer, state_t_proj)
 
         return action_out

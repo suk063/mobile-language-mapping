@@ -79,14 +79,12 @@ class BCConfig:
     open_clip_model_pretrained: str = "merged2b_s4b_b131k"
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
-    state_mlp_dim: int = 128
     hidden_dim: int = 240
     num_heads: int = 8
     num_layers_transformer: int = 4
     action_horizon: int = 16
     scaling_factor: float = 0.3
     bc_loss_weights: float = 10.0
-    voxel_feature_dim: int = 240
 
     num_eval_envs: int = field(init=False)
 
@@ -177,11 +175,9 @@ def train(cfg: TrainConfig):
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
-        voxel_feature_dim=cfg.algo.voxel_feature_dim,
         open_clip_model=(cfg.algo.open_clip_model_name, cfg.algo.open_clip_model_pretrained),
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
-        state_mlp_dim=cfg.algo.state_mlp_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         num_heads = cfg.algo.num_heads,
         num_layers_transformer = cfg.algo.num_layers_transformer,

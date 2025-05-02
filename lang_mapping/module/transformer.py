@@ -249,11 +249,14 @@ def init_weights_kaiming(m):
         if m.bias is not None:
             nn.init.constant_(m.bias, 0.0)
 
-def make_casual_mask(seq_len, len_m1, device):
-    causal_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1)
-    causal_mask[:len_m1, len_m1:] = True
+def build_causal_mask(n_m1, n_t, device):
+    S    = n_m1 + n_t
+    mask = torch.zeros(S, S, dtype=torch.bool, device=device)
 
-    return causal_mask 
+    # m‑1 Query / t Key
+    mask[0:n_m1, n_m1:] = True 
+
+    return mask
 
 class TransformerLayer(nn.Module):
     def __init__(
@@ -341,11 +344,10 @@ class TransformerLayer(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(
         self,
-        input_dim=240,
+        input_dim=768,
         hidden_dim=1024,
         num_layers=4,
         num_heads=8,
-        proj_dim=16,
     ):
         super().__init__()
         
@@ -358,9 +360,7 @@ class TransformerEncoder(nn.Module):
             )
             for _ in range(num_layers)
         ])
-        
-        self.output_proj= nn.Linear(input_dim, proj_dim)
-        
+                
         self.apply(init_weights_kaiming)
                
     def forward(
@@ -376,51 +376,56 @@ class TransformerEncoder(nn.Module):
         state_t: torch.Tensor = None,  # [B, input_dim] or None
         state_m1: torch.Tensor = None,  # [B, input_dim] or None
     ) -> torch.Tensor:
-        B, N, D = hand_token_t.shape
         
-        tokens = []
-        coords_list = []
+        B, N, D = hand_token_t.shape
+        tokens, coords = [], []
+        
+        zeros1 = lambda: torch.zeros(B, 1, 3, device=hand_token_t.device)      
+        
         coords_src = None
         
         if state_m1 is not None:
-            state_token_m1 = state_m1.unsqueeze(1)  # [B, 1, D]
-            tokens.append(state_token_m1)
-            coords_list.append(torch.zeros(B, 1, 3, device=state_t.device))
+            tokens.append(state_m1)
+            coords.append(zeros1())
         
-        tokens.append(hand_token_m1)     # [B, N, D]
-        tokens.append(head_token_m1) 
+        tokens += [hand_token_m1, head_token_m1]
         
         if coords_hand_m1 is not None:
-            coords_list.append(coords_hand_m1)
-            coords_list.append(coords_head_m1)
+            coords += [coords_hand_m1, coords_head_m1]
         
         if state_t is not None:
-            state_token_t = state_t.unsqueeze(1)  # [B, 1, D]
-            tokens.append(state_token_t)
-            coords_list.append(torch.zeros(B, 1, 3, device=state_t.device))
-
-        tokens.append(hand_token_t)     # [B, N, D]
-        tokens.append(head_token_t) 
+            tokens.append(state_t)
+            coords.append(zeros1())
+            
+        tokens += [hand_token_t, head_token_t] 
         
         if coords_hand_t is not None:
-            coords_list.append(coords_hand_t)
-            coords_list.append(coords_head_t)
+            coords += [coords_hand_t, coords_head_t]
         
-        src = torch.cat(tokens, dim=1)
+        src = torch.cat(tokens, 1)
         # DEBUG: (Woojeh)
-        if coords_hand_t is not None and len(coords_list) > 0:
-            coords_src = torch.cat(coords_list, dim=1)  # (B, S, 3)
+        if coords_hand_t is not None and len(coords) > 0:
+            coords_src = torch.cat(coords, dim=1)  # (B, S, 3)
+            
+        len_m1 = 0                  # learnable m-1
+        if state_m1 is not None: len_m1 += 1
+        len_m1 += hand_token_m1.size(1) + head_token_m1.size(1)
+
+        len_t  = 0                  # learnable t
+        if state_t is not None: len_t  += 1
+        len_t  += hand_token_t.size(1) + head_token_t.size(1)
+        
+        causal_mask = build_causal_mask(len_m1, len_t, src.device)     
         
         # Pass through Transformer layers
         for layer in self.layers:
             src = layer(
                 src=src,
                 coords_src=coords_src,
+                causal_mask=causal_mask
             )
 
-        start_idx = 1 + 512 # 1 for state, 512 for m1, 1 for state
-
-        return src[:, start_idx:, :]
+        return src[:, len_m1+1:, :]
 
 class ActionTransformerDecoder(nn.Module):
     def __init__(

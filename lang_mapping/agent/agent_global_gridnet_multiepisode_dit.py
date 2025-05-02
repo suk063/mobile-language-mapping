@@ -5,102 +5,14 @@ import torch.nn.functional as F
 from typing import Tuple, Optional
 
 # Local imports
-from ..module.transformer import ActionTransformerDecoder, TransformerLayer
-from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, VoxelProj, StateProj
+from ..module.transformer import ActionTransformerDecoder, TransformerEncoder
+from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, StateProj
 from ..module.global_module import HierarchicalSceneEncoder, HierarchicalSceneTransformer
 
 from lang_mapping.grid_net import GridNet
 
 from ..utils import get_3d_coordinates, get_visual_features, transform, gate_with_text, rotary_pe_3d
 import open_clip
-
-class TransformerEncoder(nn.Module):
-    def __init__(
-        self,
-        input_dim=768,
-        hidden_dim=1024,
-        num_layers=4,
-        num_heads=8,
-    ):
-        super().__init__()
-
-        # Transformer layers
-        self.layers = nn.ModuleList([
-            TransformerLayer(
-                d_model=input_dim,
-                n_heads=num_heads,
-                dim_feedforward=hidden_dim
-            )
-            for _ in range(num_layers)
-        ])
-                
-        self.apply(init_weights_kaiming)
-               
-    def forward(
-        self,
-        hand_token_t, head_token_t, hand_token_m1=None, head_token_m1=None,
-        coords_hand_t=None, coords_head_t=None,
-        coords_hand_m1=None, coords_head_m1=None,
-        state_t=None, state_m1=None,    
-    ):
-        B, N, D = hand_token_t.shape
-        tokens, coords = [], []
-        
-        zeros1 = lambda: torch.zeros(B, 1, 3, device=hand_token_t.device)       
-        
-        # ── (A) m-1 segment ───────────────────────────────────────────
-        if state_m1 is not None:
-            tokens.append(state_m1)
-            coords.append(zeros1())
-            
-        tokens += [hand_token_m1, head_token_m1]
-        coords += [coords_hand_m1, coords_head_m1]
-        
-        # 6  current state
-        if state_t is not None:
-            tokens.append(state_t)
-            coords.append(zeros1())
-        
-        # 9‑10 current visual
-        tokens += [hand_token_t, head_token_t]
-        coords += [coords_hand_t, coords_head_t]
-        
-        src        = torch.cat(tokens,  1)                               # (B,S,D)
-        coords_src = torch.cat(coords, 1) if coords_hand_t is not None else None
-        
-        len_m1 = 0                  # learnable m-1
-        if state_m1 is not None: len_m1 += 1
-        len_m1 += hand_token_m1.size(1) + head_token_m1.size(1)
-
-        len_t  = 0                  # learnable t
-        if state_t is not None: len_t  += 1
-        len_t  += hand_token_t.size(1) + head_token_t.size(1)
-
-        causal_mask = build_causal_mask(len_m1, len_t, src.device) 
-
-        for layer in self.layers:
-            src = layer(
-                src, coords_src=coords_src,
-                causal_mask=causal_mask
-            )
-            
-        return src[:, len_m1+1:, :]
-    
-def init_weights_kaiming(m):
-    if isinstance(m, nn.Linear):
-        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-        if m.bias is not None:
-            nn.init.constant_(m.bias, 0.0)
-
-
-def build_causal_mask(n_m1, n_t, device):
-    S    = n_m1 + n_t
-    mask = torch.zeros(S, S, dtype=torch.bool, device=device)
-
-    # m‑1 Query / t Key
-    mask[0:n_m1, n_m1:] = True 
-
-    return mask
 
 class Agent_global_gridnet_multiepisode_dit(nn.Module):
     def __init__(

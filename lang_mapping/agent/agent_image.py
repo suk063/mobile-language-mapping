@@ -1,15 +1,14 @@
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict
 
 # Local imports
-from lang_mapping.module.transformer import TransformerEncoder, ActionTransformerDecoder
-from ..module.mlp import ActionMLP, StateProj, DimReducer
+from ..module.transformer import TransformerEncoder, ActionTransformerDecoder
+from ..module.mlp import DimReducer, StateProj
 
-from ..utils import get_3d_coordinates, get_visual_features, transform
-
+from ..utils import get_3d_coordinates, get_visual_features, gate_with_text, transform
 import open_clip
 
 class Agent_image(nn.Module):
@@ -20,17 +19,13 @@ class Agent_image(nn.Module):
         open_clip_model: tuple = ("EVA02-L-14", "merged2b_s4b_b131k"),
         text_input: list = ["bowl", "apple"],
         clip_input_dim: int = 768,
-        voxel_feature_dim: int = 240,
-        state_mlp_dim: int = 128,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
         num_heads: int = 8,
-        num_layers_transformer: int = 4
+        num_layers_transformer: int = 4,
+        num_action_layer: int = 6,
+        transf_input_dim: int = 768,
     ):
-        """
-        Maintains a voxel-hash representation for 3D scenes and uses a CLIP-based
-        feature extractor plus an implicit decoder for mapping.
-        """
         super().__init__()
 
         self.device = device
@@ -39,82 +34,76 @@ class Agent_image(nn.Module):
         state_obs: torch.Tensor = sample_obs["state"]
         state_dim = state_obs.shape[1]
 
-        # MLP for raw state
-        self.state_mlp = nn.Linear(state_dim, state_mlp_dim).to(self.device)
-
         # Load CLIP model
         clip_model, _, _ = open_clip.create_model_and_transforms(
             open_clip_model[0], pretrained=open_clip_model[1]
         )
         self.clip_model = clip_model.to(self.device)
-
         self.tokenizer = open_clip.get_tokenizer(open_clip_model[0])
 
         # Text embeddings and projection
-        # if text_input:
-        #     text_input += [""]
+        if text_input:
+            text_input += [""]
         
         text_tokens = self.tokenizer(text_input).to(self.device)
-        self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
+        self.text_proj = nn.Linear(clip_input_dim, transf_input_dim).to(self.device)
         with torch.no_grad():
             text_embeddings = self.clip_model.encode_text(text_tokens)
-            self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
-            # Remove the last embedding (blank token) to avoid repetition
-            # text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
-            # text_embeddings = text_embeddings - redundant_emb
-            # self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
+            text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
+            
+            text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
+            self.text_embeddings = text_embeddings - redundant_emb
+
 
         # Reduce CLIP feature dimension
-        self.dim_reducer_hand = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
-        self.dim_reducer_head = DimReducer(clip_input_dim, voxel_feature_dim, L=0)
-
+        self.dim_reducer_hand = DimReducer(clip_input_dim, transf_input_dim, L=0)
+        self.dim_reducer_head = DimReducer(clip_input_dim, transf_input_dim, L=0)
+        
         # Transformer for feature fusion
         self.transformer = TransformerEncoder(
-            input_dim=voxel_feature_dim,
-            hidden_dim=1024,
+            input_dim=transf_input_dim,
+            hidden_dim=transf_input_dim * 4,
             num_layers=num_layers_transformer,
-            num_heads=num_heads
+            num_heads=num_heads,
+        )
+        
+        # Action MLP
+        self.action_dim = np.prod(single_act_shape)
+        
+        self.action_transformer = ActionTransformerDecoder(
+            d_model=transf_input_dim,         
+            nhead=8,
+            num_decoder_layers=num_action_layer,   
+            dim_feedforward=transf_input_dim * 4,
+            dropout=0.1,
+            action_dim=self.action_dim,
         )
 
-        self.action_dim = np.prod(single_act_shape)
-        self.action_transformer = ActionTransformerDecoder(
-            d_model=240,         
-            nhead=8,
-            num_decoder_layers=6,   
-            dim_feedforward=1024,
-            dropout=0.1,
-            action_dim=self.action_dim
-        ).to(self.device)
-
-        self.state_proj_transformer =  StateProj(state_dim=state_dim, output_dim=voxel_feature_dim).to(self.device)   
+        self.state_proj =  StateProj(state_dim, transf_input_dim)
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
-
-        self.state_mlp_for_action = nn.Linear(state_dim, voxel_feature_dim).to(self.device)
-        
+        self.state_mlp_action = StateProj(state_dim, transf_input_dim)
+    
     def forward(self, observations, object_labels):
-        """
-        Forward pass that processes time t and t-1 in a single batch:
-         1) Merge data of t and t-1 to form batch=2B
-         2) Do feature extraction, depth, coordinates, voxel
-         3) Split back into t and t-1
-         4) Compute action_t = MLP(state_t, out_t, out_t-1)
-        """
+
         # 1) Extract data
         hand_rgb_t   = observations["pixels"]["fetch_hand_rgb"]
-        hand_rgb_m1  = observations["pixels"]["fetch_hand_rgb_m1"]
         head_rgb_t   = observations["pixels"]["fetch_head_rgb"]
-        head_rgb_m1  = observations["pixels"]["fetch_head_rgb_m1"]
 
         hand_depth_t  = observations["pixels"]["fetch_hand_depth"]
-        hand_depth_m1 = observations["pixels"]["fetch_hand_depth_m1"]
         head_depth_t  = observations["pixels"]["fetch_head_depth"]
-        head_depth_m1 = observations["pixels"]["fetch_head_depth_m1"]
 
         hand_pose_t   = observations["pixels"]["fetch_hand_pose"]
-        hand_pose_m1  = observations["pixels"]["fetch_hand_pose_m1"]
         head_pose_t   = observations["pixels"]["fetch_head_pose"]
+
+        hand_rgb_m1  = observations["pixels"]["fetch_hand_rgb_m1"]
+        head_rgb_m1  = observations["pixels"]["fetch_head_rgb_m1"]
+
+        hand_depth_m1 = observations["pixels"]["fetch_hand_depth_m1"]
+        head_depth_m1 = observations["pixels"]["fetch_head_depth_m1"]
+
+        hand_pose_m1  = observations["pixels"]["fetch_hand_pose_m1"]
         head_pose_m1  = observations["pixels"]["fetch_head_pose_m1"]
 
         state_t  = observations["state"]
@@ -194,59 +183,51 @@ class Agent_image(nn.Module):
         feats_head_t = head_visfeat_t.permute(0, 2, 3, 1).reshape(B, N, -1)
         feats_hand_m1 = hand_visfeat_m1.permute(0, 2, 3, 1).reshape(B, N, -1)
         feats_head_m1 = head_visfeat_m1.permute(0, 2, 3, 1).reshape(B, N, -1)
-
-        feats_hand_t_norm = F.normalize(feats_hand_t, dim=-1, p=2)
-        feats_head_t_norm = F.normalize(feats_head_t, dim=-1, p=2)
-        feats_hand_m1_norm = F.normalize(feats_hand_m1, dim=-1, p=2)
-        feats_head_m1_norm = F.normalize(feats_head_m1, dim=-1, p=2)
-
-        text_embed_norm = F.normalize(self.text_embeddings, dim=-1, p=2)
-        text_embed_batch = text_embed_norm[object_labels, :].unsqueeze(1)
         
-        gating_score_hand_t = (feats_hand_t_norm * text_embed_batch).sum(dim=-1, keepdim=True)  # [B, N, 1]
-        gating_score_head_t = (feats_head_t_norm * text_embed_batch).sum(dim=-1, keepdim=True)  # [B, N, 1]
-        gating_score_hand_m1 = (feats_hand_m1_norm * text_embed_batch).sum(dim=-1, keepdim=True)  # [B, N, 1]
-        gating_score_head_m1 = (feats_head_m1_norm * text_embed_batch).sum(dim=-1, keepdim=True)  # [B, N, 1]
-
-        feats_hand_t_gated = feats_hand_t + feats_hand_t * gating_score_hand_t
-        feats_head_t_gated = feats_head_t + feats_head_t * gating_score_head_t
-        feats_hand_m1_gated = feats_hand_m1 + feats_hand_m1 * gating_score_hand_m1
-        feats_head_m1_gated = feats_head_m1 + feats_head_m1 * gating_score_head_m1
-                
         hand_coords_world_flat_t = hand_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
-        feats_hand_flat_t = feats_hand_t_gated.reshape(B*N, -1)
-        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_t)
-        feats_hand_reduced_t = feats_hand_reduced_flat.view(B, N, -1)
-
-        head_coords_world_flat_t = head_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
-        feats_head_flat_t = feats_head_t_gated.reshape(B*N, -1)
-        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_t)
-        feats_head_reduced_t = feats_head_reduced_flat.view(B, N, -1)
-        
+        head_coords_world_flat_t = head_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)        
         hand_coords_world_flat_m1 = hand_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
-        feats_hand_flat_m1 = feats_hand_m1_gated.reshape(B*N, -1)
-        feats_hand_reduced_flat = self.dim_reducer_hand(feats_hand_flat_m1)
-        feats_hand_reduced_m1 = feats_hand_reduced_flat.view(B, N, -1)
-
         head_coords_world_flat_m1 = head_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
-        feats_head_flat_m1 = feats_head_m1_gated.reshape(B*N, -1)
-        feats_head_reduced_flat = self.dim_reducer_head(feats_head_flat_m1)
-        feats_head_reduced_m1 = feats_head_reduced_flat.view(B, N, -1)
+        
+        # --------------------------------------------------------------------- #
+        # 1)  text embeddings for this batch
+        # --------------------------------------------------------------------- #
+        text_emb = self.text_embeddings[object_labels]        # (B,768)
+        
+        feats_hand_t  = gate_with_text(feats_hand_t,  text_emb)        # (B*N,768)
+        feats_head_t  = gate_with_text(feats_head_t,  text_emb)
+        feats_hand_m1 = gate_with_text(feats_hand_m1, text_emb)
+        feats_head_m1 = gate_with_text(feats_head_m1, text_emb)
+        
+        feats_hand_t  = self.dim_reducer_hand(feats_hand_t.reshape(B*N, -1)).reshape(B, N, -1) 
+        feats_head_t  = self.dim_reducer_head(feats_head_t.reshape(B*N, -1)).reshape(B, N, -1)
+        feats_hand_m1 = self.dim_reducer_hand(feats_hand_m1.reshape(B*N, -1)).reshape(B, N, -1)
+        feats_head_m1 = self.dim_reducer_head(feats_head_m1.reshape(B*N, -1)).reshape(B, N, -1)
 
-        state_proj_transformer_t = self.state_proj_transformer(state_t)
-        state_proj_transformer_m1 = self.state_proj_transformer(state_m1)
+        state_proj_t = self.state_proj(state_t)
+        state_proj_m1 = self.state_proj(state_m1)      
+        
+        coords_hand_t = hand_coords_world_flat_t.view(B, N, 3)
+        coords_head_t = head_coords_world_flat_t.view(B, N, 3)   
+
+        coords_hand_m1 = hand_coords_world_flat_m1.view(B, N, 3)
+        coords_head_m1 = head_coords_world_flat_m1.view(B, N, 3)   
 
         # Transformer forward
         out_transformer = self.transformer(
-            hand_token_t=feats_hand_reduced_t,
-            head_token_t=feats_head_reduced_t,
-            hand_token_m1=feats_hand_reduced_m1,
-            head_token_m1=feats_head_reduced_m1,
-            state_t=state_proj_transformer_t,
-            state_m1=state_proj_transformer_m1, 
-        ) # [B, N, 240]
+            hand_token_t=feats_hand_t,
+            head_token_t=feats_head_t,
+            hand_token_m1=feats_hand_m1,
+            head_token_m1=feats_head_m1,
+            # coords_hand_t=coords_hand_t,
+            # coords_head_t=coords_head_t,
+            # coords_hand_m1=coords_hand_m1,
+            # coords_head_m1=coords_head_m1,
+            state_t=state_proj_t.unsqueeze(1),
+            state_m1=state_proj_m1.unsqueeze(1), 
+        ) 
         
-        state_t_proj  = self.state_mlp_for_action(state_t).unsqueeze(1)   # [B, 240]
+        state_t_proj  = self.state_mlp_action(state_t).unsqueeze(1)
         action_out = self.action_transformer(out_transformer, state_t_proj)
         
         return action_out

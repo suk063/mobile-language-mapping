@@ -75,8 +75,6 @@ class BCConfig:
     trajs_per_obj: Union[str, int] = "all"
     torch_deterministic: bool = True
 
-    # Voxel/Scene Settings
-    voxel_feature_dim: int = 240
     resolution: float = 0.12
     hash_table_size: int = 2**21
     scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
@@ -94,7 +92,7 @@ class BCConfig:
     action_horizon: int = 16
     scaling_factor: float = 0.3
     bc_loss_weights: float = 10.0
-    voxel_feature_dim: int = 240
+    transf_input_dim: int = 240
 
     num_eval_envs: int = field(init=False)
 
@@ -185,7 +183,7 @@ def train(cfg: TrainConfig):
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
-        voxel_feature_dim=cfg.algo.voxel_feature_dim,
+        transf_input_dim=cfg.algo.transf_input_dim,
         open_clip_model=(cfg.algo.open_clip_model_name, cfg.algo.open_clip_model_pretrained),
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
