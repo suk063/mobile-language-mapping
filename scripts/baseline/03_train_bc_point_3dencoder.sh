@@ -17,9 +17,9 @@ NUM_ENVS=30
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
 WORKSPACE="mshab_exps"
 GROUP=$TASK-rcad-bc-point-$SUBTASK
-EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-uplift-local-trajs_per_obj=$TRAJS_PER_OBJ"
+EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-3dencoder-local-trajs_per_obj=$TRAJS_PER_OBJ"
 # shellcheck disable=SC2001
-PROJECT_NAME="MS-HAB-RCAD-bc-point-uplift"
+PROJECT_NAME="MS-HAB-RCAD-bc-point-3dencoder"
 
 WANDB=True
 TENSORBOARD=True
@@ -44,7 +44,6 @@ args=(
     "eval_env.task_plan_fp=$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange/task_plans/$TASK/$SUBTASK/$SPLIT/$OBJ.json"
     "eval_env.spawn_data_fp=$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange/spawn_data/$TASK/$SUBTASK/$SPLIT/spawn_data.pt"
     "eval_env.frame_stack=1"
-    "eval_env.all_plan_count=$ALL_PLAN_COUNT"
     "algo.trajs_per_obj=$TRAJS_PER_OBJ"
     "algo.data_dir_fp=$data_dir_fp"
     "algo.max_cache_size=$MAX_CACHE_SIZE"
@@ -65,14 +64,14 @@ args=(
 
 if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
     echo "RESUMING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.02_train_bc_point_uplift "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.baseline.03_train_bc_point_3dencoder "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
         logger.clear_out="False" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.02_train_bc_point_uplift configs/02_bc_pick_uplift.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.baseline.03_train_bc_point_3dencoder configs/baseline/03_bc_pick_3dencoder.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"

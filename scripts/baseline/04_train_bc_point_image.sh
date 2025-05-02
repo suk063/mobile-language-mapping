@@ -65,14 +65,14 @@ args=(
 
 if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
     echo "RESUMING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.04_train_bc_point_image "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.baseline.04_train_bc_point_image "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
         logger.clear_out="False" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.04_train_bc_point_image configs/04_bc_pick_image.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.baseline.04_train_bc_point_image configs/baseline/04_bc_pick_image.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"

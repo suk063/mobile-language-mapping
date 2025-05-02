@@ -1,11 +1,9 @@
-import os
 import random
 import sys
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import List, Optional, Union
 
-import h5py
 from dacite import from_dict
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -19,14 +17,14 @@ from torch.utils.tensorboard import SummaryWriter
 # ManiSkill imports
 from mani_skill.utils import common
 
-from lang_mapping.agent.agent_3dencoder import Agent_3dencoder
-from lang_mapping.dataset import TempTranslateToPointDataset, build_object_map, get_object_labels_batch, merge_t_m1
+from lang_mapping.agent.baseline.agent_uplift import Agent_uplift
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg
 from mshab.utils.dataset import ClosableDataLoader
 from mshab.utils.logger import Logger, LoggerConfig
 from mshab.utils.time import NonOverlappingTimeProfiler
+from lang_mapping.dataset import TempTranslateToPointDataset, build_object_map, get_object_labels_batch, merge_t_m1
 
 def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
     """
@@ -63,7 +61,7 @@ class BCConfig:
     name: str = "bc"
     lr: float = 3e-4               # learning rate
     batch_size: int = 256          # batch size
-    epochs: int = 2         # epochs
+    epochs: int = 1         # stage 1 epochs
 
     eval_freq: int = 1
     log_freq: int = 1
@@ -74,11 +72,6 @@ class BCConfig:
     max_cache_size: int = 0        # max data points to cache
     trajs_per_obj: Union[str, int] = "all"
     torch_deterministic: bool = True
-
-    resolution: float = 0.12
-    hash_table_size: int = 2**21
-    scene_bound_min: List[float] = field(default_factory=lambda: [-2.6, -8.1, 0.0])
-    scene_bound_max: List[float] = field(default_factory=lambda: [4.6, 4.7, 3.1])
 
     # CLIP / Agent Settings
     clip_input_dim: int = 768
@@ -92,7 +85,6 @@ class BCConfig:
     action_horizon: int = 16
     scaling_factor: float = 0.3
     bc_loss_weights: float = 10.0
-    transf_input_dim: int = 240
 
     num_eval_envs: int = field(init=False)
 
@@ -179,11 +171,10 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     # Agent
-    agent = Agent_3dencoder(
+    agent = Agent_uplift(
         sample_obs=eval_obs,
         single_act_shape=eval_envs.unwrapped.single_action_space.shape,
         device=device,
-        transf_input_dim=cfg.algo.transf_input_dim,
         open_clip_model=(cfg.algo.open_clip_model_name, cfg.algo.open_clip_model_pretrained),
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
@@ -192,9 +183,6 @@ def train(cfg: TrainConfig):
         num_layers_transformer = cfg.algo.num_layers_transformer,
     ).to(device)
 
-    if cfg.algo.pretrained_agent_path is not None and os.path.exists(cfg.algo.pretrained_agent_path):
-        print(f"[INFO] Loading pretrained agent from {cfg.algo.pretrained_agent_path}")
-        agent.load_state_dict(torch.load(cfg.algo.pretrained_agent_path, map_location=device))
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -209,6 +197,7 @@ def train(cfg: TrainConfig):
         torch.save(agent.state_dict(), agent_path)
         torch.save(optimizer.state_dict(), optim_path)
 
+    
     assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
     
     action_horizon = cfg.algo.action_horizon
@@ -291,7 +280,7 @@ def train(cfg: TrainConfig):
     optimizer = torch.optim.Adam(params_to_optimize, lr=cfg.algo.lr)
     
     agent.to(device)
-
+    
     alpha = cfg.algo.scaling_factor 
     time_indices = torch.arange(action_horizon).to(device)           # [0, 1, 2, ..., horizon-1]
     time_weights = torch.exp(-alpha * time_indices)                  # exp(-alpha * i)
@@ -301,11 +290,11 @@ def train(cfg: TrainConfig):
     for epoch in range(cfg.algo.epochs):
         global_epoch = logger_start_log_step + epoch
         
-        logger.print(f"[Stage 1] Epoch: {global_epoch}")
+        logger.print(f"Epoch: {global_epoch}")
         tot_loss, n_samples = 0, 0
         agent.train()
 
-        for obs, act, subtask_uids, _, _ in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
+        for obs, act, subtask_uids, traj_idx, is_grasped in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
 

@@ -5,13 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Local imports
-from ..module.transformer import TransformerEncoder, ActionTransformerDecoder
-from ..module.mlp import DimReducer, StateProj
+from ...module.transformer import TransformerEncoder, ActionTransformerDecoder
+from ...module.mlp import DimReducer, StateProj
 
-from ..utils import get_3d_coordinates, get_visual_features, gate_with_text, transform
+from ...utils import get_3d_coordinates, get_visual_features, gate_with_text, transform
 import open_clip
 
-class Agent_uplift(nn.Module):
+class Agent_image(nn.Module):
     def __init__(
         self,
         sample_obs,
@@ -77,7 +77,7 @@ class Agent_uplift(nn.Module):
             dim_feedforward=transf_input_dim * 4,
             dropout=0.1,
             action_dim=self.action_dim,
-        ).to(self.device)
+        )
 
         self.state_proj =  StateProj(state_dim, transf_input_dim)
 
@@ -219,10 +219,10 @@ class Agent_uplift(nn.Module):
             head_token_t=feats_head_t,
             hand_token_m1=feats_hand_m1,
             head_token_m1=feats_head_m1,
-            coords_hand_t=coords_hand_t,
-            coords_head_t=coords_head_t,
-            coords_hand_m1=coords_hand_m1,
-            coords_head_m1=coords_head_m1,
+            # coords_hand_t=coords_hand_t,
+            # coords_head_t=coords_head_t,
+            # coords_hand_m1=coords_hand_m1,
+            # coords_head_m1=coords_head_m1,
             state_t=state_proj_t.unsqueeze(1),
             state_m1=state_proj_m1.unsqueeze(1), 
         ) 

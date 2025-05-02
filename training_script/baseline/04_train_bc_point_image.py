@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 # ManiSkill imports
 from mani_skill.utils import common
 
-from lang_mapping.agent.agent_image import Agent_image
+from lang_mapping.agent.baseline.agent_image import Agent_image
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
 from mshab.utils.config import parse_cfg

@@ -5,10 +5,10 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module.transformer import TransformerEncoder, ActionTransformerDecoder
-from ..module.mlp import StateProj
+from ...module.transformer import TransformerEncoder, ActionTransformerDecoder
+from ...module.mlp import StateProj
 
-from ..utils import get_3d_coordinates, transform
+from ...utils import get_3d_coordinates, transform
 
 import open_clip
 
