@@ -407,7 +407,8 @@ class TransformerEncoder(nn.Module):
             coords_list.append(coords_head_t)
         
         src = torch.cat(tokens, dim=1)
-        if len(coords_list) > 0:
+        # DEBUG: (Woojeh)
+        if coords_hand_t is not None and len(coords_list) > 0:
             coords_src = torch.cat(coords_list, dim=1)  # (B, S, 3)
         
         # Pass through Transformer layers
