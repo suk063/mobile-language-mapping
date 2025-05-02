@@ -18,67 +18,106 @@ import open_clip
 #   Local self-attention based feature fusion
 # ─────────────────────────────────────────────
 class LocalFeatureFusion(nn.Module):
-    def __init__(self, dim: int,
-                 n_heads: int = 8,
-                 ff_mult: int = 4,
-                 radius: float = 0.2,
-                 k: int = 8,
-                 dropout: float = 0.1):
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int = 8,
+        ff_mult: int = 4,
+        radius: float = 0.2,
+        k: int = 8,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         self.radius, self.k = radius, k
         self.attn = TransformerLayer(
             d_model=dim,
             n_heads=n_heads,
             dim_feedforward=dim * ff_mult,
-            dropout=dropout
+            dropout=dropout,
         )
 
-    def _neigh_indices(self, q_xyz, kv_xyz, kv_pad):
+    # ----------------------------------------------------------
+    # Find neighbor indices within <radius>; pad with query itself
+    # ----------------------------------------------------------
+    def _neigh_indices(
+        self,
+        q_xyz: torch.Tensor,           # (B, N, 3)  – query coordinates
+        kv_xyz: torch.Tensor,          # (B, L, 3)  – scene coordinates
+        kv_pad: Optional[torch.Tensor] # (B, L) bool – True → padding
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        q_xyz : (B, N, 3)   – query coords
-        kv_xyz: (B, L, 3)   – scene coords
-        kv_pad: (B, L) bool – True → pad
-        returns idx (B, N, K)   &   d_inf_mask (B, N, K)
+        Returns
+        -------
+        idx     : (B, N, k) long  – neighbor indices (query-padded)
+        invalid : (B, N, k) bool  – True → padding slot
         """
-        dist = torch.cdist(q_xyz, kv_xyz)                       # (B,N,L)
+        dist = torch.cdist(q_xyz, kv_xyz)                      # (B, N, L)
         if kv_pad is not None:
-            dist = dist.masked_fill(kv_pad[:, None, :], float('inf'))
+            dist = dist.masked_fill(kv_pad[:, None, :], float("inf"))
 
-        # take ≤radius
-        dist = torch.where(dist <= self.radius, dist, float('inf'))
-        _, idx = dist.topk(self.k, dim=-1, largest=False)       # (B,N,K)
-        d_mask = dist.gather(-1, idx).isinf()                   # True → invalid
-        return idx, d_mask
+        # keep only points ≤ radius
+        dist = torch.where(dist <= self.radius, dist, float("inf"))
+        k = self.k
 
-    def forward(self,
-                q_xyz,        # (B,N,3)
-                q_feat,       # (B,N,C)
-                kv_xyz,       # (B,L,3)
-                kv_feat,      # (B,L,C)
-                kv_pad=None   # (B,L) bool
-                ):
+        # 1) take top-k closest (up to k). If fewer, remaining are arbitrary for now.
+        _, idx_topk = dist.topk(k, largest=False, dim=-1)      # (B, N, k)
+
+        # 2) mark invalid (padding) slots
+        gather_dist = dist.gather(-1, idx_topk)                # (B, N, k)
+        invalid = gather_dist.isinf()                          # True → padding slot
+
+        # 3) overwrite padding slots with dummy index 0 (will be replaced by query itself)
+        query_idx = torch.zeros_like(idx_topk)                 # value 0 is arbitrary
+        idx = torch.where(invalid, query_idx, idx_topk)        # (B, N, k)
+
+        return idx, invalid
+
+    # ----------------------------------------------------------
+    # Forward pass
+    # ----------------------------------------------------------
+    def forward(
+        self,
+        q_xyz:   torch.Tensor,                # (B, N, 3)
+        q_feat:  torch.Tensor,                # (B, N, C)
+        kv_xyz:  torch.Tensor,                # (B, L, 3)
+        kv_feat: torch.Tensor,                # (B, L, C)
+        kv_pad:  Optional[torch.Tensor] = None  # (B, L) bool
+    ) -> torch.Tensor:
         B, N, C = q_feat.shape
-        idx, invalid = self._neigh_indices(q_xyz, kv_xyz, kv_pad)   # (B,N,K)
+        idx, invalid = self._neigh_indices(q_xyz, kv_xyz, kv_pad)  # (B, N, k)
 
-        # gather neighbour coords / feats
+        # gather neighbor coordinates / features
         batch = torch.arange(B, device=q_feat.device).view(B, 1, 1)
-        neigh_xyz  = kv_xyz [batch.expand_as(idx), idx]             # (B,N,K,3)
-        neigh_feat = kv_feat[batch.expand_as(idx), idx]             # (B,N,K,C)
+        neigh_xyz  = kv_xyz[batch.expand_as(idx), idx]             # (B, N, k, 3)
+        neigh_feat = kv_feat[batch.expand_as(idx), idx]            # (B, N, k, C)
 
-        # fallback → copy query when neighbour invalid
-        neigh_xyz [invalid]  = q_xyz .unsqueeze(2).expand(-1, -1, self.k, -1)[invalid]
-        neigh_feat[invalid]  = q_feat.unsqueeze(2).expand(-1, -1, self.k, -1)[invalid]
+        # replace padding slots with the query point itself
+        neigh_xyz [invalid] = q_xyz .unsqueeze(2).expand(-1, -1, self.k, -1)[invalid]
+        neigh_feat[invalid] = q_feat.unsqueeze(2).expand(-1, -1, self.k, -1)[invalid]
 
-        # concat query+neigh & run attention --------------------------------
-        tokens  = torch.cat([q_feat.unsqueeze(2),  neigh_feat],  dim=2)  # (B,N,K+1,C)
-        coords  = torch.cat([q_xyz.unsqueeze(2),   neigh_xyz],   dim=2)  # (B,N,K+1,3)
+        # concatenate query token with neighbor tokens
+        tokens = torch.cat([q_feat.unsqueeze(2), neigh_feat], dim=2)  # (B, N, k+1, C)
+        coords = torch.cat([q_xyz.unsqueeze(2), neigh_xyz],  dim=2)   # (B, N, k+1, 3)
 
-        BM      = B * N
-        fused   = self.attn(
-            tokens.view(BM, self.k+1, C),
-            coords_src=coords.view(BM, self.k+1, 3)
-        )                                                               # (BM,K+1,C)
-        fused_q = fused[:, 0, :].view(B, N, C)                          # (B,N,C)
+        # key-padding mask for attention (True → ignore)
+        pad_mask = torch.cat(
+            [
+                torch.zeros_like(invalid[..., :1]),  # query token (#0) is always valid
+                invalid
+            ],
+            dim=-1
+        ).view(B * N, self.k + 1)                    # (B*N, k+1)
+
+        # reshape to (B*N, S, C) for the transformer layer
+        BM = B * N
+        fused = self.attn(
+            tokens.view(BM, self.k + 1, C).contiguous(),
+            coords_src           = coords.view(BM, self.k + 1, 3).contiguous(),
+            src_padding_mask = pad_mask,
+        )                                            # (BM, k+1, C)
+
+        # return only the query position (index 0 within each group)
+        fused_q = fused[:, 0, :].view(B, N, C)       # (B, N, C)
         return fused_q
 
 
@@ -263,24 +302,14 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         )
         
         # self.bica = BiCrossAttnRoPE(dim=transf_input_dim, heads=8)
-        self.local_fuser_hand = LocalFeatureFusion(
+        self.local_fuser = LocalFeatureFusion(
             dim       = transf_input_dim,
             n_heads   = num_heads,
             ff_mult   = 4,
             radius    = 0.3, 
-            k         = 8,
+            k         = 1,
             dropout   = 0.1
         )
-        
-        self.local_fuser_head = LocalFeatureFusion(
-            dim       = transf_input_dim,
-            n_heads   = num_heads,
-            ff_mult   = 4,
-            radius    = 0.3, 
-            k         = 8,
-            dropout   = 0.1
-        )
-    
     
     @staticmethod
     def _flatten_pose(p):            # p: [B, 1, 3, 4]
@@ -290,6 +319,7 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         self,
         batch_episode_ids: torch.Tensor,         # [B]
         text_emb:          torch.Tensor,         # [B,768]
+        level_idx: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns
@@ -304,7 +334,7 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
 
         # ── 1) collect coordinates per scene ──────────────────────────────
         for sid in scene_ids:
-            c = self.valid_coords[int(sid)].to(self.device)     # (L_i,3)
+            c = self.valid_coords[level_idx][int(sid)].to(self.device)     # (L_i,3)
             per_scene_coords.append(c)
             per_scene_len.append(c.size(0))
 
@@ -462,27 +492,29 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         coords_hand_m1 = hand_coords_world_flat_m1.view(B, N, 3)
         coords_head_m1 = head_coords_world_flat_m1.view(B, N, 3)
         
-        kv_coords, kv_feats, kv_pad = self._gather_scene_kv(batch_episode_ids, text_emb)
+        kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
         
-        feats_hand_t  = self.local_fuser_hand(
+        feats_hand_t  = self.local_fuser(
             coords_hand_t, feats_hand_t,
-            kv_coords, kv_feats, kv_pad
+            kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0
         )
-        feats_head_t  = self.local_fuser_head(
+        feats_head_t  = self.local_fuser(
             coords_head_t, feats_head_t,
-            kv_coords, kv_feats, kv_pad
+            kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0
         )
-        feats_hand_m1 = self.local_fuser_hand(
+        feats_hand_m1 = self.local_fuser(
             coords_hand_m1, feats_hand_m1,
-            kv_coords, kv_feats, kv_pad
+            kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0
         )
-        feats_head_m1 = self.local_fuser_head(
+        feats_head_m1 = self.local_fuser(
             coords_head_m1, feats_head_m1,
-            kv_coords, kv_feats, kv_pad
+            kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0
         )
         
-        pts_kv   = torch.cat([kv_coords, kv_feats], dim=-1)            # [B,L, 3+768]
-        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad)     
+        # kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
+        
+        pts_kv   = torch.cat([kv_coords_lvl0, kv_feats_lvl0], dim=-1)            # [B,L, 3+768]
+        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_lvl0)     
            
         # Transformer forward
         visual_tok = self.transformer(

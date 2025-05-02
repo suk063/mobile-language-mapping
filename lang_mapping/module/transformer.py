@@ -296,6 +296,7 @@ class TransformerLayer(nn.Module):
         src: torch.Tensor,             # (B, S, d_model)
         coords_src: torch.Tensor = None,  # (B, S, 3) or None
         causal_mask=None,
+        src_padding_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         # src shape: (B, S, d_model)
         B, S, _ = src.shape
@@ -322,12 +323,20 @@ class TransformerLayer(nn.Module):
         if causal_mask is not None:
             scores = scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
     
+        if src_padding_mask is not None:
+            key_mask = src_padding_mask.unsqueeze(1).unsqueeze(2)
+            scores   = scores.masked_fill(key_mask, float("-inf"))
+    
         attn = torch.matmul(F.softmax(scores, -1), v)
         attn = attn.transpose(1, 2).contiguous().view(B, S, self.d_model)
         src2 = self.norm1(src + self.dropout_attn(self.out_proj(attn)))
         ff = self.linear2(self.activation(self.linear1(src2)))
+        out = self.norm2(src2 + self.dropout_ff(ff))
         
-        return self.norm2(src2 + self.dropout_ff(ff))
+        if src_padding_mask is not None:
+            out = out.masked_fill(src_padding_mask.unsqueeze(-1), 0.0)
+        
+        return out
 
 class TransformerEncoder(nn.Module):
     def __init__(

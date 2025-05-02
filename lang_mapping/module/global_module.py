@@ -166,6 +166,12 @@ class HierarchicalSceneEncoder(nn.Module):
         return xyz, feat
 
 class SATransformer(nn.Module):
+    """
+    Set-abstraction block with point-wise self-attention.
+    • FPS (or mask-aware FPS) to choose centroids
+    • Ball-query to gather K neighbours
+    • Local self-attention → max-pool → output features
+    """
     def __init__(self, in_dim, out_dim,
                  radius, nsample, sampling_ratio=0.25,
                  heads=8, dropout=0.1):
@@ -174,66 +180,98 @@ class SATransformer(nn.Module):
 
         self.in_proj = nn.Sequential(
             nn.Linear(in_dim, out_dim),
-            nn.LayerNorm(out_dim), nn.ReLU(inplace=True)
+            nn.LayerNorm(out_dim),
+            nn.ReLU(inplace=True),
         )
-        self.local_attn = TransformerLayer(out_dim, heads, out_dim*4, dropout)
-        self.out_norm = nn.LayerNorm(out_dim)
+        #  CHG: TransformerLayer already supports src_padding_mask
+        self.local_attn = TransformerLayer(out_dim, heads, out_dim * 4, dropout)
+        self.out_norm   = nn.LayerNorm(out_dim)
 
     # ------------------------- FPS ------------------------------ #
     @torch.no_grad()
     def _sample(self, xyz, pad_mask):
+        """
+        Mask-aware farthest-point sampling
+        Returns
+        -------
+        idx        : (B, M)   sampled centroid indices
+        keep_mask  : (B, M)   True → valid centroid, False → padded centroid
+        """
         B, N, _ = xyz.shape
-        if pad_mask is None:
+        if pad_mask is None:                     # no padding in input
             M = max(1, int(round(N * self.sampling_ratio)))
             _, idx = sample_farthest_points(xyz, K=M)
             return idx, None
 
+        # move valid points to the front so FPS sees a packed list
         perm      = torch.argsort(pad_mask.int(), dim=1)
         xyz_front = xyz.gather(1, perm.unsqueeze(-1).expand(-1, -1, 3))
-        lengths   = (~pad_mask).sum(dim=1)
-        K_each    = torch.clamp((lengths.float() * self.sampling_ratio).round().long(), min=1)
+        lengths   = (~pad_mask).sum(dim=1)                           # valid counts
+        K_each    = torch.clamp((lengths.float() * self.sampling_ratio)
+                                .round().long(), min=1)
         K_max     = int(K_each.max())
 
-        _, idx_all = sample_farthest_points(xyz_front, lengths=lengths, K=K_max)
+        _, idx_all = sample_farthest_points(xyz_front,
+                                            lengths=lengths, K=K_max)
         arange_mat = torch.arange(K_max, device=xyz.device).expand(B, K_max)
         keep_mask  = arange_mat < K_each.unsqueeze(1)
-        idx_local  = torch.where(keep_mask, idx_all, idx_all[:, :1].expand(-1, K_max))
-        idx_global = perm.gather(1, idx_local)
-        return idx_global, keep_mask
+        idx_local  = torch.where(keep_mask, idx_all,
+                                 idx_all[:, :1].expand(-1, K_max))
+        idx_global = perm.gather(1, idx_local)                      # back-map
+        return idx_global, keep_mask                               # (B,M), (B,M)
 
     # ------------------------------ forward -------------------------------- #
-    def forward(self, xyz, feats, pad_mask=None):
+    def forward(self,
+                xyz:   torch.Tensor,         # (B, N, 3)
+                feats: torch.Tensor,         # (B, N, Cin)
+                pad_mask: torch.Tensor|None = None  # (B, N) bool – True=PAD
+                ):
         B, N, _ = xyz.shape
 
-        ctr_idx, keep_mask = self._sample(xyz, pad_mask)
-        ctr_xyz = xyz[torch.arange(B)[:, None], ctr_idx]                # (B,M,3)
+        # 1) choose centroids ------------------------------------------------
+        ctr_idx, keep_mask = self._sample(xyz, pad_mask)            # (B,M)
+        ctr_xyz   = xyz  [torch.arange(B)[:, None], ctr_idx]        # (B,M,3)
 
+        # 2) ball-query neighbours -----------------------------------------
         neigh = ball_query(ctr_xyz, xyz, K=self.nsample,
                            radius=self.radius, return_nn=False)
+        # neigh.idx = -1 where invalid
         neigh_idx = torch.where(
             neigh.idx < 0,
             ctr_idx.unsqueeze(-1).expand(-1, -1, self.nsample),
-            neigh.idx
-        )                                                               # (B,M,K)
+            neigh.idx,
+        )                                                           # (B,M,K)
 
-        batch_idx   = torch.arange(B, device=xyz.device).view(B,1,1).expand_as(neigh_idx)
-        neigh_xyz   = xyz  [batch_idx, neigh_idx]                       # (B,M,K,3)
-        neigh_feats = feats[batch_idx, neigh_idx]                       # (B,M,K,Cin)
+        batch_idx   = torch.arange(B, device=xyz.device
+                           ).view(B, 1, 1).expand_as(neigh_idx)
+        neigh_xyz   = xyz  [batch_idx, neigh_idx]                   # (B,M,K,3)
+        neigh_feats = feats[batch_idx, neigh_idx]                   # (B,M,K,Cin)
 
-        neigh_feats = self.in_proj(neigh_feats)                         # (B,M,K,Cout)
+        # 3) feature projection --------------------------------------------
+        neigh_feats = self.in_proj(neigh_feats)                    # (B,M,K,Cout)
 
-        BM, K, C = neigh_feats.size(0)*neigh_feats.size(1), neigh_feats.size(2), neigh_feats.size(3)
+        # 4) build padding mask for neighbours -----------------------------  # NEW
+        neigh_invalid = neigh.idx < 0                               # (B,M,K)
+        pad_neigh     = neigh_invalid.view(-1, self.nsample)        # (B*M,K)
+
+        # 5) local self-attention ------------------------------------------
+        BM, K, C = neigh_feats.size(0) * neigh_feats.size(1), \
+                   neigh_feats.size(2), neigh_feats.size(3)
+
         feats_out = self.local_attn(
             neigh_feats.view(BM, K, C),
-            coords_src=neigh_xyz.view(BM, K, 3)
-        )                                                               # (BM,K,C)
+            coords_src           = neigh_xyz.view(BM, K, 3),
+            src_padding_mask     = pad_neigh                       # NEW
+        )                                                           # (BM,K,C)
 
+        # 6) pooling & post-norm -------------------------------------------
         pooled = feats_out.max(dim=1).values.view(B, ctr_idx.shape[1], C)
         pooled = self.out_norm(pooled)
 
+        # 7) propagate centroid-level padding mask -------------------------
         centroid_pad = None
         if keep_mask is not None:
-            centroid_pad = ~keep_mask
+            centroid_pad = ~keep_mask                               # (B,M)
             pooled  = pooled .masked_fill(centroid_pad.unsqueeze(-1), 0.0)
             ctr_xyz = ctr_xyz.masked_fill(centroid_pad.unsqueeze(-1), 1e6)
 

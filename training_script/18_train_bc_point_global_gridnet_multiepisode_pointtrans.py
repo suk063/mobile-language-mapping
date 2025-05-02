@@ -322,7 +322,7 @@ def train(cfg: TrainConfig):
             raise FileNotFoundError(f"No center files found in {root_dir}")
         return centers
         
-    agent.valid_coords = load_changed_centers(device=device)[0]
+    agent.valid_coords = load_changed_centers(device=device)
     
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
