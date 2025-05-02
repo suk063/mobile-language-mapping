@@ -68,6 +68,7 @@ class Agent_global_gridnet_multiepisode(nn.Module):
         self.static_map = static_map
         self.implicit_decoder = implicit_decoder
         
+        self.fx, self.fy, self.cx, self.cy = camera_intrinsics
     
     @staticmethod
     def _flatten_pose(p):            # p: [B, 1, 3, 4]
