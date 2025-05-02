@@ -86,7 +86,7 @@ class GridDefinition:
     bound: List[List[float]] = field(
         default_factory=lambda: [[-2.6, 4.6], [-8.1, 4.7], [0.0, 3.1]]
     )
-    base_cell_size: float = 0.3
+    base_cell_size: float = 0.4
     per_level_scale: float = 2.0
     n_levels: int = 2
     n_scenes: int = 122
@@ -268,7 +268,7 @@ def train(cfg: TrainConfig):
     ).to(device)
     
     agent.implicit_decoder.load_state_dict(torch.load('pre-trained/latest_decoder.pt', map_location=device), strict=True)
-    agent.static_map.load_state_dict(torch.load('pre-trained/latest_static_map.pt', mmap=True), strict=True)
+    # agent.static_map.load_state_dict(torch.load('pre-trained/latest_static_map.pt', mmap=True), strict=True)
     
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
