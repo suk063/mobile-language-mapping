@@ -82,7 +82,7 @@ class DPDataset(ClosableDataset):
 
                 if truncate_trajectories_at_success:
                     success: List[bool] = f[k]["success"][:].tolist()
-                    success_cutoff = min(success.index(True)+5, len(success))
+                    success_cutoff = min(success.index(True)+10, len(success))
                     del success
                 else:
                     success_cutoff = len(act)

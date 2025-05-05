@@ -79,7 +79,6 @@ class BCConfig:
     open_clip_model_pretrained: str = "merged2b_s4b_b131k"
     text_input: List[str] = field(default_factory=lambda: ["bowl", "apple"])
     camera_intrinsics: List[float] = field(default_factory=lambda: [71.9144, 71.9144, 112, 112])
-    hidden_dim: int = 240
     num_heads: int = 8
     num_layers_transformer: int = 4
     action_horizon: int = 16
