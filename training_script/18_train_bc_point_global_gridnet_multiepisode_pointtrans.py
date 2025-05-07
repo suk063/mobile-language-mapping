@@ -84,7 +84,7 @@ class GridDefinition:
     bound: List[List[float]] = field(
         default_factory=lambda: [[-2.6, 4.6], [-8.1, 4.7], [0.0, 3.1]]
     )
-    base_cell_size: float = 0.3
+    base_cell_size: float = 0.4
     per_level_scale: float = 2.0
     n_levels: int = 2
     n_scenes: int = 122
@@ -275,8 +275,8 @@ def train(cfg: TrainConfig):
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        static_map=static_map,
-        implicit_decoder=implicit_decoder,
+        static_map=None,
+        implicit_decoder=None,
         num_heads = cfg.algo.num_heads,
         num_layers_transformer=cfg.algo.num_layers_transformer,
         num_action_layer=cfg.algo.num_action_layer,
@@ -284,6 +284,9 @@ def train(cfg: TrainConfig):
     ).to(device) 
     
     agent.load_state_dict(torch.load('pre-trained/latest_agent.pt', map_location=device), strict=False)
+
+    agent.static_map = static_map
+    agent.implicit_decoder = implicit_decoder
 
     for module, ckpt in [
         (agent.static_map,      "pre-trained/latest_static_map.pt"),
@@ -571,7 +574,7 @@ def train(cfg: TrainConfig):
 
             pi = agent.forward_policy(obs, subtask_labels, epi_ids)
             
-            total_bc_loss = F.smooth_l1_loss(pi, act, reduction='none')
+            total_bc_loss = F.mse_loss(pi, act, reduction='none')
             total_bc_loss = total_bc_loss * time_weights
             bc_loss = total_bc_loss.mean()
         

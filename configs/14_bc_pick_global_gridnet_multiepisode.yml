@@ -37,7 +37,7 @@ algo:
   lr: 1e-3
   batch_size: 16
   
-  epochs: 3
+  epochs: 15
 
   eval_freq: 1
   log_freq: 1

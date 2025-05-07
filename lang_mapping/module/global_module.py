@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Tuple, Optional
 
 from pytorch3d.ops import ball_query, sample_farthest_points
 
@@ -283,9 +284,9 @@ class HierarchicalSceneTransformer(nn.Module):
                  heads=8, dropout=0.1):
         super().__init__()
         cfg = dict(
-            sa1=(1.0,  16, 0.15),
-            sa2=(2.0,  16, 0.15),
-            sa3=(4.0,  16, 0.15),
+            sa1=(1.0,  16, 0.25),
+            sa2=(2.0,  16, 0.25),
+            sa3=(4.0,  16, 0.25),
             sa4=(8.0, 16, 0.0)
         )
         (r1,k1,p1), (r2,k2,p2), (r3,k3,p3), (r4,k4,p4) = cfg.values()
@@ -303,6 +304,7 @@ class HierarchicalSceneTransformer(nn.Module):
         pts : (B, N, 3 + in_dim)
         pad : (B, N) bool – True = PAD
         """
+        
         xyz, feat = pts[..., :3], pts[..., 3:]
 
         xyz, feat, pad = self.sa1(xyz, feat, pad)

@@ -2,16 +2,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
-
 # Local imports
-from ..module.transformer import ActionTransformerDecoder, TransformerEncoder
-from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, StateProj
+from ..module.transformer import ActionTransformerDecoder, TransformerEncoder, LocalSelfAttentionFusion
+from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, StateProj, VoxelProj
 from ..module.global_module import HierarchicalSceneTransformer, LocalFeatureFusion
 
 from lang_mapping.grid_net import GridNet
 
 from ..utils import get_3d_coordinates, get_visual_features, transform, gate_with_text
+from torch.nn.utils.rnn import pad_sequence
 import open_clip
 
 class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
@@ -92,7 +91,7 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         self.implicit_decoder = implicit_decoder
         
         self.state_proj =  StateProj(state_dim, transf_input_dim)
-        # self.voxel_proj = VoxelProj(voxel_feature_dim=transf_input_dim) 
+        self.voxel_proj = DimReducer(clip_input_dim, transf_input_dim, L=0)
 
         # Camera intrinsics
         self.fx, self.fy, self.cx, self.cy = camera_intrinsics
@@ -111,7 +110,7 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
             dim       = transf_input_dim,
             n_heads   = num_heads,
             ff_mult   = 4,
-            radius    = 0.3, 
+            radius    = 0.2, 
             k         = 1,
             dropout   = 0.1
         )
@@ -121,49 +120,49 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         return p.squeeze(1).reshape(p.size(0), -1)      # → [B, 12]
 
     def _gather_scene_kv(
-        self,
-        batch_episode_ids: torch.Tensor,         # [B]
-        text_emb:          torch.Tensor,         # [B,768]
-        level_idx: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Returns
-        -------
-        kv_coords     : (B,  L_max, 3)   padded with 0
-        kv_feats      : (B,  L_max, C)   padded with 0
-        kv_pad_mask   : (B,  L_max)      True ⟹ pad
-        """
-        B                              = batch_episode_ids.size(0)
-        scene_ids                       = batch_episode_ids.tolist()
-        per_scene_coords, per_scene_len = [], []
+            self,
+            batch_episode_ids: torch.Tensor,         # [B]
+            text_emb:          torch.Tensor,         # [B,768]
+            level_idx: int
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            """
+            Returns
+            -------
+            kv_coords     : (B,  L_max, 3)   padded with 0
+            kv_feats      : (B,  L_max, C)   padded with 0
+            kv_pad_mask   : (B,  L_max)      True ⟹ pad
+            """
+            B                              = batch_episode_ids.size(0)
+            scene_ids                       = batch_episode_ids.tolist()
+            per_scene_coords, per_scene_len = [], []
 
-        # ── 1) collect coordinates per scene ──────────────────────────────
-        for sid in scene_ids:
-            c = self.valid_coords[level_idx][int(sid)].to(self.device)     # (L_i,3)
-            per_scene_coords.append(c)
-            per_scene_len.append(c.size(0))
+            # ── 1) collect coordinates per scene ──────────────────────────────
+            for sid in scene_ids:
+                c = self.valid_coords[level_idx][int(sid)].to(self.device)     # (L_i,3)
+                per_scene_coords.append(c)
+                per_scene_len.append(c.size(0))
 
-        L_max = max(per_scene_len)
+            L_max = max(per_scene_len)
 
-        kv_coords   = torch.zeros(B, L_max, 3,                   device=self.device)
-        kv_feats    = torch.zeros(B, L_max, self.transf_input_dim, device=self.device)
-        kv_pad_mask = torch.ones( B, L_max, dtype=torch.bool,    device=self.device)
+            kv_coords   = torch.zeros(B, L_max, 3,                   device=self.device)
+            kv_feats    = torch.zeros(B, L_max, self.transf_input_dim, device=self.device)
+            kv_pad_mask = torch.ones( B, L_max, dtype=torch.bool,    device=self.device)
 
-        # ── 2) query voxel features scene-wise ────────────────────────────
-        for b, (sid, coords) in enumerate(zip(scene_ids, per_scene_coords)):
-            L                     = coords.size(0)
-            kv_coords  [b, :L]    = coords
-            kv_pad_mask[b, :L]    = False                         # not pad
+            # ── 2) query voxel features scene-wise ────────────────────────────
+            for b, (sid, coords) in enumerate(zip(scene_ids, per_scene_coords)):
+                L                     = coords.size(0)
+                kv_coords  [b, :L]    = coords
+                kv_pad_mask[b, :L]    = False                         # not pad
 
-            scene_ids_tensor      = torch.full((L, 1), sid, device=self.device)
-            with torch.no_grad():
-                vox_raw           = self.static_map.query_feature(coords, scene_ids_tensor)
-                vox_feat          = self.implicit_decoder(vox_raw)          # (L,F_dec)
+                scene_ids_tensor      = torch.full((L, 1), sid, device=self.device)
+                with torch.no_grad():
+                    vox_raw           = self.static_map.query_feature(coords, scene_ids_tensor)
+                    vox_feat          = self.implicit_decoder(vox_raw)          # (L,F_dec)
 
-            vox_feat              = gate_with_text(vox_feat.unsqueeze(0), text_emb[b:b+1]).squeeze(0)
-            kv_feats   [b, :L]    = vox_feat
+                vox_feat              = gate_with_text(vox_feat.unsqueeze(0), text_emb[b:b+1]).squeeze(0)
+                kv_feats   [b, :L]    = self.voxel_proj(vox_feat)
 
-        return kv_coords, kv_feats, kv_pad_mask
+            return kv_coords, kv_feats, kv_pad_mask
     
     def forward_policy(self, observations, object_labels, batch_episode_ids):
 
@@ -257,7 +256,6 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
             head_depth_m1, head_pose_m1,
             self.fx, self.fy, self.cx, self.cy
         )
-
  
         # Reduce CLIP dimension for hand/head
         _, C_, Hf, Wf = hand_coords_world_t.shape
@@ -297,29 +295,31 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         coords_hand_m1 = hand_coords_world_flat_m1.view(B, N, 3)
         coords_head_m1 = head_coords_world_flat_m1.view(B, N, 3)
         
-        kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
+        
+        # Local feature fusion
+        kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1 = self._gather_scene_kv(batch_episode_ids, text_emb, 1)
         
         feats_hand_t  = self.local_fuser(
             coords_hand_t, feats_hand_t,
-            kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0
+            kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
         )
         feats_head_t  = self.local_fuser(
             coords_head_t, feats_head_t,
-            kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0
+            kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
         )
         feats_hand_m1 = self.local_fuser(
             coords_hand_m1, feats_hand_m1,
-            kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0
+            kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
         )
         feats_head_m1 = self.local_fuser(
             coords_head_m1, feats_head_m1,
-            kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0
+            kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
         )
         
-        # kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
+        kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
         
         pts_kv   = torch.cat([kv_coords_lvl0, kv_feats_lvl0], dim=-1)            # [B,L, 3+768]
-        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_lvl0)     
+        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_lvl0)          
            
         # Transformer forward
         visual_tok = self.transformer(

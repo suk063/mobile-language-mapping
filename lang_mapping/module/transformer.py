@@ -529,9 +529,9 @@ class LocalSelfAttentionFusion(nn.Module):
         self,
         feat_dim: int = 768,
         num_heads: int = 8,
-        ffn_multiplier: int = 2,
+        ffn_multiplier: int = 4,
         dropout: float = 0.1,
-        output_dim: int = 368,
+        output_dim: int = 768,
     ):
         super().__init__()
 
