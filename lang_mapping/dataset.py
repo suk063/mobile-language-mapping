@@ -38,6 +38,7 @@ class DPDataset(ClosableDataset):
         max_image_cache_size=0,
         truncate_trajectories_at_success=True,
         single_traj_idx: Optional[int] = None,
+        allowed_uids: Optional[set[str]] = None,
     ):
         data_path = Path(data_path)
         if data_path.is_dir():
@@ -74,6 +75,9 @@ class DPDataset(ClosableDataset):
             for k in tqdm(keys, desc=f"hf file {fp_num}"):
                 ep_num = int(k.replace("traj_", ""))
                 subtask_uid = json_file["episodes"][ep_num]["subtask_uid"]
+                
+                if allowed_uids is not None and subtask_uid not in allowed_uids:
+                    continue
                 
                 #f[k]['obs']['extra'].keys()
                 # <KeysViewHDF5 ['tcp_pose_wrt_base', 'obj_pose_wrt_base', 'goal_pos_wrt_base', 'is_grasped']>
