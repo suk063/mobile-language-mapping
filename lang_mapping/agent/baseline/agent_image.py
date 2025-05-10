@@ -43,7 +43,8 @@ class Agent_image(nn.Module):
 
         # Text embeddings and projection
         if text_input:
-            text_input += [""]
+            # text_input += [""]
+            text_input = [s.replace('_', ' ') for s in text_input] + [""]
         
         text_tokens = self.tokenizer(text_input).to(self.device)
         self.text_proj = nn.Linear(clip_input_dim, transf_input_dim).to(self.device)
