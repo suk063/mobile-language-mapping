@@ -110,6 +110,9 @@ class TrainConfig:
     resume_logdir: Optional[Union[Path, str]] = None
     model_ckpt: Optional[Union[Path, int, str]] = None
 
+    max_kept_epochs: int = 5
+    eval_plan_num: int = 100
+
     def __post_init__(self):
         if self.resume_logdir is not None:
             self.resume_logdir = Path(self.resume_logdir)
@@ -317,14 +320,17 @@ def train(cfg: TrainConfig):
         loss_logs = dict(loss=avg_loss)
         timer.end(key="train")
 
+        SLOT_TPL  = "slot{:02d}" 
         # Logging
-        if check_freq(cfg.algo.log_freq, epoch):
-            logger.store(tag="losses", **loss_logs)
-            if epoch > 0:
-                logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(global_epoch)
-            timer.end(key="log")
+        if check_freq(cfg.algo.save_freq, epoch):
+            slot_name = SLOT_TPL.format(epoch % cfg.max_kept_epochs)
 
+            save_checkpoint(name=slot_name)
+
+            save_checkpoint(name="latest")
+
+            timer.end(key="checkpoint")
+            
         # Evaluation
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
@@ -356,7 +362,9 @@ def train(cfg: TrainConfig):
 
                 batch_size = eval_envs.num_envs
                 all_plan_count = cfg.eval_env.all_plan_count
+                all_plan_count = min(all_plan_count, cfg.eval_plan_num)
                 all_plan_idxs_list = list(range(all_plan_count))
+
 
                 print("Now running all tasks in chunks...")
                 pbar = tqdm(total=all_plan_count, desc="Evaluating all tasks (last epoch)")
