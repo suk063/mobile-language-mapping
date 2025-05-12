@@ -8,21 +8,26 @@ from lang_mapping.agent.baseline.agent_uplift import Agent_uplift
 from lang_mapping.dataset import build_object_map, get_object_labels_batch, merge_t_m1
 
 CKPT  = Path("/home/woojeh/Documents/mobile-language-mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-uplift-local-trajs_per_obj=10/models/latest_agent.pt")
-TRAJ  = 700                                            
+TRAJ  = 370                                   
 TASK  = "set_table"                        
 MODE  = "pick"
+
+OOD = True
+plan_dir = "task_plans_ood" if OOD else "task_plans"
+
+suffix = "_ood" if OOD else ""
 
 ROOT = os.path.expanduser("~/.maniskill/data/scene_datasets/replica_cad_dataset")
 H5    = f"{ROOT}/rearrange-dataset/{TASK}/{MODE}/all.h5"
 META  = H5.replace(".h5", ".json")
-PLAN  = f"{ROOT}/rearrange/task_plans/{TASK}/{MODE}/train/all.json"
+PLAN  = f"{ROOT}/rearrange/{plan_dir}/{TASK}/{MODE}/train/all.json"
 SPAWN = f"{ROOT}/rearrange/spawn_data/{TASK}/{MODE}/train/spawn_data.pt"
 
 VID   = Path(__file__).parent / "videos"; VID.mkdir(exist_ok=True, parents=True)
 TRAJ_DIR = Path(__file__).parent / "traj" / TASK / MODE
 TRAJ_DIR.mkdir(exist_ok=True, parents=True)           
-OUT_H5  = TRAJ_DIR / f"traj_{TRAJ:03d}.h5"
-OUT_JS  = TRAJ_DIR / f"traj_{TRAJ:03d}.json"
+OUT_H5 = TRAJ_DIR / f"traj{suffix}_{TRAJ:03d}.h5"
+OUT_JS = TRAJ_DIR / f"traj{suffix}_{TRAJ:03d}.json"
 
 TEXT_PROMPTS        = ["bowl", "apple"]
 CLIP_MODEL_NAME     = "EVA02-L-14"
@@ -55,6 +60,7 @@ env    = make_env(env_cfg, video_path=VID)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+# reset env with task specific config
 obs, _ = env.reset(
     options=dict(
         reconfigure           = True,
