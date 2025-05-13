@@ -18,7 +18,7 @@ eval_env:
   stationary_torso: False
   stationary_head: True
 
-  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all.json
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all_13.json
   spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt"
 
   record_video: False
@@ -57,7 +57,6 @@ algo:
   open_clip_model_pretrained: "merged2b_s4b_b131k"
   text_input: ["bowl", "apple"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
-  state_mlp_dim: 128
   cos_loss_weight: 0.1
   
 logger:
