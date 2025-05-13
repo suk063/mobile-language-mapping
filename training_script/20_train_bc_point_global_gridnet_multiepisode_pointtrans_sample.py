@@ -2,7 +2,7 @@ import json
 import os
 import random
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple
 from lang_mapping.grid_net import GridNet
@@ -120,6 +120,7 @@ def task_plan_idxs_from_uids(vec_env, allowed_uids, *, device=None):
         i for i, uid_tuple in enumerate(inner_env.base_task_plans.keys())
         if any(uid in allowed_uids for uid in uid_tuple)
     ]
+    
     if not valid_idxs:
         raise ValueError("No task plans contain any of the supplied eval_uids.")
 
@@ -290,7 +291,7 @@ def train(cfg: TrainConfig):
     uid_to_label_map = build_object_map(cfg.eval_env.task_plan_fp, cfg.algo.text_input)
     uid2index_map = build_uid_mapping(cfg.eval_env.task_plan_fp)
     
-    task_plan_fp = cfg.eval_env.task_plan_fp          # ex) ".../task_plan.json"
+    task_plan_fp = cfg.eval_env.task_plan_fp       
     episode2subtasks, episode2id, uid2episode_id = build_episode_subtask_maps(
         task_plan_fp, keep_dict_order=False
     )
@@ -299,27 +300,22 @@ def train(cfg: TrainConfig):
     random.seed(cfg.seed)                         
     random.shuffle(episode_names)
 
-    split_idx      = int(0.8 * len(episode_names))   
+    split_idx      = int(0.9 * len(episode_names))   
     train_episodes = episode_names[:split_idx]
     eval_episodes  = episode_names[split_idx:]
     
     train_uids = {uid for ep in train_episodes for uid in episode2subtasks[ep]}
     eval_uids  = {uid for ep in eval_episodes  for uid in episode2subtasks[ep]}
-
-    cfg.eval_env.num_envs = len(eval_episodes)
-
-    # Make eval env
+    
     print("Making eval env...")
     eval_envs = make_env(cfg.eval_env, video_path=cfg.logger.eval_video_path)
-    # eval_uids = eval_envs.unwrapped.task_plan[0].composite_subtask_uids
-    print("Eval env made.")
 
-    fixed_plan_idxs = task_plan_idxs_from_uids(eval_envs, eval_uids, device=device)
-    eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+    train_plan_idxs_full = task_plan_idxs_from_uids(eval_envs, train_uids, device=device)
+    eval_plan_idxs_full  = task_plan_idxs_from_uids(eval_envs, eval_uids,  device=device)
 
-    # eval_obs, _ = eval_envs.reset(seed=cfg.seed + 1_000_000)
-    # MARK: Here we try to save the plan indexes
-    fixed_plan_idxs = eval_envs.unwrapped.task_plan_idxs.clone()
+
+    init_plan_idxs = train_plan_idxs_full[: cfg.eval_env.num_envs]
+    eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": init_plan_idxs})
     
     eval_envs.action_space.seed(cfg.seed + 1_000_000)
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
@@ -462,6 +458,23 @@ def train(cfg: TrainConfig):
         )
         log_env.reset_queues()
 
+    agg = dict(ret_sum=0.0, suc1_sum=0.0, sucE_sum=0.0, len_sum=0.0, n=0)
+    
+    # Helper method to flush the stats
+    def flush_env_stats(env):
+        r  = torch.tensor(env.return_queue,          dtype=torch.float32)
+        s1 = torch.tensor(env.success_once_queue,    dtype=torch.float32)
+        sE = torch.tensor(env.success_at_end_queue,  dtype=torch.float32)
+        L  = torch.tensor(env.length_queue,          dtype=torch.float32)
+
+        agg["ret_sum"] += r.sum().item()
+        agg["suc1_sum"] += s1.sum().item()
+        agg["sucE_sum"] += sE.sum().item()
+        agg["len_sum"] += L.sum().item()
+        agg["n"]       += r.numel()
+
+        # clear for next env or next chunk
+        env.reset_queues()    
 
     # ------------------------------------------------
     # Mapping
@@ -481,68 +494,6 @@ def train(cfg: TrainConfig):
     alpha = cfg.algo.action_temp_weights
     dists = torch.arange(cfg.algo.action_pred_horizon, device=device)
     time_weights = exp_decay_weights(dists, alpha).view(1, -1, 1)        
-    
-    def run_eval_episode_horizon(eval_envs, eval_obs, agent, uid_to_label_map):
-        """
-        Evaluate with temporal aggregation over B parallel envs, loop-free over B.
-        Uses exp_decay_weights(d, α) for the per-step weighting.
-        """
-        device      = eval_obs["state"].device
-        H           = cfg.algo.action_pred_horizon
-        max_steps   = eval_envs.max_episode_steps
-        action_dim  = eval_envs.single_action_space.shape[0]
-        alpha       = cfg.algo.action_temp_weights
-        B           = eval_envs.num_envs
-
-        # sub-task meta
-        plan0           = eval_envs.unwrapped.task_plan[0]
-        subtask_labels  = get_object_labels_batch(uid_to_label_map,
-                                                plan0.composite_subtask_uids).to(device)
-        epi_ids         = torch.tensor([uid2episode_id[uid] for uid in plan0.composite_subtask_uids],
-                                    device=device, dtype=torch.long)
-
-        # action buffer  (B, T, T+H, A)
-        all_time_actions = torch.zeros(B, max_steps, max_steps + H, action_dim, device=device)
-
-        prev_obs = eval_obs
-        t_idx    = torch.arange(max_steps, device=device)          # (T,)
-
-        step_cnt = 0
-        while step_cnt < max_steps:
-            # 1) forward policy  --------------------------------------------------
-            agent_obs = merge_t_m1(prev_obs, eval_obs)
-            with torch.no_grad():
-                action_seq = agent.forward_policy(                  # (B,H,A)
-                    agent_obs, subtask_labels, epi_ids
-                )
-
-            # 2) write predictions into ring buffer ------------------------------
-            all_time_actions[:, step_cnt,
-                            step_cnt:step_cnt + H] = action_seq
-
-            # 3) temporal aggregation (vectorised) -------------------------------
-            cand = all_time_actions[:, :, step_cnt]                 # (B,T,A)
-            mask = cand.abs().sum(dim=-1) != 0                      # (B,T)
-
-            dists     = (step_cnt - t_idx).clamp(min=0)             # (T,)
-            base_w    = exp_decay_weights(dists, 0.2)             # (T,)
-            w_raw  = base_w.unsqueeze(0) * mask                  # (B,T)
-            w_sum  = w_raw.sum(dim=1, keepdim=True)              # (B,1)
-
-            no_pred   = w_sum.squeeze(1) == 0
-            w_norm    = w_raw / (w_sum + 1e-8)                      # (B,T)
-
-            agg_action          = (w_norm.unsqueeze(-1) * cand).sum(dim=1)  # (B,A)
-            agg_action[no_pred] = action_seq[no_pred, 0]                      # fallback
-
-            # 4) env step --------------------------------------------------------
-            next_obs, _, terminated, truncated, _ = eval_envs.step(agg_action)
-            step_cnt += 1
-            prev_obs, eval_obs = eval_obs, next_obs
-            if terminated.any() or truncated.any():
-                break
-
-        return _collect_stats(eval_envs, device)
     
     def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map):
         """
@@ -576,47 +527,6 @@ def train(cfg: TrainConfig):
             next_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])
             prev_obs = eval_obs
             eval_obs = next_obs
-
-        return _collect_stats(eval_envs, device)
-    
-    def run_eval_episode_multi(eval_envs, eval_obs, agent, uid_to_label_map):
-        """
-        Run a single evaluation episode.
-        Uses 'prev_obs' and 'current_obs' for merging observations.
-        """
-        device = eval_obs["state"].device
-        max_steps = eval_envs.max_episode_steps
-        prev_obs  = eval_obs         
-        step_cnt  = 0            
-
-        # ── subtask-meta ───────────────────────────────────────────
-        plan0            = eval_envs.unwrapped.task_plan[0]
-        subtask_labels   = get_object_labels_batch(uid_to_label_map,
-                                                plan0.composite_subtask_uids).to(device)
-        epi_ids          = torch.tensor(
-            [uid2episode_id[uid] for uid in plan0.composite_subtask_uids],
-            device=device, dtype=torch.long,
-        )
-        B = subtask_labels.size(0)
-
-        # ── rollout ───────────────────────────────────────────────
-        done = False
-        while step_cnt < max_steps and not done:
-            agent_obs = merge_t_m1(prev_obs, eval_obs)
-
-            with torch.no_grad():
-                action_seq = agent.forward_policy(agent_obs, subtask_labels, epi_ids)[:, :8, :]
-
-            for i in range(action_seq.shape[1]):         
-                next_obs, _, terminated, truncated, _ = eval_envs.step(action_seq[:, i, :])
-                step_cnt += 1
-
-                prev_obs = eval_obs
-                eval_obs = next_obs
-
-                if terminated.any() or truncated.any() or step_cnt >= max_steps:
-                    done = True
-                    break
 
         return _collect_stats(eval_envs, device)
     
@@ -674,7 +584,7 @@ def train(cfg: TrainConfig):
         # Evaluation
         if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
             agent.eval()
-            eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+            eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": init_plan_idxs})
             # DEBUG
             print(f"Run eval episdoe (single horizon)")
             stats_single = run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
@@ -684,28 +594,69 @@ def train(cfg: TrainConfig):
                 store_env_stats("eval")
             logger.log(global_epoch)
             timer.end(key="eval")
-        
-        # Evaluation
-        # if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
-        #     agent.eval()
-        #     eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
-        #     # DEBUG
-        #     print(f"Run eval episdoe (temporal aggregation)")
-        #     stats_horiz = run_eval_episode_horizon(eval_envs, eval_obs, agent, uid_to_label_map)
-        #     _pretty_print_stats("[Eval-Horizon]", stats_horiz, logger, color="cyan")
-
-        # if cfg.algo.eval_freq and check_freq(cfg.algo.eval_freq, epoch):
-        #     agent.eval()
-        #     eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
-        #     # DEBUG
-        #     print(f"Run eval episdoe (multi step)")
-        #     stats_horiz = run_eval_episode_multi(eval_envs, eval_obs, agent, uid_to_label_map)
-        #     _pretty_print_stats("[Eval-Horizon]", stats_horiz, logger, color="magenta")
 
         # Saving
         if check_freq(cfg.algo.save_freq, epoch):
             save_checkpoint(name="latest")
             timer.end(key="checkpoint")
+
+
+    # ------------------------------------------------------------------ #
+    #                   Final Evaluation                                 #
+    # ------------------------------------------------------------------ #
+    
+    def _eval_plan_list(plan_idxs_list: List[int], tag: str):
+        nonlocal eval_envs 
+        batch_size = eval_envs.num_envs
+        set_ret, set_len, set_suc1, set_n = 0.0, 0.0, 0.0, 0
+    
+        pbar = tqdm(total=len(plan_idxs_list), desc=f"Eval ‹{tag}›")
+        chunk_start = 0
+        while chunk_start < len(plan_idxs_list):
+            chunk_end  = min(chunk_start + batch_size, len(plan_idxs_list))
+            chunk_size = chunk_end - chunk_start
+            chunk      = plan_idxs_list[chunk_start:chunk_end]
+
+            if chunk_size < batch_size:
+                flush_env_stats(eval_envs)
+                eval_envs.close()
+                eval_envs = make_env(replace(cfg.eval_env, num_envs=chunk_size),
+                                     video_path=cfg.logger.eval_video_path)
+                batch_size = chunk_size
+
+            plan_idxs_tensor = torch.as_tensor(chunk, dtype=torch.long, device=device)
+            eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": plan_idxs_tensor})
+            stats = run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+
+            set_ret  += stats["return_per_step"] * eval_envs.num_envs * eval_envs.max_episode_steps
+            set_len  += eval_envs.num_envs * eval_envs.max_episode_steps
+            set_suc1 += stats["success_once"]      * eval_envs.num_envs
+            set_n    += eval_envs.num_envs
+
+            flush_env_stats(eval_envs)   # 전역 agg 갱신(원하면 유지)
+
+            chunk_start += chunk_size
+            pbar.update(chunk_size)
+        pbar.close()
+        
+        if set_len > 0:                             # Division-by-zero 방지
+            final_stats = dict(
+                return_per_step = set_ret / set_len,
+                success_once    = set_suc1 / set_n,
+            )
+            _pretty_print_stats(f"[Eval-{tag}]", final_stats, logger, color="magenta")
+            logger.store(tag, **final_stats)
+
+    # (a) eval_uids 
+    _eval_plan_list(eval_plan_idxs_full.tolist(), tag="eval-uids")
+
+    # (b) train_uids 
+    sample_n = min(100, train_plan_idxs_full.numel())
+    perm = torch.randperm(train_plan_idxs_full.numel(), device=device)
+    sampled100 = train_plan_idxs_full[perm[:sample_n]].tolist()
+    _eval_plan_list(sampled100, tag="train-uids-100")
+
+
 
     bc_dataloader.close()
     eval_envs.close()

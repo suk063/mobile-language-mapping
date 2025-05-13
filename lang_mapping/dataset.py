@@ -2,13 +2,14 @@ import json
 import os
 import random
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import h5py
 from tqdm import tqdm
 import random
 import numpy as np
 import torch
 import copy
+from collections import defaultdict
 
 from mshab.utils.array import to_tensor
 from mshab.utils.dataset import ClosableDataLoader, ClosableDataset
@@ -421,3 +422,38 @@ def get_object_labels_batch(
         else:
             labels.append(object_map[uid])
     return torch.stack(labels, dim=0)
+
+
+def build_episode_subtask_maps(
+    task_plan_fp: str,
+    keep_dict_order: bool = False,
+) -> Tuple[Dict[str, List[str]], Dict[str, int], Dict[str, int]]:
+    """
+    Returns
+    -------
+    episode2subtasks : {episode_name(str) : [uid, ...]}
+    episode2id       : {episode_name(str) : episode_id(int)}
+    uid2episode_id   : {subtask_uid(str)  : episode_id(int)}
+    """
+    with open(task_plan_fp, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    episode2subtasks = defaultdict(list)
+    for plan in data["plans"]:
+        # `train/set_table/episode_1010.json`  ->  `episode_1010`
+        ep_name = os.path.splitext(os.path.basename(plan["init_config_name"]))[0]
+        for st in plan["subtasks"]:
+            episode2subtasks[ep_name].extend(st["composite_subtask_uids"])
+
+    # episode → int id
+    ep_names      = list(episode2subtasks) if keep_dict_order else sorted(episode2subtasks)
+    episode2id    = {ep: i for i, ep in enumerate(ep_names)}
+
+    # uid → episode int id
+    uid2episode_id = {}
+    for ep, uid_list in episode2subtasks.items():
+        eid = episode2id[ep]
+        for uid in uid_list:
+            uid2episode_id[uid] = eid
+
+    return dict(episode2subtasks), episode2id, uid2episode_id

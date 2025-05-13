@@ -54,9 +54,6 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         if text_input:
             # text_input += [""]
             text_input = [s.replace('_', ' ') for s in text_input] + [""]
-            
-        import pdb
-        pdb.set_trace()
         
         text_tokens = self.tokenizer(text_input).to(self.device)
         self.text_proj = nn.Linear(clip_input_dim, transf_input_dim).to(self.device)
@@ -159,9 +156,9 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
                 kv_pad_mask[b, :L]    = False                         # not pad
 
                 scene_ids_tensor      = torch.full((L, 1), sid, device=self.device)
-                with torch.no_grad():
-                    vox_raw           = self.static_map.query_feature(coords, scene_ids_tensor)
-                    vox_feat          = self.implicit_decoder(vox_raw)          # (L,F_dec)
+
+                vox_raw           = self.static_map.query_feature(coords, scene_ids_tensor)
+                vox_feat          = self.implicit_decoder(vox_raw)          # (L,F_dec)
 
                 vox_feat              = gate_with_text(vox_feat.unsqueeze(0), text_emb[b:b+1]).squeeze(0)
                 kv_feats   [b, :L]    = self.voxel_proj(vox_feat)

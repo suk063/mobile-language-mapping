@@ -209,7 +209,7 @@ def extract_metrics(traj):
     )
 
 default_demo = Path.home() / ".maniskill/data/scene_datasets/replica_cad_dataset" \
-                            "/rearrange-dataset/prepare_groceries/pick/all.h5"
+                            "/rearrange-dataset/set_table/pick/all.h5"
 
 ap = argparse.ArgumentParser()
 ap.add_argument("path", nargs="?", default=str(default_demo),

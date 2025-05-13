@@ -89,7 +89,7 @@ class GridDefinition:
     base_cell_size: float = 0.4
     per_level_scale: float = 2.0
     n_levels: int = 2
-    n_scenes: int = 122
+    n_scenes: int = 171
     second_order_grid_sample: bool = False
 
 @dataclass

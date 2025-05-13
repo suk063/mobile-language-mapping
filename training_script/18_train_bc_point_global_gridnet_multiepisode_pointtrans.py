@@ -88,6 +88,7 @@ class GridDefinition:
     per_level_scale: float = 2.0
     n_levels: int = 2
     n_scenes: int = 122
+    # n_scenes: int = 171
     second_order_grid_sample: bool = False
 
 @dataclass
@@ -637,6 +638,17 @@ def train(cfg: TrainConfig):
         if check_freq(cfg.algo.save_freq, epoch):
             save_checkpoint(name="latest")
             timer.end(key="checkpoint")
+
+    agent.eval()
+    eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
+    # DEBUG
+    print(f"Run eval episdoe (single horizon)")
+    stats_single = run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map)
+    _pretty_print_stats("[Eval-Single]", stats_single, logger, color="yellow")
+    
+    if len(eval_envs.return_queue) > 0:
+        store_env_stats("eval")
+    timer.end(key="eval")
 
     bc_dataloader.close()
     eval_envs.close()
