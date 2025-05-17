@@ -45,12 +45,13 @@ def all_grid_positions(features):
     Return shape is (1, Z, Y, X, 3)
     """
     B, C, D, H, W = features.shape
-    half_dx = 0.5 * 1/D
-    half_dy = 0.5 * 1/H
-    half_dz = 0.5 * 1/W
-    xs = 2 * torch.linspace(half_dx, 1-half_dx, D) - 1.
-    ys = 2 * torch.linspace(half_dy, 1-half_dy, H) - 1.
-    zs = 2 * torch.linspace(half_dz, 1-half_dz, W) - 1.
+    # D, H, W correspond to the z, y and x dimensions respectively
+    half_dx = 0.5 / W
+    half_dy = 0.5 / H
+    half_dz = 0.5 / D
+    xs = 2 * torch.linspace(half_dx, 1 - half_dx, W) - 1.
+    ys = 2 * torch.linspace(half_dy, 1 - half_dy, H) - 1.
+    zs = 2 * torch.linspace(half_dz, 1 - half_dz, D) - 1.
     xv, yv, zv = torch.meshgrid([xs, ys, zs])
     grid = torch.stack((zv, yv, xv), axis=-1)  
     return grid.unsqueeze(0)
