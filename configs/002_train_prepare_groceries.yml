@@ -34,9 +34,9 @@ eval_env:
 algo:
   name: bc
 
-  lr: 5e-5
+  lr: 1e-5
   batch_size: 4
-  epochs: 10
+  epochs: 0
 
   eval_freq: 1
   log_freq: 1

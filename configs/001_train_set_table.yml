@@ -18,7 +18,7 @@ eval_env:
   stationary_torso: False
   stationary_head: True
 
-  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all_13.json
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all_10.json
   spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt"
 
   record_video: False
@@ -36,7 +36,7 @@ algo:
 
   lr: 1e-5
   batch_size: 4
-  epochs: 20
+  epochs: 0
 
   eval_freq: 1
   log_freq: 1
