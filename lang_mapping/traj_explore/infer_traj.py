@@ -8,11 +8,11 @@ from lang_mapping.agent.baseline.agent_uplift import Agent_uplift
 from lang_mapping.dataset import build_object_map, get_object_labels_batch, merge_t_m1
 
 CKPT  = Path("/home/woojeh/Documents/mobile-language-mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-uplift-local-trajs_per_obj=10/models/latest_agent.pt")
-TRAJ  = 370                                   
-TASK  = "set_table"                        
+TRAJ  = 4                                   
+TASK  = "tidy_house"                        
 MODE  = "pick"
 
-OOD = True
+OOD = False
 plan_dir = "task_plans_ood" if OOD else "task_plans"
 
 suffix = "_ood" if OOD else ""
@@ -29,9 +29,9 @@ TRAJ_DIR.mkdir(exist_ok=True, parents=True)
 OUT_H5 = TRAJ_DIR / f"traj{suffix}_{TRAJ:03d}.h5"
 OUT_JS = TRAJ_DIR / f"traj{suffix}_{TRAJ:03d}.json"
 
-TEXT_PROMPTS        = ["bowl", "apple"]
+TEXT_PROMPTS        = ["gelatin_box", "bowl", "cracker_box", "pudding_box"]
 CLIP_MODEL_NAME     = "EVA02-L-14"
-CLIP_WEIGHTS_ID     = "merged2b_s4b_b131k"
+CLIP_WEIGHTS_ID     = "merged2b_s4b_b131k" 
 CLIP_INPUT_DIM      = 768
 CAMERA_INTRINSICS   = (71.9144, 71.9144, 112, 112)
 NUM_TRANSFORMER_LAY = 4
@@ -50,6 +50,7 @@ env_cfg = EnvConfig(
     task_plan_fp      = PLAN,
     spawn_data_fp     = SPAWN,
     record_video      = True,
+    info_on_video     = False,
     cat_state         = True,
     cat_pixels        = False,
     frame_stack       = 1,

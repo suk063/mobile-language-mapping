@@ -3,13 +3,15 @@ from pathlib import Path
 from mshab.envs.make    import EnvConfig, make_env
 from mshab.envs.planner import plan_data_from_file
 
-TRAJ = 118                                                    
+TRAJ = 806                                                    
 ROOT = os.path.expanduser("~/.maniskill/data/scene_datasets/replica_cad_dataset")
+TASK  = "tidy_house"                        
+MODE  = "pick"
 
-H5   = f"{ROOT}/rearrange-dataset/prepare_groceries/pick/all.h5"
+H5   = f"{ROOT}/rearrange-dataset/{TASK}/{MODE}/all.h5"
 META = H5.replace(".h5", ".json")
-PLAN = f"{ROOT}/rearrange/task_plans/prepare_groceries/pick/train/all.json"
-SPAWN= f"{ROOT}/rearrange/spawn_data/prepare_groceries/pick/train/spawn_data.pt"
+PLAN = f"{ROOT}/rearrange/task_plans/{TASK}/{MODE}/train/all.json"
+SPAWN= f"{ROOT}/rearrange/spawn_data/{TASK}/{MODE}/train/spawn_data.pt"
 VID  = Path(__file__).parent/"videos"; VID.mkdir(exist_ok=True)
 
 # -------------------------------------------------------------------------
@@ -32,7 +34,9 @@ env_cfg = EnvConfig(
     all_plan_count    = len(plan_data_from_file(PLAN).plans),
     task_plan_fp      = PLAN,
     spawn_data_fp     = SPAWN,
+    shader_dir= "default",
     record_video      = True,
+    info_on_video=False,
     env_kwargs        ={k:v for k,v in meta["env_info"]["env_kwargs"].items()
                         if k not in IGNORE},
 )
