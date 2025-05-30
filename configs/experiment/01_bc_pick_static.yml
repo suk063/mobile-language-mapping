@@ -1,0 +1,84 @@
+seed: 0
+
+eval_env:
+  make_env: True
+
+  env_id: "PickSubtaskTrain-v0"
+  num_envs: 63
+  max_episode_steps: 500
+ 
+  continuous_task: True
+
+  cat_state: True
+  cat_pixels: False
+  frame_stack: 1
+
+  stationary_base: False
+  stationary_torso: False
+  stationary_head: True
+
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all.json
+  spawn_data_fp: "~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt"
+
+  record_video: False
+  info_on_video: True
+
+  extra_stat_keys: []
+
+  env_kwargs:
+    robot_force_mult: 0.001
+    robot_force_penalty_min: 0.2
+    target_randomization: False
+
+algo:
+  name: bc
+
+  lr: 3e-4
+  batch_size: 32
+  
+  stage1_epochs: 0
+  stage2_epochs: 30
+
+  eval_freq: 1
+  log_freq: 1
+  save_freq: 1
+
+  trajs_per_obj: all
+  data_dir_fp: null
+  max_cache_size: 0
+
+  save_backup_ckpts: False
+
+  # Determinism
+  torch_deterministic: True
+
+  # Voxel / Scene Settings
+  voxel_feature_dim: 240
+  resolution: 0.12
+  hash_table_size: 2097152  # 2**21
+  scene_bound_min: [-2.6, -8.1, 0.0]
+  scene_bound_max: [4.6, 4.7, 3.1]
+  mod_time: 201
+
+  # CLIP / Agent Settings
+  clip_input_dim: 768
+  open_clip_model_name: "EVA02-L-14"
+  open_clip_model_pretrained: "merged2b_s4b_b131k"
+  text_input: ["bowl", "apple"]
+  camera_intrinsics: [71.9144, 71.9144, 112, 112]
+  state_mlp_dim: 1024
+  temporal_emb_dim: 120
+  cos_loss_weight: 0.02
+
+  # Pre-trained Weights
+  # pretrained_agent_path:  "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-local-trajs_per_obj=1000/models/stage1-final_agent.pt"
+  pretrained_voxel_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-local-trajs_per_obj=1000/models/stage1-final_voxel.pt"
+  pretrained_implicit_path: "/home/sunghwan/workspace/mobile_language_mapping/mshab_exps_save/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-static-local-trajs_per_obj=1000/models/stage1-final_implicit.pt"
+
+logger:
+  workspace: mshab_exps
+  exp_name: bc-pick
+  clear_out: True
+  
+  tensorboard: True
+  wandb: False

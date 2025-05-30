@@ -172,6 +172,7 @@ data/
 mshab_checkpoints/
 mshab_exps/
 mshab_exps_save/
+mshab_exps*
 bench_results/
 
 nohup*

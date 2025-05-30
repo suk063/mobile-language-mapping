@@ -99,13 +99,36 @@ class SubtaskTrainEnv(SequentialTaskEnv):
                     batched_spawn_data[k].append(v[spawn_selection_idx])
             for k, v in batched_spawn_data.items():
                 if k == "articulation_qpos":
+                    # Determine max_dof correctly from the articulation object
+                    max_dof_expected = self.subtask_articulations[0].max_dof
                     articulation_qpos = torch.zeros(
-                        (env_idx.numel(), self.subtask_articulations[0].max_dof),
+                        (env_idx.numel(), max_dof_expected), # Use the expected max_dof
                         device=self.device,
                         dtype=torch.float,
                     )
                     for i in range(env_idx.numel()):
-                        articulation_qpos[i, : v[i].size(1)] = v[i].squeeze(0)
+                        loaded_qpos = v[i] # This is the tensor loaded from file (e.g., shape [N] or [1, N])
+
+                        # Determine the number of DoFs in the loaded tensor and reshape if needed
+                        if loaded_qpos.ndim == 1:
+                            num_loaded_dofs = loaded_qpos.size(0)
+                            qpos_to_assign = loaded_qpos         # Use as is if 1D
+                        elif loaded_qpos.ndim == 2:
+                            # Assuming shape is [1, num_dofs]
+                            num_loaded_dofs = loaded_qpos.size(1)
+                            qpos_to_assign = loaded_qpos.squeeze(0) # Squeeze if 2D
+                        else:
+                            raise ValueError(f"Unexpected articulation_qpos ndim {loaded_qpos.ndim} in spawn data.")
+
+                        # Check if loaded DoFs exceed expected max_dof (optional but good practice)
+                        if num_loaded_dofs > max_dof_expected:
+                             print(f"Warning: Loaded articulation qpos ({num_loaded_dofs} DoFs) for env {i} exceeds max_dof ({max_dof_expected}). Truncating.")
+                             num_loaded_dofs = max_dof_expected # Truncate if necessary
+
+                        # Assign the data safely using the determined num_loaded_dofs
+                        # Ensure we only assign up to num_loaded_dofs and slice qpos_to_assign correctly
+                        articulation_qpos[i, :num_loaded_dofs] = qpos_to_assign[:num_loaded_dofs]
+
                     batched_spawn_data[k] = articulation_qpos
                 else:
                     batched_spawn_data[k] = torch.cat(v, dim=0)
