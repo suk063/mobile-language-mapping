@@ -1,3 +1,7 @@
+.idea
+Pipfile.lock
+mani_skill2_ycb.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -180,16 +184,3 @@ vis/
 Notebook
 output.log
 my_debug_vis/
-
-static_mapping/
-
-lang_mapping/traj_explore/*
-!lang_mapping/traj_explore/analyze.py
-!lang_mapping/traj_explore/observe_traj.py
-!lang_mapping/traj_explore/view_traj.py
-!lang_mapping/traj_explore/infer_traj.py
-!lang_mapping/traj_explore/make_ray_env.py
-
-*/RL/*
-*.npy
-*.pt
