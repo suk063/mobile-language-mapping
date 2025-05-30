@@ -524,10 +524,13 @@ class Pipeline:
     def save_model(self, name, epoch):
         folder = os.path.join(self.cfg.output_dir, name)
         os.makedirs(folder, exist_ok=True)
-        torch.save(
-            dict(model=self.hash_voxel.state_dict(), epoch=epoch),
-            os.path.join(folder, "hash_voxel.pt"),
-        )
+
+        # --------------------------------------------
+        dense_path  = os.path.join(folder, "hash_voxel_dense.pt")
+        sparse_path = os.path.join(folder, "hash_voxel_sparse.pt")
+        self.hash_voxel.save_dense(dense_path)   # full state_dict
+        self.hash_voxel.save_sparse(sparse_path) # only accessed voxels
+
         torch.save(
             dict(model=self.implicit_decoder.state_dict(), epoch=epoch),
             os.path.join(folder, "implicit_decoder.pt"),

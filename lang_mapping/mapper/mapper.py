@@ -1,252 +1,240 @@
-import torch
-import torch.nn as nn
+import os, torch, torch.nn as nn
+from typing import Tuple, List, Dict, Optional
 
+# --------------------------------------------------------------------------- #
+#  small helpers                                                              #
+# --------------------------------------------------------------------------- #
+def _primes(dev):   # 3-tuple of large primes
+    return torch.tensor([73856093, 19349669, 83492791],
+                        device=dev, dtype=torch.long)
 
+def _corner_offsets(dev):  # (8,3) corner offsets
+    return torch.tensor([[0,0,0],[1,0,0],[0,1,0],[1,1,0],
+                         [0,0,1],[1,0,1],[0,1,1],[1,1,1]],
+                        device=dev, dtype=torch.long)
+
+# --------------------------------------------------------------------------- #
+#  dense level (train)                                                        #
+# --------------------------------------------------------------------------- #
+class _TrainLevel(nn.Module):
+    def __init__(self, res, d, buckets, smin, smax, primes, dev):
+        super().__init__()
+        self.res, self.d, self.buckets, self.primes = res, d, buckets, primes
+        xs = torch.arange(smin[0], smax[0], res, device=dev)
+        ys = torch.arange(smin[1], smax[1], res, device=dev)
+        zs = torch.arange(smin[2], smax[2], res, device=dev)
+        gx, gy, gz = torch.meshgrid(xs, ys, zs, indexing='ij')
+        self.coords = torch.stack([gx, gy, gz], -1).view(-1, 3)  # (N,3)
+        self.N = self.coords.size(0)
+
+        self.voxel_features = nn.Parameter(
+            torch.zeros(self.N, d, device=dev).normal_(0, .01))
+
+        self.register_buffer('hash2vox',
+            torch.full((buckets,), -1, dtype=torch.long, device=dev))
+        self._fill()
+        self.register_buffer('access',
+            torch.zeros(self.N, dtype=torch.bool, device=dev),
+            persistent=False)
+
+    def _fill(self):
+        idx = torch.floor(self.coords / self.res).long()
+        hv  = (idx * self.primes).sum(-1) % self.buckets
+        empty = self.hash2vox[hv] == -1
+        self.hash2vox[hv[empty]] = torch.arange(self.N, device=self.voxel_features.device)[empty]
+        dup = hv.unique(return_counts=True)[1] > 1
+        self.register_buffer('col',
+            torch.tensor(int(dup.sum()), device=self.voxel_features.device),
+            persistent=False)
+
+    # ---------- public utils
+    @torch.no_grad()                                  # short stats
+    def collision_stats(self): return dict(total=self.N, col=int(self.col))
+
+    @torch.no_grad()
+    def get_accessed_indices(self): return torch.nonzero(self.access).flatten()
+
+    @torch.no_grad()                                  # clear log
+    def reset_access_log(self): self.access.zero_()
+
+    @torch.no_grad()                                  # sparse dump
+    def export_sparse(self):
+        used = self.get_accessed_indices()
+        return dict(resolution=self.res,
+                    coords=self.coords[used].cpu(),
+                    features=self.voxel_features[used].cpu())
+
+    # ---------- internals
+    def _lookup(self, idxg):
+        hv  = (idxg * self.primes).sum(-1) % self.buckets
+        vid = self.hash2vox[hv]
+        valid = vid >= 0
+        out = torch.zeros(*idxg.shape[:-1], self.d,
+                          device=self.voxel_features.device,
+                          dtype=self.voxel_features.dtype)
+        if valid.any():
+            self.access[vid[valid]] = True
+            out[valid] = self.voxel_features[vid[valid]]
+        return out
+
+    def query(self, pts):
+        q, offs = pts / self.res, _corner_offsets(pts.device)
+        base    = torch.floor(q).long()
+        frac    = q - base.float()
+        idx     = base[:,None,:] + offs[None,:,:]
+        feat    = self._lookup(idx)
+
+        wx = torch.stack([1-frac[:,0], frac[:,0]], 1)
+        wy = torch.stack([1-frac[:,1], frac[:,1]], 1)
+        wz = torch.stack([1-frac[:,2], frac[:,2]], 1)
+        w  = (wx[:,[0,1,0,1,0,1,0,1]] *
+              wy[:,[0,0,1,1,0,0,1,1]] *
+              wz[:,[0,0,0,0,1,1,1,1]])
+        return (feat * w.unsqueeze(-1)).sum(1)
+
+# --------------------------------------------------------------------------- #
+#  sparse level (infer)                                                       #
+# --------------------------------------------------------------------------- #
+class _InferLevel(nn.Module):
+    def __init__(self, pay, d, buckets, primes, dev):
+        super().__init__()
+        self.res, self.d, self.buckets, self.primes = float(pay['resolution']), d, buckets, primes
+        coords, feats = pay['coords'].to(dev), pay['features'].to(dev)
+        self.register_buffer('coords', coords, persistent=False)
+        self.voxel_features = nn.Parameter(feats, requires_grad=False)
+
+        self.register_buffer('hash2vox',
+            torch.full((buckets,), -1, dtype=torch.long, device=dev),
+            persistent=False)
+        idx = torch.floor(coords / self.res).long()
+        hv  = (idx * self.primes).sum(-1) % buckets
+        self.hash2vox[hv] = torch.arange(coords.size(0), device=dev)
+
+    # dummy stats
+    def collision_stats(self): return dict(total=self.coords.size(0), col=0)
+
+    def get_accessed_indices(self): return torch.empty(0, dtype=torch.long, device=self.coords.device)
+
+    def reset_access_log(self): pass
+
+    def _lookup(self, idxg):
+        hv  = (idxg * self.primes).sum(-1) % self.buckets
+        vid = self.hash2vox[hv]
+        valid = vid >= 0
+        out = torch.zeros(*idxg.shape[:-1], self.d,
+                          device=self.coords.device,
+                          dtype=self.voxel_features.dtype)
+        if valid.any(): out[valid] = self.voxel_features[vid[valid]]
+        return out
+
+    def query(self, pts):
+        q, offs = pts / self.res, _corner_offsets(pts.device)
+        base    = torch.floor(q).long()
+        frac    = q - base.float()
+        idx     = base[:,None,:] + offs[None,:,:]
+        feat    = self._lookup(idx)
+
+        wx = torch.stack([1-frac[:,0], frac[:,0]], 1)
+        wy = torch.stack([1-frac[:,1], frac[:,1]], 1)
+        wz = torch.stack([1-frac[:,2], frac[:,2]], 1)
+        w  = (wx[:,[0,1,0,1,0,1,0,1]] *
+              wy[:,[0,0,1,1,0,0,1,1]] *
+              wz[:,[0,0,0,0,1,1,1,1]])
+        return (feat * w.unsqueeze(-1)).sum(1)
+
+# --------------------------------------------------------------------------- #
+#  public pyramid                                                             #
+# --------------------------------------------------------------------------- #
 class VoxelHashTable(nn.Module):
     """
-    Multi-resolution hashed voxel pyramid.  Each level is an independent
-    hashed grid that supports trilinear lookup.  The forward pass returns
-    the per-level features concatenated along the last dimension.
+    mode='train' → dense levels, mode='infer' → sparse levels
     """
     def __init__(
         self,
-        resolution: float = 0.12,        # cell size of the finest level
-        num_levels: int = 2,             # number of pyramid levels
-        level_scale: float = 2.0,        # spacing ratio between levels
-        feature_dim: int = 32,           # feature width per level
-        hash_table_size: int = 2 ** 20,  # buckets per level
-        scene_bound_min: tuple = (-2.6, -8.1, 0.0),
-        scene_bound_max: tuple = (4.6, 4.7, 3.1),
+        resolution: float = 0.12,
+        num_levels: int = 2,
+        level_scale: float = 2.0,
+        feature_dim: int = 32,
+        hash_table_size: int = 2**21,
+        scene_bound_min: Tuple[float,float,float]=(-2.6,-8.1,0),
+        scene_bound_max: Tuple[float,float,float]=( 4.6, 4.7,3.1),
         device: str = "cuda:0",
+        mode: str = "train",
+        sparse_data: Optional[Dict] = None,
     ):
         super().__init__()
-        self.num_levels   = num_levels
-        self.feature_dim  = feature_dim
-        self.device       = device
-
-        # Shared large primes for the spatial hash function
-        primes = torch.tensor([73856093, 19349669, 83492791],
-                              device=device, dtype=torch.long)
-
-        # Build the pyramid
+        self.mode, self.d = mode, feature_dim
+        dev = torch.device(device)
+        primes = _primes(dev)
         self.levels = nn.ModuleList()
-        for lv in range(num_levels):
-            res = resolution * (level_scale ** lv)
-            self.levels.append(
-                _SingleResVoxelHashTable(
-                    resolution      = res,
-                    feature_dim     = feature_dim,
-                    hash_table_size = hash_table_size,
-                    scene_bound_min = scene_bound_min,
-                    scene_bound_max = scene_bound_max,
-                    primes          = primes,
-                    device          = device,
-                )
+
+        if mode == "train":
+            # Iterate coarse → fine by reversing the exponent.
+            for lv in range(num_levels):
+                res = resolution * (level_scale ** (num_levels - 1 - lv))
+                self.levels.append(
+                    _TrainLevel(res, feature_dim, hash_table_size,
+                                scene_bound_min, scene_bound_max,
+                                primes, dev))
+        elif mode == "infer":
+            if sparse_data is None:
+                raise ValueError("sparse_data is required in infer mode")
+            # Sort payloads from coarse (larger res) → fine (smaller res)
+            sorted_levels = sorted(
+                sparse_data['levels'],
+                key=lambda p: p['resolution'],
+                reverse=True
             )
+            for pay in sorted_levels:
+                self.levels.append(
+                    _InferLevel(pay, feature_dim, hash_table_size,
+                                primes, dev))
+        else:
+            raise ValueError("mode must be 'train' or 'infer'")
 
-    # ------------------------------------------------------------------ #
-    #  Public interface                                                   #
-    # ------------------------------------------------------------------ #
+    # forward -----------------------------------------------------------------
+    def query_voxel_feature(self, pts):  # (M,3) → (M, d*L)
+        per = [lv.query(pts) for lv in self.levels]
+        return torch.cat(per, -1)
+
+    # utils -------------------------------------------------------------------
     @torch.no_grad()
-    def collision_stats(self) -> dict:
-        """
-        Returns a summary of hash-table collisions for every level.
-        """
-        out = {}
-        for i, lv in enumerate(self.levels):
-            out[f"level_{i}"] = lv.collision_stats()
-        return out
+    def collision_stats(self):
+        return {f"level_{i}": lv.collision_stats() for i,lv in enumerate(self.levels)}
 
     @torch.no_grad()
-    def get_accessed_indices(self) -> list:
-        """
-        Returns a list of LongTensor(s); one tensor per level containing the
-        unique voxel indices that have been accessed since the last reset.
-        """
+    def get_accessed_indices(self):
         return [lv.get_accessed_indices() for lv in self.levels]
 
     @torch.no_grad()
-    def reset_access_log(self) -> None:
-        """
-        Zeros the per-level access masks.
-        """
-        for lv in self.levels:
-            lv.reset_access_log()
+    def reset_access_log(self):
+        for lv in self.levels: lv.reset_access_log()
 
-    # ------------------------------------------------------------------ #
-    #  Forward                                                            #
-    # ------------------------------------------------------------------ #
-    def query_voxel_feature(self, query_pts: torch.Tensor) -> torch.Tensor:
-        """
-        Args
-        ----
-        query_pts : (M, 3) float32 world-space coordinates.
-
-        Returns
-        -------
-        feats : (M, feature_dim * num_levels)
-            Concatenation of trilinear features from all pyramid levels.
-        """
-        per_level = [lv.query_trilinear(query_pts) for lv in self.levels]
-        return torch.cat(per_level, dim=-1)
-
-
-# ====================================================================== #
-#  Internal helper class (single resolution level)                       #
-# ====================================================================== #
-class _SingleResVoxelHashTable(nn.Module):
-    """
-    One hashed voxel grid with trilinear interpolation support.
-    Also keeps track of collisions (construction-time) and access statistics
-    (run-time).
-    """
-    def __init__(
-        self,
-        resolution: float,
-        feature_dim: int,
-        hash_table_size: int,
-        scene_bound_min: tuple,
-        scene_bound_max: tuple,
-        primes: torch.Tensor,
-        device: str,
-    ):
-        super().__init__()
-        self.resolution      = resolution
-        self.feature_dim     = feature_dim
-        self.hash_table_size = hash_table_size
-        self.primes          = primes
-        self.device          = device
-
-        # Build dense voxel coordinate list --------------------------------------------------
-        xs = torch.arange(scene_bound_min[0], scene_bound_max[0], resolution, device=device)
-        ys = torch.arange(scene_bound_min[1], scene_bound_max[1], resolution, device=device)
-        zs = torch.arange(scene_bound_min[2], scene_bound_max[2], resolution, device=device)
-        gx, gy, gz = torch.meshgrid(xs, ys, zs, indexing="ij")
-        self.voxel_coords  = torch.stack([gx, gy, gz], dim=-1).view(-1, 3)  # (N, 3)
-        self.total_voxels  = self.voxel_coords.shape[0]
-
-        # Learnable feature table ------------------------------------------------------------
-        self.voxel_features = nn.Parameter(
-            torch.zeros(self.total_voxels, feature_dim, device=device).normal_(0, 0.01)
-        )
-
-        # Hash buckets (-1 means empty) -------------------------------------------------------
-        self.register_buffer(
-            "hash2voxel",
-            torch.full((hash_table_size,), -1, dtype=torch.long, device=device),
-        )
-
-        # Build the hash table and compute collision stats
-        self._fill_hashtable()
-
-        # Runtime access log (Boolean mask, not a Parameter)
-        self.register_buffer(
-            "access_mask",
-            torch.zeros(self.total_voxels, dtype=torch.bool, device=device),
-            persistent=False,
-        )
-
-    # ------------------------------------------------------------------ #
-    #  Construction helpers                                              #
-    # ------------------------------------------------------------------ #
-    def _fill_hashtable(self) -> None:
-        """
-        Inserts every voxel coordinate into the hash table.
-        When collisions happen, the earliest voxel wins; later voxels remain
-        'unreferenced' but are still kept in voxel_features.
-        """
-        idx_grid = torch.floor(self.voxel_coords / self.resolution).to(torch.int64)
-        hv       = (idx_grid * self.primes).sum(dim=-1) % self.hash_table_size
-
-        # Detect duplicates *before* insertion for statistics
-        uniq, counts = hv.unique(return_counts=True)
-        self.register_buffer(
-            "collision_count",
-            torch.tensor(int((counts > 1).sum()), device=self.device),
-            persistent=False,
-        )
-
-        # First-come-first-serve insertion
-        empty = self.hash2voxel[hv] == -1
-        self.hash2voxel[hv[empty]] = torch.arange(self.total_voxels,
-                                                  device=self.device)[empty]
-
-    # ------------------------------------------------------------------ #
-    #  Public utilities                                                  #
-    # ------------------------------------------------------------------ #
+    # save / load -------------------------------------------------------------
     @torch.no_grad()
-    def collision_stats(self) -> dict:
-        """
-        Returns {total_voxels, hash_table_size, collisions, collision_ratio}.
-        """
-        collisions = int(self.collision_count.item())
-        return {
-            "total_voxels"     : self.total_voxels,
-            "hash_table_size"  : self.hash_table_size,
-            "collisions"       : collisions,
-            "collision_ratio"  : collisions / self.total_voxels,
-        }
+    def export_sparse(self):
+        if self.mode != "train":
+            raise RuntimeError("export_sparse only in train mode")
+        return dict(num_levels=len(self.levels),
+                    feature_dim=self.d,
+                    levels=[lv.export_sparse() for lv in self.levels])
 
-    @torch.no_grad()
-    def get_accessed_indices(self) -> torch.Tensor:
-        """Returns a 1-D tensor of unique voxel indices that were touched."""
-        return torch.nonzero(self.access_mask, as_tuple=False).flatten()
+    # dense weight file
+    def save_dense(self, path):
+        torch.save({'state_dict': self.state_dict()}, path)
 
-    @torch.no_grad()
-    def reset_access_log(self) -> None:
-        """Clears the per-voxel access mask."""
-        self.access_mask.zero_()
+    # sparse file 
+    def save_sparse(self, path):
+        torch.save(self.export_sparse(), path)
 
-    # ------------------------------------------------------------------ #
-    #  Core lookup routines                                              #
-    # ------------------------------------------------------------------ #
-    def _lookup(self, idx_grid: torch.Tensor) -> torch.Tensor:
-        """
-        Returns the feature vectors for an int64 grid-coordinate tensor.
-        Non-existent voxels yield zero vectors.
-        """
-        hv    = (idx_grid * self.primes).sum(dim=-1) % self.hash_table_size
-        v_idx = self.hash2voxel[hv]            # (..., )
-        valid = v_idx >= 0
+    @staticmethod
+    def load_dense(path, device="cuda:0"):
+        chk = torch.load(path, map_location="cpu")
+        vt  = VoxelHashTable(device=device)    # default ctor, train mode
+        vt.load_state_dict(chk['state_dict'])
+        return vt.to(device)
 
-        out = torch.zeros(*idx_grid.shape[:-1], self.feature_dim,
-                          device=self.device, dtype=self.voxel_features.dtype)
-        if valid.any():
-            # Log the accessed voxel indices (for training diagnostics)
-            self.access_mask[v_idx[valid]] = True
-            out[valid] = self.voxel_features[v_idx[valid]]
-        return out
-
-    # ------------------------------------------------------------------ #
-    #  Public query helper                                               #
-    # ------------------------------------------------------------------ #
-    def query_trilinear(self, query_pts: torch.Tensor) -> torch.Tensor:
-        """
-        Trilinear-interpolated feature for each 3-D world-space query point.
-        """
-        q_scaled = query_pts / self.resolution
-        base_idx = torch.floor(q_scaled).to(torch.int64)            # (M, 3)
-        frac     = q_scaled - base_idx.float()                      # (M, 3)
-
-        # 8 binary corner offsets (0/1, 0/1, 0/1)
-        offsets = torch.stack(
-            torch.meshgrid(
-                *(torch.tensor([0, 1], device=self.device, dtype=torch.int64)
-                  for _ in range(3)),
-                indexing="ij"
-            ),
-            dim=-1
-        ).reshape(-1, 3)                                            # (8, 3)
-
-        # Corner grid indices (M, 8, 3)
-        corner_idx = base_idx[:, None, :] + offsets[None, :, :]
-
-        # Corner features (M, 8, D)
-        corner_feat = self._lookup(corner_idx)
-
-        # Trilinear weights (M, 8)
-        frac_exp    = frac.unsqueeze(1)             # (M, 1, 3)
-        offsets_exp = offsets.unsqueeze(0).float()  # (1, 8, 3)
-        w = torch.where(offsets_exp.bool(), frac_exp, 1.0 - frac_exp).prod(dim=2)
-
-        return (corner_feat * w.unsqueeze(-1)).sum(dim=1)           # (M, D)
+    @staticmethod
+    def load_sparse(path, device="cuda:0"):
+        sparse = torch.load(path, map_location="cpu")
+        return VoxelHashTable(mode="infer", sparse_data=sparse, device=device)
