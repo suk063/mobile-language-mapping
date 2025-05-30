@@ -502,5 +502,7 @@ class LocalFeatureFusion(nn.Module):
         )                                            # (BM, k+1, C)
 
         # return only the query position (index 0 within each group)
-        fused_q = fused[:, 0, :].view(B, N, C)       # (B, N, C)
+        fused_q = fused[:, 0, :].view(B, N, C) + q_feat
+        # fused_q = fused[:, 0, :].view(B, N, C) 
+        
         return fused_q

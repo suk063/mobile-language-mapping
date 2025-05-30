@@ -13,6 +13,135 @@ from ..utils import get_3d_coordinates, get_visual_features, transform, gate_wit
 from torch.nn.utils.rnn import pad_sequence
 import open_clip
 
+import os, glob
+import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import torchvision.transforms.functional as TF          # for tensor→PIL
+from PIL import Image
+from matplotlib.cm import get_cmap
+
+_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+_IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+def _maybe_unnormalise(img: torch.Tensor) -> torch.Tensor:
+    if img.min() < 0 or img.max() > 1:          # heuristic for ImageNet-style norm
+        img = img * _IMAGENET_STD.to(img.device) + _IMAGENET_MEAN.to(img.device)
+    return img.clamp(0, 1)
+
+def exp_minmax(x: torch.Tensor, gamma: float = 1.0, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Exponential min–max normalization.
+    Step 1 : linear min–max                       (0‒1)
+    Step 2 : exponential re-weighting  y = exp(γ·(x-1))  → (0‒1/e^γ, 1]
+             (γ > 0 boosts high values; γ < 0 boosts low values)
+    Step 3 : linear min–max again to restore exact 0‒1 range.
+    """
+    # ① linear min-max
+    x0 = (x - x.min()) / (x.max() - x.min() + eps)
+
+    # ② exponential shaping
+    y  = torch.exp(gamma * (x0 - 1.0))        # shift so that x0=1 → y=1
+    # ③ rescale to [0,1]
+    y  = (y - y.min()) / (y.max() - y.min() + eps)
+    return y
+
+def visualise_hand_and_feats(
+    hand_rgb_t:      torch.Tensor,   # (B,3,H,W)
+    feats_hand_gate: torch.Tensor,   # (B,N,C)
+    feats_hand_fused:torch.Tensor,   # (B,N,C)
+    save_dir: str = "vis_mag",
+    out_res: int = 512,              # NEW – target resolution (square)
+):
+    """
+    저장 파일
+      rgb_<k>.png          : 원본 색상
+      gate_mag_<k>.png     : 512×512 Viridis heat-map (gate output)
+      fused_mag_<k>.png    : 512×512 Viridis heat-map (local fuser output)
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    existing = glob.glob(os.path.join(save_dir, "rgb_*.png"))
+    start_k  = (
+        max(int(os.path.splitext(os.path.basename(p))[0].split('_')[1]) for p in existing) + 1
+        if existing else 0
+    )
+
+    B, N, C = feats_hand_gate.shape
+    H = W = int(N ** 0.5)                              # patch grid (e.g., 16×16)
+    viridis = get_cmap("viridis")
+
+    for b in range(B):
+        k = start_k + b
+
+        # 1) RGB ------------------------------------------------------------------
+        rgb_tensor = _maybe_unnormalise(hand_rgb_t[b].cpu())
+        TF.to_pil_image(rgb_tensor).save(f"{save_dir}/rgb_{k}.png")
+
+        # 2) magnitude heat-maps --------------------------------------------------
+        for tag, feats in [("gate_mag", feats_hand_gate), ("fused_mag", feats_hand_fused)]:
+            mag = feats[b].norm(p=2, dim=-1)                 # (N,)  ‖v‖₂
+            mag_map = mag.view(H, W).cpu()
+
+            # min–max → [0,1]
+            # mag_norm = mag_norm = exp_minmax(mag_map, gamma=2.0)
+
+            # apply Viridis → RGB uint8
+            color_img = (viridis(mag_map.numpy())[:, :, :3] * 255).astype("uint8")
+
+            # upscale to (out_res, out_res)
+            upscaled = Image.fromarray(color_img).resize(
+                (out_res, out_res), resample=Image.NEAREST
+            )
+            upscaled.save(f"{save_dir}/{tag}_{k}.png")
+
+def visualise_hand_and_textsim(
+    hand_rgb_t:      torch.Tensor,   # (B,3,H,W)
+    feats_hand_gate: torch.Tensor,   # (B,N,C)
+    feats_hand_fused:torch.Tensor,   # (B,N,C)
+    text_emb:        torch.Tensor,   # (B,C)
+    view:            str,            # "hand" or "head" ⇒ 파일 prefix
+    save_dir: str = "vis_sim",
+    out_res: int = 512,
+):
+    """
+    저장 파일
+      <view>_rgb_<k>.png
+      <view>_gate_sim_<k>.png
+      <view>_fused_sim_<k>.png
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    existing = glob.glob(os.path.join(save_dir, f"{view}_rgb_*.png"))
+    start_k  = (
+        max(int(os.path.splitext(os.path.basename(p))[0].split('_')[-1]) for p in existing) + 1
+        if existing else 0
+    )
+
+    B, N, C = feats_hand_gate.shape
+    H = W = int(N ** 0.5)
+    viridis = get_cmap("viridis")
+
+    for b in range(B):
+        k = start_k + b
+
+        # 1) RGB ------------------------------------------------------------------
+        rgb_tensor = _maybe_unnormalise(hand_rgb_t[b].cpu())
+        TF.to_pil_image(rgb_tensor).save(f"{save_dir}/{view}_rgb_{k}.png")
+
+        # 2) text-similarity heat-maps -------------------------------------------
+        for tag, feats in [("gate_sim", feats_hand_gate), ("fused_sim", feats_hand_fused)]:
+            f_norm = F.normalize(feats[b], dim=-1)
+            t_norm = F.normalize(text_emb[b], dim=-1)
+            sim    = (f_norm * t_norm).sum(dim=-1).view(H, W).cpu()
+
+
+            sim_norm = (sim - sim.min()) / (sim.max() - sim.min() + 1e-8)
+            color_img = (viridis(sim_norm.numpy())[:, :, :3] * 255).astype("uint8")
+
+            Image.fromarray(color_img).resize((out_res, out_res), Image.NEAREST) \
+                .save(f"{save_dir}/{view}_{tag}_{k}.png")
+            
 class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
     def __init__(
         self,
@@ -112,7 +241,7 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
             n_heads   = num_heads,
             ff_mult   = 4,
             radius    = 0.2, 
-            k         = 1,
+            k         = 8,
             dropout   = 0.1
         )
     
@@ -208,6 +337,9 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         hand_rgb_m1 = hand_rgb_m1.reshape(B, fs * d, H, W)
         head_rgb_m1 = head_rgb_m1.reshape(B, fs * d, H, W)
         
+        hand_rgb_save= hand_rgb_t.float() / 255
+        head_rgb_save= head_rgb_t.float() / 255
+        
         # Transform to [0,1], apply normalization
         hand_rgb_t = transform(hand_rgb_t.float() / 255.0)
         head_rgb_t = transform(head_rgb_t.float() / 255.0)
@@ -219,6 +351,7 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
             head_visfeat_t = get_visual_features(self.clip_model, head_rgb_t)
             hand_visfeat_m1 = get_visual_features(self.clip_model, hand_rgb_m1)
             head_visfeat_m1 = get_visual_features(self.clip_model, head_rgb_m1)
+    
         
         # Handle depth (reshape, interpolate)
         
@@ -266,6 +399,9 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         feats_head_t = head_visfeat_t.permute(0, 2, 3, 1).reshape(B, N, -1)
         feats_hand_m1 = hand_visfeat_m1.permute(0, 2, 3, 1).reshape(B, N, -1)
         feats_head_m1 = head_visfeat_m1.permute(0, 2, 3, 1).reshape(B, N, -1)
+        
+        feats_hand_gate = feats_hand_t.clone()
+        feats_head_gate = feats_head_t.clone()
 
         hand_coords_world_flat_t = hand_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
         head_coords_world_flat_t = head_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)        
@@ -281,6 +417,8 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         feats_head_t  = gate_with_text(feats_head_t,  text_emb)
         feats_hand_m1 = gate_with_text(feats_hand_m1, text_emb)
         feats_head_m1 = gate_with_text(feats_head_m1, text_emb)
+        
+        feats_hand_gate = feats_hand_t.clone()
         
         feats_hand_t  = self.dim_reducer_hand(feats_hand_t.reshape(B*N, -1)).reshape(B, N, -1) 
         feats_head_t  = self.dim_reducer_head(feats_head_t.reshape(B*N, -1)).reshape(B, N, -1)
@@ -315,6 +453,22 @@ class Agent_global_gridnet_multiepisode_pointtrans(nn.Module):
         feats_head_m1 = self.local_fuser(
             coords_head_m1, feats_head_m1,
             kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
+        )
+        
+        visualise_hand_and_textsim(
+            hand_rgb_t       = hand_rgb_save.clamp(0, 1),
+            feats_hand_gate  = feats_hand_gate,
+            feats_hand_fused = feats_hand_t,
+            text_emb         = text_emb,
+            view             = "hand",
+        )
+
+        visualise_hand_and_textsim(
+            hand_rgb_t       = head_rgb_save.clamp(0, 1),
+            feats_hand_gate  = feats_head_gate,
+            feats_hand_fused = feats_head_t,
+            text_emb         = text_emb,
+            view             = "head",
         )
         
         kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)

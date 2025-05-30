@@ -153,8 +153,8 @@ class Agent_global_gridnet_multiepisode(nn.Module):
         hand_depth_flat_t = hand_depth_t.reshape(B*N)
         head_depth_flat_t = head_depth_t.reshape(B*N)
 
-        depth_mask_hand = hand_depth_flat_t > 0.3  
-        depth_mask_head = head_depth_flat_t > 0.6
+        depth_mask_hand = hand_depth_flat_t > 0.1  
+        depth_mask_head = head_depth_flat_t > 0.2
         
         scene_ids_flat = batch_valid_episode_ids.view(-1, 1).expand(-1, N).reshape(-1, 1)       # (B*N,1)
 
