@@ -1,144 +1,252 @@
 import torch
 import torch.nn as nn
 
+
 class VoxelHashTable(nn.Module):
     """
-    Builds a 3D voxel grid for a specified scene bound and stores per-voxel features.
-    Features are accessed via a hash table for efficient lookup.
+    Multi-resolution hashed voxel pyramid.  Each level is an independent
+    hashed grid that supports trilinear lookup.  The forward pass returns
+    the per-level features concatenated along the last dimension.
     """
     def __init__(
         self,
-        resolution: float = 0.1,
-        hash_table_size: int = 2**20,
-        feature_dim: int = 768,
-        scene_bound_min: tuple = (-2.6, -8.1, 0),
+        resolution: float = 0.12,        # cell size of the finest level
+        num_levels: int = 2,             # number of pyramid levels
+        level_scale: float = 2.0,        # spacing ratio between levels
+        feature_dim: int = 32,           # feature width per level
+        hash_table_size: int = 2 ** 20,  # buckets per level
+        scene_bound_min: tuple = (-2.6, -8.1, 0.0),
         scene_bound_max: tuple = (4.6, 4.7, 3.1),
         device: str = "cuda:0",
     ):
         super().__init__()
-        self.resolution = resolution
+        self.num_levels   = num_levels
+        self.feature_dim  = feature_dim
+        self.device       = device
+
+        # Shared large primes for the spatial hash function
+        primes = torch.tensor([73856093, 19349669, 83492791],
+                              device=device, dtype=torch.long)
+
+        # Build the pyramid
+        self.levels = nn.ModuleList()
+        for lv in range(num_levels):
+            res = resolution * (level_scale ** lv)
+            self.levels.append(
+                _SingleResVoxelHashTable(
+                    resolution      = res,
+                    feature_dim     = feature_dim,
+                    hash_table_size = hash_table_size,
+                    scene_bound_min = scene_bound_min,
+                    scene_bound_max = scene_bound_max,
+                    primes          = primes,
+                    device          = device,
+                )
+            )
+
+    # ------------------------------------------------------------------ #
+    #  Public interface                                                   #
+    # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def collision_stats(self) -> dict:
+        """
+        Returns a summary of hash-table collisions for every level.
+        """
+        out = {}
+        for i, lv in enumerate(self.levels):
+            out[f"level_{i}"] = lv.collision_stats()
+        return out
+
+    @torch.no_grad()
+    def get_accessed_indices(self) -> list:
+        """
+        Returns a list of LongTensor(s); one tensor per level containing the
+        unique voxel indices that have been accessed since the last reset.
+        """
+        return [lv.get_accessed_indices() for lv in self.levels]
+
+    @torch.no_grad()
+    def reset_access_log(self) -> None:
+        """
+        Zeros the per-level access masks.
+        """
+        for lv in self.levels:
+            lv.reset_access_log()
+
+    # ------------------------------------------------------------------ #
+    #  Forward                                                            #
+    # ------------------------------------------------------------------ #
+    def query_voxel_feature(self, query_pts: torch.Tensor) -> torch.Tensor:
+        """
+        Args
+        ----
+        query_pts : (M, 3) float32 world-space coordinates.
+
+        Returns
+        -------
+        feats : (M, feature_dim * num_levels)
+            Concatenation of trilinear features from all pyramid levels.
+        """
+        per_level = [lv.query_trilinear(query_pts) for lv in self.levels]
+        return torch.cat(per_level, dim=-1)
+
+
+# ====================================================================== #
+#  Internal helper class (single resolution level)                       #
+# ====================================================================== #
+class _SingleResVoxelHashTable(nn.Module):
+    """
+    One hashed voxel grid with trilinear interpolation support.
+    Also keeps track of collisions (construction-time) and access statistics
+    (run-time).
+    """
+    def __init__(
+        self,
+        resolution: float,
+        feature_dim: int,
+        hash_table_size: int,
+        scene_bound_min: tuple,
+        scene_bound_max: tuple,
+        primes: torch.Tensor,
+        device: str,
+    ):
+        super().__init__()
+        self.resolution      = resolution
+        self.feature_dim     = feature_dim
         self.hash_table_size = hash_table_size
-        self.feature_dim = feature_dim
-        self.device = device
+        self.primes          = primes
+        self.device          = device
 
-        # Large prime numbers for hashing
-        self.primes = torch.tensor([73856093, 19349669, 83492791],
-                                   device=device, dtype=torch.long)
+        # Build dense voxel coordinate list --------------------------------------------------
+        xs = torch.arange(scene_bound_min[0], scene_bound_max[0], resolution, device=device)
+        ys = torch.arange(scene_bound_min[1], scene_bound_max[1], resolution, device=device)
+        zs = torch.arange(scene_bound_min[2], scene_bound_max[2], resolution, device=device)
+        gx, gy, gz = torch.meshgrid(xs, ys, zs, indexing="ij")
+        self.voxel_coords  = torch.stack([gx, gy, gz], dim=-1).view(-1, 3)  # (N, 3)
+        self.total_voxels  = self.voxel_coords.shape[0]
 
-        # 1) Create voxel coordinate grid
-        xs = torch.arange(scene_bound_min[0], scene_bound_max[0], resolution)
-        ys = torch.arange(scene_bound_min[1], scene_bound_max[1], resolution)
-        zs = torch.arange(scene_bound_min[2], scene_bound_max[2], resolution)
-        grid_x, grid_y, grid_z = torch.meshgrid(xs, ys, zs, indexing='ij')
-        self.voxel_coords = torch.stack([grid_x, grid_y, grid_z], dim=-1).view(-1, 3).to(device)
-        self.total_voxels = self.voxel_coords.shape[0]
-
-        # 2) Voxel feature parameters
+        # Learnable feature table ------------------------------------------------------------
         self.voxel_features = nn.Parameter(
-            torch.zeros(self.total_voxels, feature_dim, device=device) * 0.01
+            torch.zeros(self.total_voxels, feature_dim, device=device).normal_(0, 0.01)
         )
 
-        # 3) Hash table (stores indices of voxel_features)
-        self.buffer_voxel_index = torch.full((self.hash_table_size,), -1,
-                                             dtype=torch.long, device=device)
-        self.build_hash_grid()
-        self.voxel_points = {}
-        
+        # Hash buckets (-1 means empty) -------------------------------------------------------
         self.register_buffer(
-            "used_mask",
-            torch.zeros(self.total_voxels, dtype=torch.bool, device=device)
+            "hash2voxel",
+            torch.full((hash_table_size,), -1, dtype=torch.long, device=device),
         )
-        # self.register_buffer(
-        #     "valid_grid_coords",
-        #     torch.empty((0, 3), device=device)
-        # )
 
-    def build_hash_grid(self):
+        # Build the hash table and compute collision stats
+        self._fill_hashtable()
+
+        # Runtime access log (Boolean mask, not a Parameter)
+        self.register_buffer(
+            "access_mask",
+            torch.zeros(self.total_voxels, dtype=torch.bool, device=device),
+            persistent=False,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Construction helpers                                              #
+    # ------------------------------------------------------------------ #
+    def _fill_hashtable(self) -> None:
         """
-        Maps each voxel in the grid to an entry in the hash table using a simple
-        modulo-based hash function. Collisions are possible, and those voxels
-        remain unstored in the hash table (index remains -1).
+        Inserts every voxel coordinate into the hash table.
+        When collisions happen, the earliest voxel wins; later voxels remain
+        'unreferenced' but are still kept in voxel_features.
         """
-        grid_coords = torch.floor(self.voxel_coords / self.resolution).to(torch.int64)
-        hash_vals = torch.fmod((grid_coords * self.primes).sum(dim=-1), self.hash_table_size)
+        idx_grid = torch.floor(self.voxel_coords / self.resolution).to(torch.int64)
+        hv       = (idx_grid * self.primes).sum(dim=-1) % self.hash_table_size
 
-        collisions = 0
-        for i in range(self.total_voxels):
-            h = hash_vals[i].item()
-            if self.buffer_voxel_index[h] == -1:
-                self.buffer_voxel_index[h] = i
-            else:
-                collisions += 1
+        # Detect duplicates *before* insertion for statistics
+        uniq, counts = hv.unique(return_counts=True)
+        self.register_buffer(
+            "collision_count",
+            torch.tensor(int((counts > 1).sum()), device=self.device),
+            persistent=False,
+        )
 
-        if collisions > 0:
-            print(f"[WARNING] {collisions} collisions out of {self.total_voxels} voxels. "
-                  "Some voxels are not stored in the hash table.")
+        # First-come-first-serve insertion
+        empty = self.hash2voxel[hv] == -1
+        self.hash2voxel[hv[empty]] = torch.arange(self.total_voxels,
+                                                  device=self.device)[empty]
 
-    def query_voxel_feature(self, query_pts, return_indices=False):
+    # ------------------------------------------------------------------ #
+    #  Public utilities                                                  #
+    # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def collision_stats(self) -> dict:
         """
-        Returns voxel features for the given 3D query points by looking them up in the hash table.
-        
-        Args:
-            query_pts (Tensor): [M, 3] - 3D coordinates to query.
-            return_indices (bool): If True, also returns the voxel indices.
-
-        Returns:
-            feats (Tensor): [M, feature_dim] - Retrieved voxel features (zeros if not found).
-            voxel_indices (Tensor or None): [M] - Indices of the voxels in the feature buffer (if return_indices=True).
+        Returns {total_voxels, hash_table_size, collisions, collision_ratio}.
         """
-        device = query_pts.device
-        M = query_pts.shape[0]
+        collisions = int(self.collision_count.item())
+        return {
+            "total_voxels"     : self.total_voxels,
+            "hash_table_size"  : self.hash_table_size,
+            "collisions"       : collisions,
+            "collision_ratio"  : collisions / self.total_voxels,
+        }
 
-        grid_coords = torch.floor(query_pts / self.resolution).to(torch.int64)
-        hash_vals = torch.fmod((grid_coords * self.primes).sum(dim=-1), self.hash_table_size).long()
+    @torch.no_grad()
+    def get_accessed_indices(self) -> torch.Tensor:
+        """Returns a 1-D tensor of unique voxel indices that were touched."""
+        return torch.nonzero(self.access_mask, as_tuple=False).flatten()
 
-        voxel_indices = self.buffer_voxel_index[hash_vals]  # [M]
-        valid_mask = (voxel_indices >= 0)
+    @torch.no_grad()
+    def reset_access_log(self) -> None:
+        """Clears the per-voxel access mask."""
+        self.access_mask.zero_()
 
-        feats = torch.zeros(M, self.feature_dim, device=device)
-        feats[valid_mask] = self.voxel_features[voxel_indices[valid_mask]]
-
-        # mark valid voxel features
-        # valid_voxel_indices = voxel_indices[valid_mask]
-        # self.used_mask[valid_voxel_indices] = True
-
-        # self.valid_grid_coords = self.voxel_coords[self.used_mask]
-
-        if return_indices:
-            return feats, voxel_indices
-        else:
-            return feats, None
-
-    def query_voxel_feature_from_subset(self, subset_coords, return_indices=False):
-        return self.query_voxel_feature(subset_coords, return_indices=return_indices)
-
-    def get_all_valid_voxel_data(self):
+    # ------------------------------------------------------------------ #
+    #  Core lookup routines                                              #
+    # ------------------------------------------------------------------ #
+    def _lookup(self, idx_grid: torch.Tensor) -> torch.Tensor:
         """
-        Returns:
-            valid_coords (Tensor): [N, 3] 
-            valid_feats (Tensor):  [N, feature_dim]
+        Returns the feature vectors for an int64 grid-coordinate tensor.
+        Non-existent voxels yield zero vectors.
         """
-        valid_indices = torch.where(self.used_mask)[0]
-        valid_coords = self.voxel_coords[valid_indices]
-        valid_feats = self.voxel_features[valid_indices]
-        return valid_coords, valid_feats
+        hv    = (idx_grid * self.primes).sum(dim=-1) % self.hash_table_size
+        v_idx = self.hash2voxel[hv]            # (..., )
+        valid = v_idx >= 0
 
-    def add_points(self, voxel_indices: torch.Tensor, points_3d: torch.Tensor):
+        out = torch.zeros(*idx_grid.shape[:-1], self.feature_dim,
+                          device=self.device, dtype=self.voxel_features.dtype)
+        if valid.any():
+            # Log the accessed voxel indices (for training diagnostics)
+            self.access_mask[v_idx[valid]] = True
+            out[valid] = self.voxel_features[v_idx[valid]]
+        return out
+
+    # ------------------------------------------------------------------ #
+    #  Public query helper                                               #
+    # ------------------------------------------------------------------ #
+    def query_trilinear(self, query_pts: torch.Tensor) -> torch.Tensor:
         """
-        Stores up to 10 points (3D coordinates) per voxel index for potential debug or analysis.
-
-        Args:
-            voxel_indices (Tensor): [M] - Valid voxel indices from the hash table.
-            points_3d (Tensor): [M, 3] - 3D coordinates to store.
+        Trilinear-interpolated feature for each 3-D world-space query point.
         """
-        voxel_indices_cpu = voxel_indices.detach().cpu().numpy()
-        points_cpu = points_3d.detach().cpu()
+        q_scaled = query_pts / self.resolution
+        base_idx = torch.floor(q_scaled).to(torch.int64)            # (M, 3)
+        frac     = q_scaled - base_idx.float()                      # (M, 3)
 
-        for i in range(len(voxel_indices_cpu)):
-            v_idx = int(voxel_indices_cpu[i])
-            if v_idx < 0:
-                continue
-            if v_idx not in self.voxel_points:
-                self.voxel_points[v_idx] = []
-            if len(self.voxel_points[v_idx]) < 10:
-                self.voxel_points[v_idx].append(points_cpu[i])
+        # 8 binary corner offsets (0/1, 0/1, 0/1)
+        offsets = torch.stack(
+            torch.meshgrid(
+                *(torch.tensor([0, 1], device=self.device, dtype=torch.int64)
+                  for _ in range(3)),
+                indexing="ij"
+            ),
+            dim=-1
+        ).reshape(-1, 3)                                            # (8, 3)
+
+        # Corner grid indices (M, 8, 3)
+        corner_idx = base_idx[:, None, :] + offsets[None, :, :]
+
+        # Corner features (M, 8, D)
+        corner_feat = self._lookup(corner_idx)
+
+        # Trilinear weights (M, 8)
+        frac_exp    = frac.unsqueeze(1)             # (M, 1, 3)
+        offsets_exp = offsets.unsqueeze(0).float()  # (1, 8, 3)
+        w = torch.where(offsets_exp.bool(), frac_exp, 1.0 - frac_exp).prod(dim=2)
+
+        return (corner_feat * w.unsqueeze(-1)).sum(dim=1)           # (M, D)

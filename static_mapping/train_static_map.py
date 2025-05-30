@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from lang_mapping.mapper.mapper import VoxelHashTable
+
 from lang_mapping.module import ImplicitDecoder
 from lang_mapping.utils import get_visual_features
 from mshab.utils.config import parse_cfg
@@ -40,15 +41,15 @@ class ClipModelConfig:
     model_name: str = "EVA02-L-14"
     model_pretrained: str = "merged2b_s4b_b131k"
 
-
 @dataclass
 class VoxelHashTableConfig:
-    resolution: float
-    hash_table_size: int
-    voxel_feature_dim: int
-    scene_bound_min: list[float]
-    scene_bound_max: list[float]
-
+    resolution: float            # finest cell size (e.g. 0.12)
+    num_levels: int                  # pyramid depth (e.g. 2)
+    level_scale: float               # ratio between levels (e.g. 2.0)
+    voxel_feature_dim: int           # per-level feature width (e.g. 32)
+    hash_table_size: int             # buckets per level (power of two)
+    scene_bound_min: list[float]     # xyz lower corner
+    scene_bound_max: list[float]     # xyz upper corner
 
 @dataclass
 class Config:
@@ -67,7 +68,7 @@ class Config:
     output_dir: str
     valid_interval: int
     ckpt_interval: int
-    test_model_dir: str
+    test_model_dir: Optional[str] = None
 
     def as_dict(self):
         out = vars(self)
@@ -340,15 +341,17 @@ class Pipeline:
             )[0].to(device)
             self.clip_model.eval()
         self.hash_voxel = VoxelHashTable(
-            resolution=self.cfg.voxel_hash_table.resolution,
-            hash_table_size=self.cfg.voxel_hash_table.hash_table_size,
-            feature_dim=self.cfg.voxel_hash_table.voxel_feature_dim,
-            scene_bound_min=self.cfg.voxel_hash_table.scene_bound_min,
-            scene_bound_max=self.cfg.voxel_hash_table.scene_bound_max,
-            device=device,
+            resolution = self.cfg.voxel_hash_table.resolution,
+            num_levels = self.cfg.voxel_hash_table.num_levels,
+            level_scale = self.cfg.voxel_hash_table.level_scale,
+            feature_dim = self.cfg.voxel_hash_table.voxel_feature_dim,
+            hash_table_size = self.cfg.voxel_hash_table.hash_table_size,
+            scene_bound_min = self.cfg.voxel_hash_table.scene_bound_min,
+            scene_bound_max = self.cfg.voxel_hash_table.scene_bound_max,
+            device = device,
         ).to(device)
         self.implicit_decoder = ImplicitDecoder(
-            voxel_feature_dim=self.cfg.voxel_hash_table.voxel_feature_dim,
+            voxel_feature_dim=self.cfg.voxel_hash_table.voxel_feature_dim * self.cfg.voxel_hash_table.num_levels,
             hidden_dim=self.cfg.decoder_hidden_dim,
             output_dim=self.cfg.decoder_output_dim,
         ).to(device)
@@ -502,10 +505,11 @@ class Pipeline:
         coords_world = coords_world.permute(0, 2, 3, 1).reshape(-1, 3)
 
         voxel_features = self.hash_voxel.query_voxel_feature(
-            coords_world, return_indices=False
-        )[0]
+            coords_world
+        )
+        
         decoded_features = self.implicit_decoder(
-            voxel_features, coords_world, return_intermediate=False
+            voxel_features, coords_world
         )
         cos_sim = F.cosine_similarity(decoded_features, visual_features, dim=-1)
         loss = 1.0 - cos_sim.mean()

@@ -26,7 +26,7 @@ def generate_clip_data(cfg: Config):
     clip_model.eval()
 
     input_pt = torch.load(cfg.input_pt_path, mmap=True)
-    bs = 128  # batch size
+    bs = 16  # batch size
     output_pt = dict()
     for traj_name, traj_data in tqdm(input_pt.items(), ncols=80):
         if not traj_name.startswith("traj"):
