@@ -7,7 +7,7 @@ TRAJS_PER_OBJ=1000
 TASK=set_table
 SUBTASK=pick
 SPLIT=train
-OBJ=all
+OBJ=all_13
 
 # Change according to the task
 ALL_PLAN_COUNT=244
@@ -72,7 +72,7 @@ if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.18_train_bc_point_global_gridnet_multiepisode_pointtrans configs/16_bc_pick_global_gridnet_multiepisode_policy_pretrained.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.18_train_bc_point_global_gridnet_multiepisode_pointtrans configs/experiment/16_bc_pick_global_gridnet_multiepisode_policy_pretrained.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"

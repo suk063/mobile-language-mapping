@@ -7,11 +7,11 @@ TRAJS_PER_OBJ=1000
 TASK=set_table
 SUBTASK=pick
 SPLIT=train
-OBJ=all_10
+OBJ=all_13
 
 # Change according to the task
 # ALL_PLAN_COUNT=244
-ALL_PLAN_COUNT=342
+ALL_PLAN_COUNT=244
 NUM_ENVS=20
 
 # shellcheck disable=SC2001 

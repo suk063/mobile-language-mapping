@@ -14,18 +14,18 @@ from lang_mapping.dataset import build_object_map, get_object_labels_batch, merg
 # MARK: Choose agent type
 AGENT_KIND = "image"          # {"uplift", "3dencoder", "image"}
 
-TASK  = "set_table"            
+TASK  = "prepare_groceries"            
 MODE  = "pick"                 
 OOD   = False                  
 PLANS = 100       
 # MARK: Change size for vectorized run
-NUM_ENVS = 30
-CKPT  = Path("/home/woojeh/Documents/mobile-language-mapping/mshab_exps/PickSubtaskTrain-v0/set_table-rcad-bc-point-pick/bc-pick-all-uplift-local-trajs_per_obj=10/models/latest_agent.pt")
+NUM_ENVS = 50
+CKPT  = Path("/home/sunghwan/data/prepare_groceries/image_pick/slot03_agent.pt")
 
 ROOT = Path("~/.maniskill/data/scene_datasets/replica_cad_dataset").expanduser()
 PLAN_DIR = "task_plans_ood" if OOD else "task_plans"
 THIS_DIR = Path(__file__).resolve().parent
-PLAN_FP  = ROOT / "rearrange" / PLAN_DIR / TASK / MODE / "train" / "all.json"
+PLAN_FP  = ROOT / "rearrange" / PLAN_DIR / TASK / MODE / "train" / "all_10.json"
 SPAWN_FP = ROOT / "rearrange/spawn_data" / TASK / MODE / "train/spawn_data.pt"
 
 # MARK: text prompt lookup

@@ -89,7 +89,9 @@ class GridDefinition:
     base_cell_size: float = 0.4
     per_level_scale: float = 2.0
     n_levels: int = 2
-    n_scenes: int = 171
+    # n_scenes: int = 122
+    # n_scenes: int = 173
+    n_scenes: int = 161
     second_order_grid_sample: bool = False
 
 @dataclass
@@ -223,8 +225,6 @@ def train(cfg: TrainConfig):
     
     episode2subtasks, episode2id, uid2episode_id = build_episode_subtask_maps(cfg.eval_env.task_plan_fp)
     num_episodes = len(episode2id)
-    
-    # assert num_episodes =
     
     # Make eval env
     print("Making eval env...")

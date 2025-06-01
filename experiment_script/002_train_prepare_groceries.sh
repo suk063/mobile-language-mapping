@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 
-SEED=1
+SEED=2
 
 TRAJS_PER_OBJ=1000
 

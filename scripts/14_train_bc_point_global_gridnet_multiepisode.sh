@@ -4,13 +4,13 @@ SEED=1
 
 TRAJS_PER_OBJ=1000
 
-TASK=set_table
+TASK=prepare_groceries
 SUBTASK=pick
 SPLIT=train
-OBJ=all
+OBJ=all_10
 
 # Change according to the task
-ALL_PLAN_COUNT=244
+ALL_PLAN_COUNT=519
 NUM_ENVS=30
 
 # shellcheck disable=SC2001
@@ -72,7 +72,7 @@ if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
 
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m training_script.14_train_bc_point_global_gridnet_multiepisode configs/14_bc_pick_global_gridnet_multiepisode.yml \
+    SAPIEN_NO_DISPLAY=1 python -m training_script.14_train_bc_point_global_gridnet_multiepisode configs/experiment/14_bc_pick_global_gridnet_multiepisode.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"

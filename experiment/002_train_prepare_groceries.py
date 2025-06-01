@@ -327,9 +327,6 @@ def train(cfg: TrainConfig):
         
     agent.valid_coords = load_changed_centers(root_dir="pre-trained/prepare_groceries/13", device=device)
     
-    import pdb
-    pdb.set_trace()
-    
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
 
@@ -621,7 +618,8 @@ def train(cfg: TrainConfig):
         
         # Saving
         if check_freq(cfg.algo.save_freq, epoch):
-            save_checkpoint(name="latest")
+            save_checkpoint(name=f"latest_{epoch}")
+
             timer.end(key="checkpoint")
 
     agent.eval()

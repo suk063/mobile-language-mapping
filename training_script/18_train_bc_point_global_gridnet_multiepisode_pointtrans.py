@@ -284,14 +284,14 @@ def train(cfg: TrainConfig):
         action_pred_horizon=cfg.algo.action_pred_horizon
     ).to(device) 
     
-    agent.load_state_dict(torch.load('pre-trained/latest_agent.pt', map_location=device), strict=False)
+    agent.load_state_dict(torch.load('pre-trained/set_table/latest_agent.pt', map_location=device), strict=False)
 
     agent.static_map = static_map
     agent.implicit_decoder = implicit_decoder
 
     for module, ckpt in [
-        (agent.static_map,      "pre-trained/latest_static_map.pt"),
-        (agent.implicit_decoder,"pre-trained/latest_decoder.pt")]:
+        (agent.static_map,      "pre-trained/set_table/latest_static_map.pt"),
+        (agent.implicit_decoder,"pre-trained/set_table/latest_decoder.pt")]:
         try:
             module.load_state_dict(torch.load(ckpt, map_location=device), strict=True)
             print(f"[✓] loaded {ckpt}")
@@ -300,7 +300,7 @@ def train(cfg: TrainConfig):
         
     
     def load_changed_centers(
-        root_dir: str = "pre-trained",
+        root_dir: str = "pre-trained/set_table/13",
         *,
         device: torch.device | str = "cpu",
         dtype: torch.dtype = torch.float32,

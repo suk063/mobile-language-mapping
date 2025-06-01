@@ -1448,71 +1448,71 @@ class SequentialTaskEnv(SceneManipulationEnv):
     @property
     def _default_human_render_camera_configs(self):
         # this camera follows the robot around (though might be in walls if the space is cramped)
-        robot_camera_pose = sapien_utils.look_at([-0.2, 0.5, 1], ([0.2, -0.2, 0]))
-        robot_camera_config = CameraConfig(
-            "render_camera",
-            robot_camera_pose,
-            512,
-            512,
-            1.75,
-            0.01,
-            10,
-            mount=self.agent.torso_lift_link,
+        # robot_camera_pose = sapien_utils.look_at([-0.2, 0.5, 1], ([0.2, -0.2, 0]))
+        # robot_camera_config = CameraConfig(
+        #     "render_camera",
+        #     robot_camera_pose,
+        #     512,
+        #     512,
+        #     1.75,
+        #     0.01,
+        #     10,
+        #     mount=self.agent.torso_lift_link,
+        # )
+        # return robot_camera_config
+
+        follow_pose = sapien_utils.look_at(
+            eye=[-0.2, 0.0, 1.2], target=[1.2, -0.2, 0]
         )
-        return robot_camera_config
+        follow_cam = CameraConfig(
+            uid   ="render_camera",           
+            pose  =follow_pose,
+            width =1024, height=1024,
+            fov   =1.75, near=0.01, far=10,
+            mount =self.agent.torso_lift_link 
+        )
 
-        # follow_pose = sapien_utils.look_at(
-        #     eye=[-0.2, 0.0, 1.2], target=[1.2, -0.2, 0]
-        # )
-        # follow_cam = CameraConfig(
-        #     uid   ="render_camera",           
-        #     pose  =follow_pose,
-        #     width =1024, height=1024,
-        #     fov   =1.75, near=0.01, far=10,
-        #     mount =self.agent.torso_lift_link 
-        # )
+        # MARK: When near the fridge
+        overview_pose = sapien_utils.look_at(
+            eye=[-0.7, 1.0, 3.3],             
+            target=[-2.0, 1.0, 0.8],   
+            up=[0.0, 0.0, 1.0],        
+        )
+        overview_cam = CameraConfig(
+            uid   ="overview",             
+            pose  =overview_pose,           
+            width =1024, height=1024,
+            fov   =1.5, near=0.05, far=10,
+            mount =None                    
+        )
 
-        # # MARK: When near the fridge
-        # overview_pose = sapien_utils.look_at(
-        #     eye=[-0.7, 1.0, 3.3],             
-        #     target=[-2.0, 1.0, 0.8],   
-        #     up=[0.0, 0.0, 1.0],        
-        # )
-        # overview_cam = CameraConfig(
-        #     uid   ="overview",             
-        #     pose  =overview_pose,           
-        #     width =1024, height=1024,
-        #     fov   =1.5, near=0.05, far=10,
-        #     mount =None                    
-        # )
-
-        # # MARK: When near the sink
-        # overview_pose = sapien_utils.look_at(
-        #     eye=[0.0, -2.0, 3.3],              
-        #     target=[-2.0, -2.0, 0.8],   
-        #     up=[0.0, 0.0, 1.0],        
-        # )
-        # overview_cam = CameraConfig(
-        #     uid   ="overview",             
-        #     pose  =overview_pose,           
-        #     width =1024, height=1024,
-        #     fov   =1.5, near=0.05, far=10,
-        #     mount =None                    
-        # )
+        # MARK: When near the sink
+        overview_pose = sapien_utils.look_at(
+            eye=[0.0, -2.0, 3.3],              
+            target=[-2.0, -2.0, 0.8],   
+            up=[0.0, 0.0, 1.0],        
+        )
+        overview_cam = CameraConfig(
+            uid   ="overview",             
+            pose  =overview_pose,           
+            width =1024, height=1024,
+            fov   =1.5, near=0.05, far=10,
+            mount =None                    
+        )
 
         # MARK: For generic view
-        # # for the overview camera
-        # overview_pose = sapien_utils.look_at(
-        #     eye=[2.0, 0.0, 2.0],             
-        #     target=[0.0, 0.0, 0.8],          
-        # )
-        # overview_cam = CameraConfig(
-        #     uid   ="overview",             
-        #     pose  =overview_pose,           
-        #     width =1024, height=1024,
-        #     fov   =1.5, near=0.05, far=10,
-        #     mount =None                    
-        # )
+        # for the overview camera
+        overview_pose = sapien_utils.look_at(
+            eye=[2.0, 0.0, 2.0],             
+            target=[0.0, 0.0, 0.8],          
+        )
+        overview_cam = CameraConfig(
+            uid   ="overview",             
+            pose  =overview_pose,           
+            width =1024, height=1024,
+            fov   =1.5, near=0.05, far=10,
+            mount =None                    
+        )
 
         # simply return BOTH cameras
         return [follow_cam, overview_cam]

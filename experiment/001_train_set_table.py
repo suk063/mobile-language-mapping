@@ -87,8 +87,8 @@ class GridDefinition:
     base_cell_size: float = 0.4
     per_level_scale: float = 2.0
     n_levels: int = 2
-    # n_scenes: int = 122
-    n_scenes: int = 171
+    n_scenes: int = 122
+    # n_scenes: int = 171
     second_order_grid_sample: bool = False
 
 @dataclass
@@ -290,8 +290,8 @@ def train(cfg: TrainConfig):
     agent.implicit_decoder = implicit_decoder
 
     for module, ckpt in [
-        (agent.static_map,      "pre-trained/set_table/10/latest_static_map.pt"),
-        (agent.implicit_decoder,"pre-trained/set_table/10/latest_decoder.pt")]:
+        (agent.static_map,      "pre-trained/set_table/13/latest_static_map.pt"),
+        (agent.implicit_decoder,"pre-trained/set_table/13/latest_decoder.pt")]:
         try:
             module.load_state_dict(torch.load(ckpt, map_location=device), strict=True)
             print(f"[✓] loaded {ckpt}")
@@ -300,7 +300,7 @@ def train(cfg: TrainConfig):
         
     
     def load_changed_centers(
-        root_dir: str = "pre-trained/10",
+        root_dir: str = "pre-trained/13",
         *,
         device: torch.device | str = "cpu",
         dtype: torch.dtype = torch.float32,
@@ -326,7 +326,7 @@ def train(cfg: TrainConfig):
             raise FileNotFoundError(f"No center files found in {root_dir}")
         return centers
         
-    agent.valid_coords = load_changed_centers(root_dir="pre-trained/set_table/10", device=device)
+    agent.valid_coords = load_changed_centers(root_dir="pre-trained/set_table/13", device=device)
     
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)

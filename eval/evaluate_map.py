@@ -12,7 +12,7 @@ from lang_mapping.module.mlp import ImplicitDecoder
 from lang_mapping.grid_net import GridNet
 from lang_mapping.dataset import build_object_map, get_object_labels_batch, merge_t_m1, build_episode_subtask_maps
 
-CKPT  = Path("/home/woojeh/Documents/mobile-language-mapping/mshab_exps/PickSubtaskTrain-v0/map/latest_agent.pt")
+CKPT  = Path("/home/sunghwan/workspace/mobile_language_mapping/pre-trained/set_table/latest_agent.pt")
 TASK  = "set_table"
 MODE  = "pick"
 OOD = False
@@ -21,13 +21,13 @@ suffix = "_ood" if OOD else ""
 PLANS = 100 
 
 # MARK: Change size for vectorized run
-NUM_ENVS = 30
+NUM_ENVS = 25
 
 ROOT = Path("~/.maniskill/data/scene_datasets/replica_cad_dataset").expanduser()
-H5    = f"{ROOT}/rearrange-dataset/{TASK}/{MODE}/all.h5"
+H5    = f"{ROOT}/rearrange-dataset/{TASK}/{MODE}/all_10.h5"
 META  = H5.replace(".h5", ".json")
 
-PLAN  = ROOT / "rearrange" / PLAN_DIR / TASK / MODE / "train" / "all.json"
+PLAN  = ROOT / "rearrange" / PLAN_DIR / TASK / MODE / "train" / "all_10.json"
 SPAWN = ROOT / "rearrange/spawn_data" / TASK / MODE / "train/spawn_data.pt"
 
 # MARK: text prompt lookup
@@ -83,7 +83,7 @@ class GridDefinition:
     base_cell_size: float = 0.4
     per_level_scale: float = 2.0
     n_levels: int = 2
-    n_scenes: int = 122
+    n_scenes: int = 171
     second_order_grid_sample: bool = False
 
 @dataclass
@@ -176,10 +176,22 @@ agent = Agent_global_gridnet_multiepisode_pointtrans(
     implicit_decoder=implicit_decoder
 ).to(device)
 
-agent.load_state_dict(torch.load(CKPT, map_location=device))
+agent.load_state_dict(torch.load(CKPT, map_location=device), strict=False)
 agent.eval()
-agent.valid_coords = load_changed_centers(root_dir="pre-trained/set_table/13", device=device)
+
+for module, ckpt in [
+    (agent.static_map,      "pre-trained/set_table/10/latest_static_map.pt"),
+    (agent.implicit_decoder,"pre-trained/set_table/10/latest_decoder.pt")]:
+    try:
+        module.load_state_dict(torch.load(ckpt, map_location=device), strict=True)
+        print(f"[✓] loaded {ckpt}")
+    except Exception as e:
+        print(f"[✗] failed to load {ckpt}: {e}")
+            
+
+agent.valid_coords = load_changed_centers(root_dir="pre-trained/set_table/10", device=device)
 print(f"✓ Loaded weights from {CKPT}")
+
 
 agent.sample_obs = obs
 plan0 = env.unwrapped.task_plan[0]
