@@ -367,14 +367,14 @@ class TransformerEncoder(nn.Module):
         self,
         hand_token_t: torch.Tensor,  # [B, N, input_dim]
         head_token_t: torch.Tensor,  # [B, N, input_dim] 
-        hand_token_m1: torch.Tensor,  # [B, N, input_dim]
-        head_token_m1: torch.Tensor,  # [B, N, input_dim]
+        hand_token_m1: torch.Tensor = None,  # [B, N, input_dim] or None
+        head_token_m1: torch.Tensor = None,  # [B, N, input_dim] or None
         coords_hand_t: torch.Tensor = None,
         coords_head_t: torch.Tensor = None, 
         coords_hand_m1: torch.Tensor = None,
         coords_head_m1: torch.Tensor = None,
-        state_t: torch.Tensor = None,  # [B, input_dim] or None
-        state_m1: torch.Tensor = None,  # [B, input_dim] or None
+        state_t: torch.Tensor = None,  # [B, 1, input_dim] or None
+        state_m1: torch.Tensor = None,  # [B, 1, input_dim] or None
     ) -> torch.Tensor:
         
         B, N, D = hand_token_t.shape
@@ -384,15 +384,18 @@ class TransformerEncoder(nn.Module):
         
         coords_src = None
         
-        if state_m1 is not None:
-            tokens.append(state_m1)
-            coords.append(zeros1())
+        # Only process m1 tokens if they are provided
+        if hand_token_m1 is not None and head_token_m1 is not None:
+            if state_m1 is not None:
+                tokens.append(state_m1)
+                coords.append(zeros1())
+            
+            tokens += [hand_token_m1, head_token_m1]
+            
+            if coords_hand_m1 is not None:
+                coords += [coords_hand_m1, coords_head_m1]
         
-        tokens += [hand_token_m1, head_token_m1]
-        
-        if coords_hand_m1 is not None:
-            coords += [coords_hand_m1, coords_head_m1]
-        
+        # Process t tokens
         if state_t is not None:
             tokens.append(state_t)
             coords.append(zeros1())
@@ -403,29 +406,46 @@ class TransformerEncoder(nn.Module):
             coords += [coords_hand_t, coords_head_t]
         
         src = torch.cat(tokens, 1)
-        # DEBUG: (Woojeh)
+        
         if coords_hand_t is not None and len(coords) > 0:
             coords_src = torch.cat(coords, dim=1)  # (B, S, 3)
             
-        len_m1 = 0                  # learnable m-1
-        if state_m1 is not None: len_m1 += 1
-        len_m1 += hand_token_m1.size(1) + head_token_m1.size(1)
+        # Calculate lengths for causal masking (only if m1 tokens exist)
+        causal_mask = None
+        if hand_token_m1 is not None and head_token_m1 is not None:
+            len_m1 = 0                  # learnable m-1
+            if state_m1 is not None: 
+                len_m1 += 1
+            len_m1 += hand_token_m1.size(1) + head_token_m1.size(1)
 
-        len_t  = 0                  # learnable t
-        if state_t is not None: len_t  += 1
-        len_t  += hand_token_t.size(1) + head_token_t.size(1)
-        
-        causal_mask = build_causal_mask(len_m1, len_t, src.device)     
-        
-        # Pass through Transformer layers
-        for layer in self.layers:
-            src = layer(
-                src=src,
-                coords_src=coords_src,
-                causal_mask=causal_mask
-            )
+            len_t  = 0                  # learnable t
+            if state_t is not None: 
+                len_t  += 1
+            len_t  += hand_token_t.size(1) + head_token_t.size(1)
+            
+            causal_mask = build_causal_mask(len_m1, len_t, src.device)
+            
+            # Pass through Transformer layers
+            for layer in self.layers:
+                src = layer(
+                    src=src,
+                    coords_src=coords_src,
+                    causal_mask=causal_mask
+                )
 
-        return src[:, len_m1+1:, :]
+            return src[:, len_m1+1:, :]
+        else:
+            # Only t time step - no causal masking needed
+            for layer in self.layers:
+                src = layer(
+                    src=src,
+                    coords_src=coords_src,
+                    causal_mask=None
+                )
+            
+            # Return all tokens except the first state token if it exists
+            start_idx = 1 if state_t is not None else 0
+            return src[:, start_idx:, :]
 
 class ActionTransformerDecoder(nn.Module):
     def __init__(
@@ -480,45 +500,6 @@ class ActionTransformerDecoder(nn.Module):
         action_out = self.action_head(decoder_out)         # [B, 4, action_dim]
         return action_out[:, 1:, :]
 
-
-# class LocalSelfAttentionFusion(nn.Module):
-#     """
-#     Fuses two feature vectors via self-attention with a residual connection.
-#     Each voxel is treated independently as a 2-token sequence.
-#     """
-#     def __init__(self, feat_dim=120, num_heads=8):
-#         super().__init__()
-#         self.mha = nn.MultiheadAttention(embed_dim=feat_dim, num_heads=num_heads, batch_first=True)
-#         self.layernorm = nn.LayerNorm(feat_dim)
-
-#     def forward(self, feat1, feat2):
-#         """
-#         Args:
-#             feat1, feat2: (B, N, feat_dim).
-#               - In typical usage here, N=1 and feat_dim=384.
-#         Returns:
-#             (B, N, feat_dim): fused feature after 2-token self-attention with residual connection.
-#         """
-
-#         # Stack feat1 and feat2 into a 2-token sequence: (B, N, 2, feat_dim)
-#         x_stacked = torch.stack([feat1, feat2], dim=2)  # shape: (B, N, 2, feat_dim)
-#         B, N, T, D = x_stacked.shape  # T=2 (token sequence length is 2)
-#         x = x_stacked.view(B*N, T, D)  # Reshape to (B*N, 2, D) for MHA (batch_first=True)
-
-#         # Self-attention on the 2 tokens
-#         attn_output, _ = self.mha(x, x, x) # MHA output shape: (B*N, 2, D)
-
-#         # --- Add Residual Connection ---
-#         x = x + attn_output # Residual connection
-
-#         # --- Apply Layer Normalization ---
-#         y = self.layernorm(x)  # LayerNorm output shape: (B*N, 2, D)
-
-#         # --- Select Output Token ---
-#         # fused = y.mean(dim=1).view(B, N, D) # Alternative: Average the 2 output tokens.
-#         fused = y[:, 0, :].view(B, N, D) # Take the feature of the first token.
-
-#         return fused
 
 class LocalSelfAttentionFusion(nn.Module):
     """

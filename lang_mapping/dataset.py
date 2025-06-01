@@ -304,8 +304,6 @@ class TempTranslateToPointDataset(DPDataset):
 
         obs = {**state_obs, "pixels": pixel_obs}
 
-        # NOTE (arth): we use start act and step_num since we use o_t and o_{t+1} for scene flow est
-
         act = item["actions"][1:]
 
         subtask_uid = item["subtask_uid"]

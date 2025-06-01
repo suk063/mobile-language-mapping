@@ -3,18 +3,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # Local imports
-from ..module.transformer import ActionTransformerDecoder, TransformerEncoder, LocalSelfAttentionFusion
-from ..module.mlp import ActionMLP, ImplicitDecoder, DimReducer, StateProj, VoxelProj
+from ..module.transformer import ActionTransformerDecoder, TransformerEncoder
+from ..module.mlp import ImplicitDecoder, DimReducer, StateProj
 from ..module.global_module import HierarchicalSceneTransformer, LocalFeatureFusion
 
 from lang_mapping.grid_net import GridNet
 
 from ..utils import get_3d_coordinates, get_visual_features, transform, gate_with_text
-from torch.nn.utils.rnn import pad_sequence
 import open_clip
 
-
-            
 class Agent_map_bc(nn.Module):
     def __init__(
         self,
@@ -169,7 +166,7 @@ class Agent_map_bc(nn.Module):
     
     def forward_policy(self, observations, object_labels, batch_episode_ids):
 
-        # 1) Extract data
+        # 1) Extract data - only time step 't'
         hand_rgb_t   = observations["pixels"]["fetch_hand_rgb"]
         head_rgb_t   = observations["pixels"]["fetch_head_rgb"]
 
@@ -179,59 +176,33 @@ class Agent_map_bc(nn.Module):
         hand_pose_t   = observations["pixels"]["fetch_hand_pose"]
         head_pose_t   = observations["pixels"]["fetch_head_pose"]
 
-        hand_rgb_m1  = observations["pixels"]["fetch_hand_rgb_m1"]
-        head_rgb_m1  = observations["pixels"]["fetch_head_rgb_m1"]
-
-        hand_depth_m1 = observations["pixels"]["fetch_hand_depth_m1"]
-        head_depth_m1 = observations["pixels"]["fetch_head_depth_m1"]
-
-        hand_pose_m1  = observations["pixels"]["fetch_hand_pose_m1"]
-        head_pose_m1  = observations["pixels"]["fetch_head_pose_m1"]
-
         state_t  = observations["state"]
-        state_m1 = observations["state_m1"]
         
-        # state_t_cat  = torch.cat([state_t,  head_pose_flat_t],  dim=1)
-        # state_m1_cat = torch.cat([state_m1, head_pose_flat_m1], dim=1)
-
         B = hand_rgb_t.shape[0]
     
         # If needed, permute hand_rgb_t so channel=3
         if hand_rgb_t.shape[2] != 3:
             hand_rgb_t = hand_rgb_t.permute(0, 1, 4, 2, 3)
             head_rgb_t = head_rgb_t.permute(0, 1, 4, 2, 3)
-            hand_rgb_m1 = hand_rgb_m1.permute(0, 1, 4, 2, 3)
-            head_rgb_m1 = head_rgb_m1.permute(0, 1, 4, 2, 3)
         
         # Flatten frames
         _, fs, d, H, W = hand_rgb_t.shape
         hand_rgb_t = hand_rgb_t.reshape(B, fs * d, H, W)
         head_rgb_t = head_rgb_t.reshape(B, fs * d, H, W)
-        hand_rgb_m1 = hand_rgb_m1.reshape(B, fs * d, H, W)
-        head_rgb_m1 = head_rgb_m1.reshape(B, fs * d, H, W)
-        
-        hand_rgb_save= hand_rgb_t.float() / 255
-        head_rgb_save= head_rgb_t.float() / 255
-        
+
         # Transform to [0,1], apply normalization
         hand_rgb_t = transform(hand_rgb_t.float() / 255.0)
         head_rgb_t = transform(head_rgb_t.float() / 255.0)
-        hand_rgb_m1 = transform(hand_rgb_m1.float() / 255.0)
-        head_rgb_m1 = transform(head_rgb_m1.float() / 255.0)
         
         with torch.no_grad():
             hand_visfeat_t = get_visual_features(self.clip_model, hand_rgb_t)
             head_visfeat_t = get_visual_features(self.clip_model, head_rgb_t)
-            hand_visfeat_m1 = get_visual_features(self.clip_model, hand_rgb_m1)
-            head_visfeat_m1 = get_visual_features(self.clip_model, head_rgb_m1)
     
         
         # Handle depth (reshape, interpolate)
         
         hand_depth_t = hand_depth_t / 1000.0
         head_depth_t = head_depth_t / 1000.0
-        hand_depth_m1 = hand_depth_m1 / 1000.0
-        head_depth_m1 = head_depth_m1 / 1000.0
         
         if hand_depth_t.dim() == 5:
             _, fs, d2, H, W = hand_depth_t.shape
@@ -239,11 +210,6 @@ class Agent_map_bc(nn.Module):
             head_depth_t = head_depth_t.view(B, fs * d2, H, W)
             hand_depth_t = F.interpolate(hand_depth_t, (16, 16), mode="nearest-exact")
             head_depth_t = F.interpolate(head_depth_t, (16, 16), mode="nearest-exact")
-            
-            hand_depth_m1 = hand_depth_m1.view(B, fs * d2, H, W)
-            head_depth_m1 = head_depth_m1.view(B, fs * d2, H, W)
-            hand_depth_m1 = F.interpolate(hand_depth_m1, (16, 16), mode="nearest-exact")
-            head_depth_m1 = F.interpolate(head_depth_m1, (16, 16), mode="nearest-exact")
 
         # 3D world coords
         hand_coords_world_t, _ = get_3d_coordinates(
@@ -254,15 +220,6 @@ class Agent_map_bc(nn.Module):
             head_depth_t, head_pose_t,
             self.fx, self.fy, self.cx, self.cy
         )
-        
-        hand_coords_world_m1, _ = get_3d_coordinates(
-            hand_depth_m1, hand_pose_m1, 
-            self.fx, self.fy, self.cx, self.cy
-        )
-        head_coords_world_m1, _ = get_3d_coordinates(
-            head_depth_m1, head_pose_m1,
-            self.fx, self.fy, self.cx, self.cy
-        )
  
         # Reduce CLIP dimension for hand/head
         _, C_, Hf, Wf = hand_coords_world_t.shape
@@ -270,16 +227,12 @@ class Agent_map_bc(nn.Module):
 
         feats_hand_t = hand_visfeat_t.permute(0, 2, 3, 1).reshape(B, N, -1)
         feats_head_t = head_visfeat_t.permute(0, 2, 3, 1).reshape(B, N, -1)
-        feats_hand_m1 = hand_visfeat_m1.permute(0, 2, 3, 1).reshape(B, N, -1)
-        feats_head_m1 = head_visfeat_m1.permute(0, 2, 3, 1).reshape(B, N, -1)
         
         feats_hand_gate = feats_hand_t.clone()
         feats_head_gate = feats_head_t.clone()
 
         hand_coords_world_flat_t = hand_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
         head_coords_world_flat_t = head_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)        
-        hand_coords_world_flat_m1 = hand_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
-        head_coords_world_flat_m1 = head_coords_world_m1.permute(0, 2, 3, 1).reshape(B*N, 3)
         
         # --------------------------------------------------------------------- #
         # 1)  text embeddings for this batch
@@ -288,25 +241,16 @@ class Agent_map_bc(nn.Module):
         
         feats_hand_t  = gate_with_text(feats_hand_t,  text_emb)        # (B*N,768)
         feats_head_t  = gate_with_text(feats_head_t,  text_emb)
-        feats_hand_m1 = gate_with_text(feats_hand_m1, text_emb)
-        feats_head_m1 = gate_with_text(feats_head_m1, text_emb)
         
         feats_hand_gate = feats_hand_t.clone()
         
         feats_hand_t  = self.dim_reducer_hand(feats_hand_t.reshape(B*N, -1)).reshape(B, N, -1) 
         feats_head_t  = self.dim_reducer_head(feats_head_t.reshape(B*N, -1)).reshape(B, N, -1)
-        feats_hand_m1 = self.dim_reducer_hand(feats_hand_m1.reshape(B*N, -1)).reshape(B, N, -1)
-        feats_head_m1 = self.dim_reducer_head(feats_head_m1.reshape(B*N, -1)).reshape(B, N, -1)
 
         state_proj_t = self.state_proj(state_t)
-        state_proj_m1 = self.state_proj(state_m1)      
         
         coords_hand_t = hand_coords_world_flat_t.view(B, N, 3)
         coords_head_t = head_coords_world_flat_t.view(B, N, 3)
-        
-        coords_hand_m1 = hand_coords_world_flat_m1.view(B, N, 3)
-        coords_head_m1 = head_coords_world_flat_m1.view(B, N, 3)
-        
         
         # Local feature fusion
         kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1 = self._gather_scene_kv(batch_episode_ids, text_emb, 1)
@@ -319,32 +263,19 @@ class Agent_map_bc(nn.Module):
             coords_head_t, feats_head_t,
             kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
         )
-        feats_hand_m1 = self.local_fuser(
-            coords_hand_m1, feats_hand_m1,
-            kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
-        )
-        feats_head_m1 = self.local_fuser(
-            coords_head_m1, feats_head_m1,
-            kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
-        )
         
         kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
         
         pts_kv   = torch.cat([kv_coords_lvl0, kv_feats_lvl0], dim=-1)            # [B,L, 3+768]
         global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_lvl0)          
            
-        # Transformer forward
+        # Transformer forward - only using 't' time step
         visual_tok = self.transformer(
             hand_token_t=feats_hand_t,
             head_token_t=feats_head_t,
-            hand_token_m1=feats_hand_m1,
-            head_token_m1=feats_head_m1,
             coords_hand_t=coords_hand_t,
             coords_head_t=coords_head_t,
-            coords_hand_m1=coords_hand_m1,
-            coords_head_m1=coords_head_m1,
             state_t=state_proj_t.unsqueeze(1),
-            state_m1=state_proj_m1.unsqueeze(1)
         ) 
         
 
