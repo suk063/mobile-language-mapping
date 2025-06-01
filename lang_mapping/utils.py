@@ -385,6 +385,25 @@ def chamfer_3d_weighted(
     return row_loss + col_loss
 
 
+def gate_with_text(feats: torch.Tensor,
+                   text_embed: torch.Tensor) -> torch.Tensor:
+    """
+    Residual gating: feats ← feats + feats ✕ cos_sim(feats,text)
+
+    feats       : (B, N, C) 
+    text_embed  : (B, 768)
+    proj        : nn.Linear that projects 768 → C if dims differ
+    """
+
+    # -- match dimensions ----------------------------------------------
+    txt = F.normalize(text_embed, dim=-1).unsqueeze(1)                      # (B,1,C)
+
+    # -- cosine‑similarity gating --------------------------------------
+    score = (F.normalize(feats, dim=-1) * txt).sum(-1, keepdim=True)  # (B,N,1)
+    gated = feats + feats* score                                   # residual
+
+    return gated    
+
 # Basic image transform
 transform = transforms.Compose(
     [

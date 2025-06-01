@@ -135,7 +135,7 @@ class FlowTimeAggregator(nn.Module):
         flow_3d: [N, 3]
         out: feats + mlp(feats||PE(flow))
         """
-        pe_flow = self.positional_encoding_3d(flow_3d)  # [N, 2*L*3]
+        pe_flow = self.positiona_encoding_3d(flow_3d)  # [N, 2*L*3]
         x = torch.cat([feats, pe_flow], dim=-1)         # [N, feat_dim + 2*L*3]
         mlp_out = self.mlp(x)                           # [N, feat_dim]
         out = feats + mlp_out                           # residual

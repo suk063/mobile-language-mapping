@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Union, Tuple
 
 from mshab.envs.make    import EnvConfig, make_env
 from mshab.envs.planner import plan_data_from_file
-from lang_mapping.agent.agent_global_gridnet_multiepisode_pointtrans import Agent_global_gridnet_multiepisode_pointtrans
+from lang_mapping.agent.agent_map_bc import Agent_global_gridnet_multiepisode_pointtrans
 from lang_mapping.module.mlp import ImplicitDecoder
 from lang_mapping.grid_net import GridNet
 from lang_mapping.dataset import build_object_map, get_object_labels_batch, merge_t_m1, build_episode_subtask_maps

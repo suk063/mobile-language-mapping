@@ -26,7 +26,7 @@ from torch.utils.tensorboard import SummaryWriter
 import mani_skill.envs
 from mani_skill.utils import common
 
-from lang_mapping.agent.agent_global_gridnet_multiepisode_pointtrans import Agent_global_gridnet_multiepisode_pointtrans
+from lang_mapping.agent.agent_map_bc import Agent_global_gridnet_multiepisode_pointtrans
 from lang_mapping.module import ImplicitDecoder
 from lang_mapping.dataset import TempTranslateToPointDataset, merge_t_m1, build_uid_mapping, build_object_map, get_object_labels_batch
 
