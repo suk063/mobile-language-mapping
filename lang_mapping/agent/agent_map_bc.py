@@ -166,101 +166,96 @@ class Agent_map_bc(nn.Module):
     
     def forward_policy(self, observations, object_labels, batch_episode_ids):
 
-        # 1) Extract data - only time step 't'
-        hand_rgb_t   = observations["pixels"]["fetch_hand_rgb"]
-        head_rgb_t   = observations["pixels"]["fetch_head_rgb"]
+        hand_rgb   = observations["fetch_hand_rgb"]
+        head_rgb   = observations["fetch_head_rgb"]
 
-        hand_depth_t  = observations["pixels"]["fetch_hand_depth"]
-        head_depth_t  = observations["pixels"]["fetch_head_depth"]
+        hand_depth  = observations["fetch_hand_depth"]
+        head_depth  = observations["fetch_head_depth"]
 
-        hand_pose_t   = observations["pixels"]["fetch_hand_pose"]
-        head_pose_t   = observations["pixels"]["fetch_head_pose"]
+        hand_pose   = observations["fetch_hand_pose"]
+        head_pose   = observations["fetch_head_pose"]
 
-        state_t  = observations["state"]
+        state  = observations["state"].squeeze(1)
         
-        B = hand_rgb_t.shape[0]
+        B = hand_rgb.shape[0]
     
-        # If needed, permute hand_rgb_t so channel=3
-        if hand_rgb_t.shape[2] != 3:
-            hand_rgb_t = hand_rgb_t.permute(0, 1, 4, 2, 3)
-            head_rgb_t = head_rgb_t.permute(0, 1, 4, 2, 3)
+        # If needed, permute hand_rgb so channel=3
+        if hand_rgb.shape[2] != 3:
+            hand_rgb = hand_rgb.permute(0, 1, 4, 2, 3)
+            head_rgb = head_rgb.permute(0, 1, 4, 2, 3)
+            
+            hand_depth = hand_depth.permute(0, 1, 4, 2, 3)
+            head_depth = head_depth.permute(0, 1, 4, 2, 3)
         
         # Flatten frames
-        _, fs, d, H, W = hand_rgb_t.shape
-        hand_rgb_t = hand_rgb_t.reshape(B, fs * d, H, W)
-        head_rgb_t = head_rgb_t.reshape(B, fs * d, H, W)
+        _, fs, d, H, W = hand_rgb.shape
+        hand_rgb = hand_rgb.reshape(B * fs, d, H, W)
+        head_rgb = head_rgb.reshape(B * fs, d, H, W)
 
         # Transform to [0,1], apply normalization
-        hand_rgb_t = transform(hand_rgb_t.float() / 255.0)
-        head_rgb_t = transform(head_rgb_t.float() / 255.0)
+        hand_rgb = transform(hand_rgb.float() / 255.0)
+        head_rgb = transform(head_rgb.float() / 255.0)
         
         with torch.no_grad():
-            hand_visfeat_t = get_visual_features(self.clip_model, hand_rgb_t)
-            head_visfeat_t = get_visual_features(self.clip_model, head_rgb_t)
+            hand_visfeat = get_visual_features(self.clip_model, hand_rgb)
+            head_visfeat = get_visual_features(self.clip_model, head_rgb)
     
-        
         # Handle depth (reshape, interpolate)
-        
-        hand_depth_t = hand_depth_t / 1000.0
-        head_depth_t = head_depth_t / 1000.0
-        
-        if hand_depth_t.dim() == 5:
-            _, fs, d2, H, W = hand_depth_t.shape
-            hand_depth_t = hand_depth_t.view(B, fs * d2, H, W)
-            head_depth_t = head_depth_t.view(B, fs * d2, H, W)
-            hand_depth_t = F.interpolate(hand_depth_t, (16, 16), mode="nearest-exact")
-            head_depth_t = F.interpolate(head_depth_t, (16, 16), mode="nearest-exact")
+        hand_depth = hand_depth / 1000.0
+        head_depth = head_depth / 1000.0
+           
+        _, fs, d2, H, W = hand_depth.shape
+    
+        hand_depth = hand_depth.view(B * fs, d2, H, W) # [4, 1, 16, 16]
+        head_depth = head_depth.view(B * fs, d2, H, W) # [4, 1, 16, 16]
+        hand_depth = F.interpolate(hand_depth, (16, 16), mode="nearest-exact")
+        head_depth = F.interpolate(head_depth, (16, 16), mode="nearest-exact")
 
         # 3D world coords
-        hand_coords_world_t, _ = get_3d_coordinates(
-            hand_depth_t, hand_pose_t, 
+        hand_coords_world, _ = get_3d_coordinates(
+            hand_depth, hand_pose, 
             self.fx, self.fy, self.cx, self.cy
         )
-        head_coords_world_t, _ = get_3d_coordinates(
-            head_depth_t, head_pose_t,
+        head_coords_world, _ = get_3d_coordinates(
+            head_depth, head_pose,
             self.fx, self.fy, self.cx, self.cy
         )
  
         # Reduce CLIP dimension for hand/head
-        _, C_, Hf, Wf = hand_coords_world_t.shape
+        _, C_, Hf, Wf = hand_coords_world.shape
         N = Hf * Wf
 
-        feats_hand_t = hand_visfeat_t.permute(0, 2, 3, 1).reshape(B, N, -1)
-        feats_head_t = head_visfeat_t.permute(0, 2, 3, 1).reshape(B, N, -1)
-        
-        feats_hand_gate = feats_hand_t.clone()
-        feats_head_gate = feats_head_t.clone()
+        feats_hand = hand_visfeat.permute(0, 2, 3, 1).reshape(B, N, -1)
+        feats_head = head_visfeat.permute(0, 2, 3, 1).reshape(B, N, -1)
 
-        hand_coords_world_flat_t = hand_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)
-        head_coords_world_flat_t = head_coords_world_t.permute(0, 2, 3, 1).reshape(B*N, 3)        
+        hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B*N, 3)
+        head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B*N, 3)        
         
         # --------------------------------------------------------------------- #
         # 1)  text embeddings for this batch
         # --------------------------------------------------------------------- #
         text_emb = self.text_embeddings[object_labels]        # (B,768)
         
-        feats_hand_t  = gate_with_text(feats_hand_t,  text_emb)        # (B*N,768)
-        feats_head_t  = gate_with_text(feats_head_t,  text_emb)
+        feats_hand  = gate_with_text(feats_hand,  text_emb)        # (B*N,768)
+        feats_head  = gate_with_text(feats_head,  text_emb)
         
-        feats_hand_gate = feats_hand_t.clone()
-        
-        feats_hand_t  = self.dim_reducer_hand(feats_hand_t.reshape(B*N, -1)).reshape(B, N, -1) 
-        feats_head_t  = self.dim_reducer_head(feats_head_t.reshape(B*N, -1)).reshape(B, N, -1)
+        feats_hand  = self.dim_reducer_hand(feats_hand.reshape(B*N, -1)).reshape(B, N, -1) 
+        feats_head  = self.dim_reducer_head(feats_head.reshape(B*N, -1)).reshape(B, N, -1)
 
-        state_proj_t = self.state_proj(state_t)
+        state_proj = self.state_proj(state)
         
-        coords_hand_t = hand_coords_world_flat_t.view(B, N, 3)
-        coords_head_t = head_coords_world_flat_t.view(B, N, 3)
+        coords_hand = hand_coords_world_flat.view(B, N, 3)
+        coords_head = head_coords_world_flat.view(B, N, 3)
         
         # Local feature fusion
         kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1 = self._gather_scene_kv(batch_episode_ids, text_emb, 1)
         
-        feats_hand_t  = self.local_fuser(
-            coords_hand_t, feats_hand_t,
+        feats_hand  = self.local_fuser(
+            coords_hand, feats_hand,
             kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
         )
-        feats_head_t  = self.local_fuser(
-            coords_head_t, feats_head_t,
+        feats_head  = self.local_fuser(
+            coords_head, feats_head,
             kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
         )
         
@@ -269,17 +264,15 @@ class Agent_map_bc(nn.Module):
         pts_kv   = torch.cat([kv_coords_lvl0, kv_feats_lvl0], dim=-1)            # [B,L, 3+768]
         global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_lvl0)          
            
-        # Transformer forward - only using 't' time step
         visual_tok = self.transformer(
-            hand_token_t=feats_hand_t,
-            head_token_t=feats_head_t,
-            coords_hand_t=coords_hand_t,
-            coords_head_t=coords_head_t,
-            state_t=state_proj_t.unsqueeze(1),
+            hand_token_t=feats_hand,
+            head_token_t=feats_head,
+            coords_hand_t=coords_hand,
+            coords_head_t=coords_head,
+            state_t=state_proj.unsqueeze(1),
         ) 
-        
 
-        state_tok  = self.state_mlp_action(state_t).unsqueeze(1) # [B,1,128]
+        state_tok  = self.state_mlp_action(state).unsqueeze(1) # [B,1,128]
         
         cond_tok   = torch.cat([visual_tok, global_tok], dim=1) 
         action_out = self.action_transformer(cond_tok, state_tok)

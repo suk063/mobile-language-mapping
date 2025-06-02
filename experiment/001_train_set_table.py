@@ -28,7 +28,7 @@ from mani_skill.utils import common
 
 from lang_mapping.agent.agent_map_bc import Agent_map_bc
 from lang_mapping.module import ImplicitDecoder
-from lang_mapping.dataset import TempTranslateToPointDataset, merge_t_m1, build_uid_mapping, build_object_map, get_object_labels_batch
+from lang_mapping.dataset import DPDataset, build_uid_mapping, build_object_map, get_object_labels_batch
 
 from mshab.envs.make import EnvConfig, make_env
 from mshab.utils.array import to_tensor
@@ -347,16 +347,14 @@ def train(cfg: TrainConfig):
     action_pred_horizon = cfg.algo.action_pred_horizon
     
     # Create BC dataset and dataloader
-    bc_dataset = TempTranslateToPointDataset(
+    bc_dataset = DPDataset(
         cfg.algo.data_dir_fp,
-        obs_horizon=2,
-        pred_horizon=action_pred_horizon+1,
+        obs_horizon=1,
+        pred_horizon=action_pred_horizon,
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
         max_image_cache_size=cfg.algo.max_cache_size,
         truncate_trajectories_at_success=True,
-        cat_state=cfg.eval_env.cat_state,
-        cat_pixels=cfg.eval_env.cat_pixels,
     )
 
     bc_dataloader = ClosableDataLoader(
@@ -448,22 +446,35 @@ def train(cfg: TrainConfig):
             [uid2episode_id[uid] for uid in plan0.composite_subtask_uids],
             device=device,
             dtype=torch.long,
-        )    
+        )
+        def _flatten(obs_raw: Dict[str, np.ndarray | torch.Tensor]) -> Dict[str, torch.Tensor]:
+            """
+            Convert env observation -> forward_policy expected keys
+            All tensors are moved to the same device as the agent.
+            """
+            flat = {"state": to_tensor(obs_raw["state"], device=device)}  # (B,1,state_dim)
+
+            px = obs_raw["pixels"]
+            for k in (
+                "fetch_hand_rgb", "fetch_head_rgb",
+                "fetch_hand_depth", "fetch_head_depth",
+                "fetch_hand_pose", "fetch_head_pose",
+            ):
+                flat[k] = to_tensor(px[k], device=device)
+
+            return flat    
         
         # Batch size (number of parallel evaluation environments)
         B = subtask_labels.size(0)
 
         for t in range(max_steps):
-            # Merge observations from time t and t-1
-            agent_obs = merge_t_m1(prev_obs, eval_obs)
+            agent_obs = _flatten(eval_obs)
 
             with torch.no_grad():
                 action = agent.forward_policy(agent_obs, subtask_labels, epi_ids)
 
             # Environment step
-            next_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])
-            prev_obs = eval_obs
-            eval_obs = next_obs
+            eval_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])
 
         return _collect_stats(eval_envs, device)
     
@@ -478,7 +489,11 @@ def train(cfg: TrainConfig):
         tot_loss, n_samples = 0, 0
         agent.train()
 
-        for obs, act, subtask_uids, traj_idx, is_grasped in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
+        for batch in tqdm(bc_dataloader, desc="Stage1-Batch", unit="batch"):
+            obs           = batch["observations"]           # dict
+            act           = batch["actions"]                # (pred_horizon, A)
+            subtask_uids  = batch["subtask_uid"]            # str
+            
             subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(device)
             epi_ids = torch.tensor(
                 [uid2episode_id[uid] for uid in subtask_uids],
@@ -487,7 +502,7 @@ def train(cfg: TrainConfig):
             )    
             
             obs, act = to_tensor(obs, device=device, dtype="float"), to_tensor(act, device=device, dtype="float")
-
+                
             pi = agent.forward_policy(obs, subtask_labels, epi_ids)
             
             total_bc_loss = F.smooth_l1_loss(pi, act, reduction='none')
