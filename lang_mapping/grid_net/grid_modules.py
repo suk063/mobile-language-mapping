@@ -57,13 +57,8 @@ class FeatureGrid(FeatureGridBase):
             initial_feature = torch.randn(feature_shape, dtype=self.dtype) * init_stddev
         assert initial_feature.shape == feature_shape
         self.feature = torch.nn.Parameter(initial_feature)
-        if second_order_grid_sample:
-            # Use grid_sample that supports 2nd order derivatives
-            import cuda_gridsample as cu
-            self.grid_sample_func = cu.grid_sample_3d if self.d == 3 else cu.grid_sample_2d
-        else:
-            # Use standard pytorch implementation
-            self.grid_sample_func = F.grid_sample
+        # Use standard pytorch implementation
+        self.grid_sample_func = F.grid_sample
         logger.info(f"Regular {self.name}: cell_size={self.cell_size:.2f}, feature shape={feature_shape}, init_avail={init_avail}, 2nd_order_sample={second_order_grid_sample}, init_norm={initial_feature.norm():.1e}.")
 
     def interpolate(self, x):
@@ -116,3 +111,130 @@ class FeatureGrid(FeatureGridBase):
             return denormalize_coordinates(pos_nrm, self.bound.to(pos_nrm))
         else:
             return pos_nrm
+        
+class FeatureGridVM(FeatureGridBase):
+    """3D feature grid store using low-rank VM factorization.
+    Ref:
+    Chen et al., TensoRF: Tensorial Radiance Fields
+    """
+    def __init__(self, d, fdim, bound, cell_size, name="grid", dtype=torch.float32, rank=10, init_stddev=0.0):
+        super().__init__(d=d, fdim=fdim, bound=bound, cell_size=cell_size, name=name, dtype=dtype)
+        assert self.d == 3, "VM factorization only supports 3D grid!"
+        self.rank = rank
+        grid_len = (self.bound[:,1] - self.bound[:,0]).cpu().numpy()
+        grid_size = np.ceil(grid_len / cell_size).astype(int)
+        xsize, ysize, zsize = grid_size
+        # XY + Z decomp
+        self.feats_XY = torch.nn.Parameter(torch.randn((1, self.rank, ysize, xsize), dtype=self.dtype) * init_stddev)
+        self.feats_Z = torch.nn.Parameter(torch.randn((1, self.rank, zsize, 1), dtype=self.dtype) * init_stddev)
+        # XZ + Y decomp
+        self.feats_XZ = torch.nn.Parameter(torch.randn((1, self.rank, zsize, xsize), dtype=self.dtype) * init_stddev)
+        self.feats_Y = torch.nn.Parameter(torch.randn((1, self.rank, ysize, 1), dtype=self.dtype) * init_stddev)
+        # YZ + X decomp
+        self.feats_YZ = torch.nn.Parameter(torch.randn((1, self.rank, zsize, ysize), dtype=self.dtype) * init_stddev)
+        self.feats_X = torch.nn.Parameter(torch.randn((1, self.rank, xsize, 1), dtype=self.dtype) * init_stddev)
+        logger.info(f"VM-{self.name}: cell_size={self.cell_size}, rank={self.rank}, num_param={self.num_params()}.")
+    
+
+    def _interpolate_helper(self, feats, x_nrm):
+        N, d = x_nrm.shape
+        assert d == 1 or d == 2
+        assert feats.ndim == 4
+        if d == 1:
+            # Pad query coordinates with a zero column
+            # to lift to 2d coordinates
+            x_nrm = torch.concat((torch.zeros_like(x_nrm), x_nrm), dim=1)
+            assert feats.shape[-1] == 1
+        assert x_nrm.shape == (N, 2)
+        sample_coords = x_nrm.reshape(1, N, 1, 2)
+        feats = F.grid_sample(
+            feats,
+            sample_coords, 
+            align_corners=False,
+            mode='bilinear',
+            padding_mode='zeros'
+        )[0, :, :, 0].transpose(0, 1)
+        return feats
+
+
+    def interpolate(self, x):
+        # Normalize query coordinates (required by F.grid_sample)
+        x = normalize_coordinates(x, self.bound)
+
+        # Interpolate on XY+Z factors
+        coeffs_xy = self._interpolate_helper(self.feats_XY, x[:, [0,1]])
+        coeffs_z = self._interpolate_helper(self.feats_Z, x[:, [2]])
+        coeffs_xy_z = coeffs_xy * coeffs_z  # (N, R)
+        
+        # Interpolate on XZ+Y factors
+        coeffs_xz = self._interpolate_helper(self.feats_XZ, x[:, [0,2]])
+        coeffs_y = self._interpolate_helper(self.feats_Y, x[:, [1]])
+        coeffs_xz_y = coeffs_xz * coeffs_y
+
+        # Interpolate on YZ+X factors
+        coeffs_yz = self._interpolate_helper(self.feats_YZ, x[:, [1,2]])
+        coeffs_x = self._interpolate_helper(self.feats_X, x[:, [0]])
+        coeffs_yz_x = coeffs_yz * coeffs_x
+
+        coeffs_dict = {
+            'xy_z': coeffs_xy_z,
+            'xz_y': coeffs_xz_y,
+            'yz_x': coeffs_yz_x
+        }
+
+        return coeffs_dict
+    
+    
+    def norm(self):
+        # TODO:
+        logger.warning("norm for FeatureGridVM is not implemented!")
+        return -1
+    
+
+    # def visualize_planes(self, prefix_path):
+    #     feats_XY = self.feats_XY.squeeze().permute([2, 1, 0])
+    #     grid = feats_XY[:, :, 0].detach().cpu().numpy()
+    #     utils.visualize_grid_scalar(grid, fig_path=prefix_path+"vm_factor_xy.png")
+
+    #     feats_XZ = self.feats_XZ.squeeze().permute([2, 1, 0])
+    #     grid = feats_XZ[:, :, 0].detach().cpu().numpy()
+    #     utils.visualize_grid_scalar(grid, fig_path=prefix_path+"vm_factor_xz.png")
+
+    #     feats_YZ = self.feats_YZ.squeeze().permute([2, 1, 0])
+    #     grid = feats_YZ[:, :, 0].detach().cpu().numpy()
+    #     utils.visualize_grid_scalar(grid, fig_path=prefix_path+"vm_factor_yz.png")
+
+
+class BasisVM(torch.nn.Module):
+    def __init__(self, fdim, name="basis", dtype=torch.float32, rank=10, init_stddev=0.0, pretrained_path=None, no_optimize=False):
+        super().__init__()
+        self.rank = rank
+        self.fdim = fdim
+        self.name = name
+        self.B_XY_Z = torch.nn.Parameter(torch.randn((self.fdim, self.rank), dtype=dtype) * init_stddev)
+        self.B_XZ_Y = torch.nn.Parameter(torch.randn((self.fdim, self.rank), dtype=dtype) * init_stddev)
+        self.B_YZ_X = torch.nn.Parameter(torch.randn((self.fdim, self.rank), dtype=dtype) * init_stddev)
+        logger.info(f"VM-Basis-{self.name}: rank={self.rank}.")
+        if pretrained_path is not None:
+            self.load(pretrained_path)
+        if no_optimize:
+            logger.info(f"Fixing BasisVM weight.")
+            for param in self.parameters():
+                param.requires_grad = False
+        else:
+            logger.info(f"BasisVM is optimizable.")
+
+    def forward(self, coeffs_dict):
+        # coeffs: (N, R)
+        feats_xy_z = coeffs_dict['xy_z'] @ self.B_XY_Z.T  # (N, fdim)
+        feats_xz_y = coeffs_dict['xz_y'] @ self.B_XZ_Y.T 
+        feats_yz_x = coeffs_dict['yz_x'] @ self.B_YZ_X.T
+        return feats_xy_z + feats_xz_y + feats_yz_x
+    
+    def save(self, filepath):
+        torch.save(self.state_dict(), filepath)
+
+    def load(self, filepath):
+        ckpt = torch.load(filepath)
+        self.load_state_dict(ckpt)
+        logger.info(f"Loaded pretrained BasisVM from {filepath}.")

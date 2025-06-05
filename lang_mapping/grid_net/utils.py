@@ -24,6 +24,33 @@ def grid_interp_regular(reg_grids, x, ignore_level=None):
             level_feats.append(torch.zeros_like(feats))
     return torch.cat(level_feats, dim=1)
 
+def grid_interp_VM(vm_grids, vm_bases, x, ignore_level=None):
+    """Interpolate from a list of feature grids.
+
+    Args:
+        vm_grids: Each element is an instance of FeatureGridVM.
+        vm_bases: Each element is an instance of VMBasis.
+        x: Unnormalized query coordinates
+        ignore_level: list of bools indicating which level to ignore. Defaults to None.
+
+    Returns:
+        Interpolated features, concatenated across the levels.
+    """
+    num_levels = len(vm_grids)
+    
+    assert len(vm_bases) == num_levels
+    if ignore_level is None:
+        ignore_level = np.zeros(num_levels).astype(bool)
+    level_feats = []
+    for level in range(num_levels):
+        coeffs = vm_grids[level].interpolate(x)
+        feats = vm_bases[level](coeffs)
+        if not ignore_level[level]:
+            level_feats.append(feats)
+        else:
+            level_feats.append(torch.zeros_like(feats))
+    return torch.cat(level_feats, dim=1)
+
 def grid_decode(feats, x, decoder=None, pos_invariant=True):
     assert feats.ndim == 2
     

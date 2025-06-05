@@ -16,8 +16,11 @@ from ruamel import yaml
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from lang_mapping.mapper.mapper import VoxelHashTable
 
+from dataclasses import dataclass, field, asdict
+from typing import List, Optional
+
+from lang_mapping.grid_net.grid_net import GridNet
 from lang_mapping.module import ImplicitDecoder
 from lang_mapping.utils import get_visual_features
 from mshab.utils.config import parse_cfg
@@ -42,14 +45,22 @@ class ClipModelConfig:
     model_pretrained: str = "merged2b_s4b_b131k"
 
 @dataclass
-class VoxelHashTableConfig:
-    resolution: float            # finest cell size (e.g. 0.12)
-    num_levels: int                  # pyramid depth (e.g. 2)
-    level_scale: float               # ratio between levels (e.g. 2.0)
-    voxel_feature_dim: int           # per-level feature width (e.g. 32)
-    hash_table_size: int             # buckets per level (power of two)
-    scene_bound_min: list[float]     # xyz lower corner
-    scene_bound_max: list[float]     # xyz upper corner
+class GridDefinition:
+    type: str
+    feature_dim: int
+    rank: int
+    init_stddev: float
+    bound: List[List[float]]
+    base_cell_size: float
+    per_level_scale: float
+    n_levels: int
+    n_scenes: int
+
+@dataclass
+class GridCfg:
+    name: str
+    spatial_dim: int
+    grid: GridDefinition
 
 @dataclass
 class Config:
@@ -61,7 +72,6 @@ class Config:
     optimizer_kwargs: dict
     data: DataConfig
     clip_model: ClipModelConfig
-    voxel_hash_table: VoxelHashTableConfig
     depth_downsample_method: str  # "nearest-exact", "nearest", "avg2d", "avg3d"
     decoder_hidden_dim: int
     decoder_output_dim: int
@@ -69,12 +79,13 @@ class Config:
     valid_interval: int
     ckpt_interval: int
     test_model_dir: Optional[str] = None
+    grid_cfg: GridCfg = field(default_factory=GridCfg)
 
     def as_dict(self):
         out = vars(self)
         out["data"] = vars(self.data)
         out["clip_model"] = vars(self.clip_model)
-        out["voxel_hash_table"] = vars(self.voxel_hash_table)
+        out["grid_cfg"] = asdict(self.grid_cfg) 
         return out
 
 
@@ -340,18 +351,12 @@ class Pipeline:
                 self.cfg.clip_model.model_pretrained,
             )[0].to(device)
             self.clip_model.eval()
-        self.hash_voxel = VoxelHashTable(
-            resolution = self.cfg.voxel_hash_table.resolution,
-            num_levels = self.cfg.voxel_hash_table.num_levels,
-            level_scale = self.cfg.voxel_hash_table.level_scale,
-            feature_dim = self.cfg.voxel_hash_table.voxel_feature_dim,
-            hash_table_size = self.cfg.voxel_hash_table.hash_table_size,
-            scene_bound_min = self.cfg.voxel_hash_table.scene_bound_min,
-            scene_bound_max = self.cfg.voxel_hash_table.scene_bound_max,
-            device = device,
-        ).to(device)
+            
+        self.hash_voxel = GridNet(cfg=asdict(self.cfg.grid_cfg), device=device)
+        self.hash_voxel = self.hash_voxel.to(device)
+        
         self.implicit_decoder = ImplicitDecoder(
-            voxel_feature_dim=self.cfg.voxel_hash_table.voxel_feature_dim * self.cfg.voxel_hash_table.num_levels,
+            voxel_feature_dim=self.cfg.grid_cfg.grid.feature_dim * self.cfg.grid_cfg.grid.n_levels,
             hidden_dim=self.cfg.decoder_hidden_dim,
             output_dim=self.cfg.decoder_output_dim,
         ).to(device)
@@ -504,8 +509,10 @@ class Pipeline:
         # bs, 3, h, w -> bs * h * w, 3
         coords_world = coords_world.permute(0, 2, 3, 1).reshape(-1, 3)
 
-        voxel_features = self.hash_voxel.query_voxel_feature(
-            coords_world
+        # (Sunghwan) Always query for scene 0 for now
+        scene_ids = torch.zeros(coords_world.shape[0], dtype=torch.long, device=coords_world.device)
+        voxel_features = self.hash_voxel.query_feature(
+            coords_world, scene_ids
         )
         
         decoded_features = self.implicit_decoder(
@@ -524,18 +531,14 @@ class Pipeline:
     def save_model(self, name, epoch):
         folder = os.path.join(self.cfg.output_dir, name)
         os.makedirs(folder, exist_ok=True)
-
-        # --------------------------------------------
-        dense_path  = os.path.join(folder, "hash_voxel_dense.pt")
-        sparse_path = os.path.join(folder, "hash_voxel_sparse.pt")
-        self.hash_voxel.save_dense(dense_path)   # full state_dict
-        self.hash_voxel.save_sparse(sparse_path) # only accessed voxels
-
+        torch.save(
+            dict(model=self.hash_voxel.state_dict(), epoch=epoch),
+            os.path.join(folder, "hash_voxel.pt"),
+        )
         torch.save(
             dict(model=self.implicit_decoder.state_dict(), epoch=epoch),
             os.path.join(folder, "implicit_decoder.pt"),
         )
-
 
 def main():
     cfg = parse_cfg(default_cfg_path=sys.argv[1])
