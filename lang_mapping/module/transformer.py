@@ -365,87 +365,52 @@ class TransformerEncoder(nn.Module):
                
     def forward(
         self,
-        hand_token_t: torch.Tensor,  # [B, N, input_dim]
-        head_token_t: torch.Tensor,  # [B, N, input_dim] 
-        hand_token_m1: torch.Tensor = None,  # [B, N, input_dim] or None
-        head_token_m1: torch.Tensor = None,  # [B, N, input_dim] or None
-        coords_hand_t: torch.Tensor = None,
-        coords_head_t: torch.Tensor = None, 
-        coords_hand_m1: torch.Tensor = None,
-        coords_head_m1: torch.Tensor = None,
-        state_t: torch.Tensor = None,  # [B, 1, input_dim] or None
-        state_m1: torch.Tensor = None,  # [B, 1, input_dim] or None
+        hand_token: torch.Tensor,   # [B, N, input_dim]
+        head_token: torch.Tensor,   # [B, N, input_dim]
+        coords_hand: torch.Tensor | None = None,
+        coords_head: torch.Tensor | None = None,
+        text_emb: torch.Tensor | None = None,
+        # state: torch.Tensor | None = None,  # [B, 1, input_dim] or None
     ) -> torch.Tensor:
         
-        B, N, D = hand_token_t.shape
-        tokens, coords = [], []
+        B, _, _ = hand_token.shape
+        tokens: list[torch.Tensor] = []
+        coords: list[torch.Tensor] = []
+
+        zeros1 = lambda: torch.zeros(B, 1, 3, device=hand_token.device)
         
-        zeros1 = lambda: torch.zeros(B, 1, 3, device=hand_token_t.device)      
-        
-        coords_src = None
-        
-        # Only process m1 tokens if they are provided
-        if hand_token_m1 is not None and head_token_m1 is not None:
-            if state_m1 is not None:
-                tokens.append(state_m1)
-                coords.append(zeros1())
+        # # Add optional state token
+        # if state is not None:
+        #     tokens.append(state)
+        #     coords.append(zeros1())
             
-            tokens += [hand_token_m1, head_token_m1]
-            
-            if coords_hand_m1 is not None:
-                coords += [coords_hand_m1, coords_head_m1]
-        
-        # Process t tokens
-        if state_t is not None:
-            tokens.append(state_t)
+        if text_emb is not None:    
+            tokens.append(text_emb)
             coords.append(zeros1())
-            
-        tokens += [hand_token_t, head_token_t] 
         
-        if coords_hand_t is not None:
-            coords += [coords_hand_t, coords_head_t]
+        # Add hand & head tokens
+        tokens.extend([hand_token, head_token])
         
-        src = torch.cat(tokens, 1)
+        # Add optional coordinate features
+        if coords_hand is not None:
+            coords.extend([coords_hand, coords_head])
         
-        if coords_hand_t is not None and len(coords) > 0:
+        # Concatenate token sequences
+        src = torch.cat(tokens, dim=1)  # (B, S, D)
+
+        coords_src = None
+        if coords_hand is not None and coords:
             coords_src = torch.cat(coords, dim=1)  # (B, S, 3)
-            
-        # Calculate lengths for causal masking (only if m1 tokens exist)
-        causal_mask = None
-        if hand_token_m1 is not None and head_token_m1 is not None:
-            len_m1 = 0                  # learnable m-1
-            if state_m1 is not None: 
-                len_m1 += 1
-            len_m1 += hand_token_m1.size(1) + head_token_m1.size(1)
+        
+        # Pass through transformer layers
+        for layer in self.layers:
+            src = layer(
+                src=src,
+                coords_src=coords_src,
+                causal_mask=None,  # no causal masking needed
+            )
 
-            len_t  = 0                  # learnable t
-            if state_t is not None: 
-                len_t  += 1
-            len_t  += hand_token_t.size(1) + head_token_t.size(1)
-            
-            causal_mask = build_causal_mask(len_m1, len_t, src.device)
-            
-            # Pass through Transformer layers
-            for layer in self.layers:
-                src = layer(
-                    src=src,
-                    coords_src=coords_src,
-                    causal_mask=causal_mask
-                )
-
-            return src[:, len_m1+1:, :]
-        else:
-            # Only t time step - no causal masking needed
-            for layer in self.layers:
-                src = layer(
-                    src=src,
-                    coords_src=coords_src,
-                    causal_mask=None
-                )
-            
-            # Return all tokens except the first state token if it exists
-            start_idx = 1 if state_t is not None else 0
-            return src[:, start_idx:, :]
+        return src
 
 class ActionTransformerDecoder(nn.Module):
     def __init__(
@@ -506,7 +471,7 @@ class LocalSelfAttentionFusion(nn.Module):
     Fuse two per-voxel feature vectors with a minimal Transformer encoder block
     and project the result to `output_dim` (default: 240).
     """
-    def __init__(
+    def __init__( 
         self,
         feat_dim: int = 768,
         num_heads: int = 8,

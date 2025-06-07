@@ -52,15 +52,15 @@ class Agent_map_bc(nn.Module):
         # Text embeddings and projection
         if text_input:
             # text_input += [""]
-            text_input = [s.replace('_', ' ') for s in text_input] + [""]
+            text_input = ['pick up the' + s.replace('_', ' ') for s in text_input]
         
         text_tokens = self.tokenizer(text_input).to(self.device)
         self.text_proj = nn.Linear(clip_input_dim, transf_input_dim).to(self.device)
         with torch.no_grad():
             text_embeddings = self.clip_model.encode_text(text_tokens)
             self.text_embeddings  = F.normalize(text_embeddings, dim=-1, p=2)
-            text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
-            self.text_embeddings = text_embeddings - redundant_emb
+            # text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
+            # self.text_embeddings = text_embeddings - redundant_emb
         
         # Transformer for feature fusion
         self.dim_reducer_hand = DimReducer(clip_input_dim, transf_input_dim, L=0)
@@ -138,9 +138,20 @@ class Agent_map_bc(nn.Module):
 
             # ── 1) collect coordinates per scene ──────────────────────────────
             for sid in scene_ids:
-                c = self.valid_coords[level_idx][int(sid)].to(self.device)     # (L_i,3)
-                per_scene_coords.append(c)
-                per_scene_len.append(c.size(0))
+                point = self.valid_coords[level_idx][int(sid)].to(self.device)     # (L_i,3)
+            
+                # point: (L_i, 3)  ── columns 0,1,2가 각각 x, y, z
+                mins, _ = point.min(dim=0)   # tensor([x_min, y_min, z_min])
+                maxs, _ = point.max(dim=0)   # tensor([x_max, y_max, z_max])
+
+                print(f"x range: [{mins[0].item():.3f}, {maxs[0].item():.3f}]")
+                print(f"y range: [{mins[1].item():.3f}, {maxs[1].item():.3f}]")
+                print(f"z range: [{mins[2].item():.3f}, {maxs[2].item():.3f}]")
+                
+                import pdb; pdb.set_trace()
+                
+                per_scene_coords.append(point)
+                per_scene_len.append(point.size(0))
 
             L_max = max(per_scene_len)
 
@@ -151,6 +162,7 @@ class Agent_map_bc(nn.Module):
             # ── 2) query voxel features scene-wise ────────────────────────────
             for b, (sid, coords) in enumerate(zip(scene_ids, per_scene_coords)):
                 L                     = coords.size(0)
+                
                 kv_coords  [b, :L]    = coords
                 kv_pad_mask[b, :L]    = False                         # not pad
 
@@ -159,7 +171,7 @@ class Agent_map_bc(nn.Module):
                 vox_raw           = self.static_map.query_feature(coords, scene_ids_tensor)
                 vox_feat          = self.implicit_decoder(vox_raw)          # (L,F_dec)
 
-                vox_feat              = gate_with_text(vox_feat.unsqueeze(0), text_emb[b:b+1]).squeeze(0)
+                # vox_feat              = gate_with_text(vox_feat.unsqueeze(0), text_emb[b:b+1]).squeeze(0)
                 kv_feats   [b, :L]    = self.voxel_proj(vox_feat)
 
             return kv_coords, kv_feats, kv_pad_mask
@@ -236,45 +248,48 @@ class Agent_map_bc(nn.Module):
         # --------------------------------------------------------------------- #
         text_emb = self.text_embeddings[object_labels]        # (B,768)
         
-        feats_hand  = gate_with_text(feats_hand,  text_emb)        # (B*N,768)
-        feats_head  = gate_with_text(feats_head,  text_emb)
+        # feats_hand  = gate_with_text(feats_hand,  text_emb)        # (B*N,768)
+        # feats_head  = gate_with_text(feats_head,  text_emb)
         
         feats_hand  = self.dim_reducer_hand(feats_hand.reshape(B*N, -1)).reshape(B, N, -1) 
         feats_head  = self.dim_reducer_head(feats_head.reshape(B*N, -1)).reshape(B, N, -1)
 
-        state_proj = self.state_proj(state)
+        # state_proj = self.state_proj(state)
         
         coords_hand = hand_coords_world_flat.view(B, N, 3)
         coords_head = head_coords_world_flat.view(B, N, 3)
         
         # Local feature fusion
-        kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1 = self._gather_scene_kv(batch_episode_ids, text_emb, 1)
+        # kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1 = self._gather_scene_kv(batch_episode_ids, text_emb, 1)
         
-        feats_hand  = self.local_fuser(
-            coords_hand, feats_hand,
-            kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
-        )
-        feats_head  = self.local_fuser(
-            coords_head, feats_head,
-            kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
-        )
+        # feats_hand  = self.local_fuser(
+        #     coords_hand, feats_hand,
+        #     kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
+        # )
+        # feats_head  = self.local_fuser(
+        #     coords_head, feats_head,
+        #     kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
+        # )
         
-        kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
+        # kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
         
-        pts_kv   = torch.cat([kv_coords_lvl0, kv_feats_lvl0], dim=-1)            # [B,L, 3+768]
-        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_lvl0)          
-           
+        # pts_kv   = torch.cat([kv_coords_lvl1, kv_feats_lvl1], dim=-1)            # [B,L, 3+768]
+        # global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_lvl1)          
+        
         visual_tok = self.transformer(
-            hand_token_t=feats_hand,
-            head_token_t=feats_head,
-            coords_hand_t=coords_hand,
-            coords_head_t=coords_head,
-            state_t=state_proj.unsqueeze(1),
+            hand_token=feats_hand,
+            head_token=feats_head,
+            coords_hand=coords_hand,
+            coords_head=coords_head,
+            text_emb=text_emb.unsqueeze(1),
+            # state=state_proj.unsqueeze(1),
         ) 
 
         state_tok  = self.state_mlp_action(state).unsqueeze(1) # [B,1,128]
         
-        cond_tok   = torch.cat([visual_tok, global_tok], dim=1) 
-        action_out = self.action_transformer(cond_tok, state_tok)
+        # cond_tok   = torch.cat([visual_tok, global_tok], dim=1) 
+        
+        
+        action_out = self.action_transformer(visual_tok, state_tok)
         
         return action_out
