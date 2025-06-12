@@ -28,34 +28,14 @@ data:
 clip_model:
     model_name: EVA02-L-14
     model_pretrained: merged2b_s4b_b131k
-# voxel_hash_table:
-#     spatial_dim: 3
-#     type: VM
-#     init_stddev: 0.2
-#     base_cell_size: 0.2
-#     n_levels: 2
-#     n_scenes: 1
-#     per_level_scale: 2.0
-#     feature_dim: 60
-#     rank: 32
-#     scene_bound_min: [-2.6, -8.1, 0.0]
-#     scene_bound_max: [4.6, 4.7, 3.1]
-grid_cfg:
-  name: grid_net
-  spatial_dim: 3
-  grid:
-    type: VM
-    feature_dim: 60
-    rank: 32
-    init_stddev: 0.2
-    bound:
-      - [-2.6, 4.6]
-      - [-8.1, 4.7]
-      - [ 0.0, 3.1]
-    base_cell_size: 0.2
-    per_level_scale: 2.0
-    n_levels: 2
-    n_scenes: 1 # single scene for now
+voxel_hash_table:
+    resolution: 0.12
+    num_levels: 2
+    level_scale: 2.0
+    hash_table_size: 2097152  # 2**21
+    voxel_feature_dim: 32
+    scene_bound_min: [-2.6, -8.1, 0.0]
+    scene_bound_max: [4.6, 4.7, 3.1]
 depth_downsample_method: nearest-exact
 decoder_hidden_dim: 768
 decoder_output_dim: 768
