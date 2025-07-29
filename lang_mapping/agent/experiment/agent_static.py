@@ -5,12 +5,18 @@ import torch.nn.functional as F
 from typing import Dict
 
 # Local imports
-from ..module.transformer import TransformerEncoder
-from ..module.mlp import ActionMLP, ImplicitDecoder, ConcatMLPFusion, VoxelProj
-from ..mapper.mapper import VoxelHashTable
-from ..utils import get_3d_coordinates, get_visual_features, transform
+from lang_mapping.module.transformer import TransformerEncoder
+from lang_mapping.module.mlp import (
+    ActionMLP,
+    ImplicitDecoder,
+    ConcatMLPFusion,
+    VoxelProj,
+)
+from lang_mapping.mapper.mapper import VoxelHashTable
+from lang_mapping.utils import get_3d_coordinates, get_visual_features, transform
 
 import open_clip
+
 
 class Agent_static(nn.Module):
     def __init__(
@@ -54,7 +60,7 @@ class Agent_static(nn.Module):
         # Text embeddings and projection
         # if text_input:
         #     text_input += [""]
-        
+
         text_tokens = self.tokenizer(text_input).to(self.device)
         self.text_proj = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
         with torch.no_grad():
@@ -66,7 +72,9 @@ class Agent_static(nn.Module):
             # self.text_embeddings = F.normalize(text_embeddings, dim=-1, p=2)
 
         # Reduce CLIP feature dimension
-        self.clip_dim_reducer = nn.Linear(clip_input_dim, voxel_feature_dim).to(self.device)
+        self.clip_dim_reducer = nn.Linear(clip_input_dim, voxel_feature_dim).to(
+            self.device
+        )
 
         # Transformer for feature fusion
         self.transformer = TransformerEncoder(
@@ -74,14 +82,13 @@ class Agent_static(nn.Module):
             hidden_dim=256,
             num_layers=4,
             num_heads=8,
-            output_dim=state_mlp_dim
+            output_dim=state_mlp_dim,
         )
 
         # Action MLP
         action_dim = np.prod(single_act_shape)
         self.action_mlp = ActionMLP(
-            input_dim=state_mlp_dim * 2,
-            action_dim=action_dim
+            input_dim=state_mlp_dim * 2, action_dim=action_dim
         ).to(self.device)
 
         # Voxel hashing and implicit decoder
@@ -149,10 +156,14 @@ class Agent_static(nn.Module):
         N = Hf * Wf
 
         # Flatten coordinates
-        hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
-        head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
+        hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(
+            B_ * N, 3
+        )
+        head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(
+            B_ * N, 3
+        )
 
-        # Flatten CLIP features 
+        # Flatten CLIP features
         with torch.no_grad():
             hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
             head_visfeat = head_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
@@ -232,8 +243,12 @@ class Agent_static(nn.Module):
         B_, C_, Hf, Wf = hand_coords_world.shape
         N = Hf * Wf
 
-        hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
-        head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B_ * N, 3)
+        hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(
+            B_ * N, 3
+        )
+        head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(
+            B_ * N, 3
+        )
 
         # Flatten CLIP feats
         hand_visfeat = hand_visfeat.permute(0, 2, 3, 1).reshape(B_, N, -1)
@@ -241,11 +256,11 @@ class Agent_static(nn.Module):
         feats_hand_flat = hand_visfeat.reshape(B_ * N, -1)
         feats_head_flat = head_visfeat.reshape(B_ * N, -1)
 
-        # Reduce CLIP dimension 
+        # Reduce CLIP dimension
         feats_hand_flat_reduced = self.clip_dim_reducer(feats_hand_flat)
         feats_head_flat_reduced = self.clip_dim_reducer(feats_head_flat)
 
-        # Query voxel features 
+        # Query voxel features
         with torch.no_grad():
             voxel_feat_points_hand, _ = self.hash_voxel.query_voxel_feature(
                 hand_coords_world_flat, return_indices=False
@@ -254,19 +269,19 @@ class Agent_static(nn.Module):
                 head_coords_world_flat, return_indices=False
             )
 
-        voxel_feat_points_hand = self.voxel_proj(voxel_feat_points_hand, hand_coords_world_flat)
-        voxel_feat_points_head = self.voxel_proj(voxel_feat_points_head, head_coords_world_flat)
+        voxel_feat_points_hand = self.voxel_proj(
+            voxel_feat_points_hand, hand_coords_world_flat
+        )
+        voxel_feat_points_head = self.voxel_proj(
+            voxel_feat_points_head, head_coords_world_flat
+        )
 
         # Fuse voxel and CLIP features
         fused_hand = self.feature_fusion(
-            feats_hand_flat_reduced,
-            voxel_feat_points_hand,
-            hand_coords_world_flat
+            feats_hand_flat_reduced, voxel_feat_points_hand, hand_coords_world_flat
         )
         fused_head = self.feature_fusion(
-            feats_head_flat_reduced,
-            voxel_feat_points_head,
-            head_coords_world_flat
+            feats_head_flat_reduced, voxel_feat_points_head, head_coords_world_flat
         )
 
         # Get text embeddings (projected)
@@ -289,7 +304,7 @@ class Agent_static(nn.Module):
             coords_hand=batch_hand_coords,
             coords_head=batch_head_coords,
             state=state_voxel_dim,
-            text_embeddings=selected_text_reduced
+            text_embeddings=selected_text_reduced,
         )
 
         # Final action

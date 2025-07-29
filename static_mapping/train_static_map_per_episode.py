@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import reduce
 from typing import Optional, Union
-
+from dataclasses import field
 import h5py
 import numpy as np
 import open_clip
@@ -46,14 +46,25 @@ class ClipModelConfig:
 
 
 @dataclass
-class VoxelHashTableConfig:
-    resolution: float  # finest cell size (e.g. 0.12)
-    num_levels: int  # pyramid depth (e.g. 2)
-    level_scale: float  # ratio between levels (e.g. 2.0)
-    voxel_feature_dim: int  # per-level feature width (e.g. 32)
-    hash_table_size: int  # buckets per level (power of two)
-    scene_bound_min: tuple[float, float, float]  # xyz lower corner
-    scene_bound_max: tuple[float, float, float]  # xyz upper corner
+class GridDefinition:
+    type: str = "regular"
+    feature_dim: int = 60
+    init_stddev: float = 0.2
+    bound: list[list[float]] = field(default_factory=lambda: [[-2.6, 4.6], [-8.1, 4.7], [0.0, 3.1]])
+    base_cell_size: float = 0.4
+    per_level_scale: float = 2.0
+    n_levels: int = 2
+    # n_scenes: int = 122
+    # n_scenes: int = 173
+    n_scenes: int = 161
+    second_order_grid_sample: bool = False
+
+
+@dataclass
+class GridCfg:
+    name: str = "grid_net"
+    spatial_dim: int = 3
+    grid: GridDefinition = field(default_factory=GridDefinition)
 
 
 @dataclass
@@ -66,7 +77,7 @@ class Config:
     optimizer_kwargs: dict
     data: DataConfig
     clip_model: ClipModelConfig
-    voxel_hash_table: VoxelHashTableConfig
+    grid_cfg: GridCfg
     depth_downsample_method: str  # "nearest-exact", "nearest", "avg2d", "avg3d"
     decoder_hidden_dim: int
     decoder_output_dim: int
@@ -79,7 +90,7 @@ class Config:
         out = vars(self)
         out["data"] = vars(self.data)
         out["clip_model"] = vars(self.clip_model)
-        out["voxel_hash_table"] = vars(self.voxel_hash_table)
+        out["grid_cfg"] = vars(self.grid_cfg)
         return out
 
 

@@ -123,7 +123,14 @@ def make_env(
             stacking_keys=(
                 ["all_depth"]
                 if env_cfg.cat_pixels
-                else ["fetch_hand_depth", "fetch_hand_rgb", "fetch_head_depth", "fetch_head_rgb", "fetch_hand_pose", "fetch_head_pose"]
+                else [
+                    "fetch_hand_depth",
+                    "fetch_hand_rgb",
+                    "fetch_head_depth",
+                    "fetch_head_rgb",
+                    "fetch_hand_pose",
+                    "fetch_head_pose",
+                ]
             ),
         )
     elif env_cfg.stack is not None:

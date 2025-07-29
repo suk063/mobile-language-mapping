@@ -1,0 +1,72 @@
+seed: 0
+torch_deterministic: false
+device: cuda
+epochs: 20
+optimizer: Adam
+optimizer_kwargs:
+    lr: 0.001
+data:
+    files:
+        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/pick/all_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/place/all_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/set_table/pick/all_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/set_table/place/all_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/pick/all_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/place/all_static.pt
+    clip_cache_files:
+        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/pick/all_static_masked_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/place/all_static_masked_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/set_table/pick/all_static_masked_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/set_table/place/all_static_masked_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/pick/all_static_masked_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/place/all_static_masked_clip.pt
+    load_clip_cache: true
+    mask_out_classes:
+        - root_arm_1_link_1
+        - root_arm_1_link_2
+        - base_link
+        - r_wheel_link
+        - l_wheel_link
+        - torso_lift_link
+        - head_pan_link
+        - head_tilt_link
+        - head_camear_link
+        - head_camera_rgb_frame
+        - head_camera_rgb_optical_frame
+        - head_camera_depth_frame
+        - head_camera_depth_optical_frame
+        - shoulder_pan_link
+        - shoulder_lift_link
+        - upperarm_roll_link
+        - elbow_flex_link
+        - forearm_roll_link
+        - wrist_flex_link
+        - wrist_roll_link
+        - gripper_link
+        - r_gripper_finger_link
+        - l_gripper_finger_link
+        - bellows_link
+        - bellows_link2
+        - estop_link
+        - laser_link
+        - torso_fixed_link
+    valid_ratio: 0.1
+    batch_size: 256
+    num_workers: 16
+    multiprocessing_context: fork
+clip_model:
+    model_name: EVA02-L-14
+    model_pretrained: merged2b_s4b_b131k
+voxel_hash_table:
+    resolution: 0.12
+    hash_table_size: 2097152  # 2**21
+    voxel_feature_dim: 240
+    scene_bound_min: [-2.6, -8.1, 0.0]
+    scene_bound_max: [4.6, 4.7, 3.1]
+depth_downsample_method: nearest
+decoder_hidden_dim: 240
+decoder_output_dim: 768
+output_dir: /home/daizhirui/results/mobile_language_mapping/static_mapping/nearest
+valid_interval: 1000
+ckpt_interval: 1
+test_model_dir:
