@@ -1,6 +1,7 @@
 seed: 0
 torch_deterministic: false
-device: cuda
+device_clip: cuda:1
+device_decoder: cuda:0
 epochs: 20
 optimizer: Adam
 optimizer_kwargs:
@@ -51,22 +52,33 @@ data:
         - laser_link
         - torso_fixed_link
     valid_ratio: 0.1
-    batch_size: 256
+    batch_size: 32
     num_workers: 16
     multiprocessing_context: fork
+    build_config_names: [v3_sc1_staging_13.scene_instance.json]
 clip_model:
     model_name: EVA02-L-14
     model_pretrained: merged2b_s4b_b131k
-voxel_hash_table:
-    resolution: 0.12
-    hash_table_size: 2097152  # 2**21
-    voxel_feature_dim: 240
-    scene_bound_min: [-2.6, -8.1, 0.0]
-    scene_bound_max: [4.6, 4.7, 3.1]
+grid_cfg:
+    name: grid_net
+    spatial_dim: 3
+    grid:
+        type: regular
+        feature_dim: 60
+        init_stddev: 0.2
+        bound:
+            - [-2.6, 4.6]
+            - [-8.1, 4.7]
+            - [0.0, 3.1]
+        base_cell_size: 0.4
+        per_level_scale: 2.0
+        n_levels: 2
+        n_scenes: 440
+        second_order_grid_sample: false
 depth_downsample_method: nearest
 decoder_hidden_dim: 240
 decoder_output_dim: 768
-output_dir: /home/daizhirui/results/mobile_language_mapping/static_mapping/nearest
+output_dir: /home/daizhirui/results/mobile_language_mapping/static_mapping_per_episode_masked/nearest
 valid_interval: 1000
 ckpt_interval: 1
 test_model_dir:

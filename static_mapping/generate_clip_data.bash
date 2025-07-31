@@ -1,8 +1,8 @@
 #!/usr/bin/bash
 
-
+set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="/home/daizhirui/data/mobile_language_mapping"
+DATA_DIR="${HOME}/Data/mobile_language_mapping"
 export PYTHONPATH=${SCRIPT_DIR}/..
 for file in $(find ${DATA_DIR}/ -name "all_static.pt"); do
     echo ${file}

@@ -3,7 +3,7 @@ import os
 import pickle
 import sys
 from dataclasses import dataclass
-from typing import Union
+from typing import Optional, Union
 
 import gymnasium as gym
 import h5py
@@ -37,84 +37,10 @@ from mshab.utils.config import parse_cfg
 
 image_height = 224
 image_width = 224
-oRc = torch.tensor(  # rotation matrix from camera to optical frame
-    [
-        [0.0, -1.0, 0.0],
-        [0.0, 0.0, -1.0],
-        [1.0, 0.0, 0.0],
-    ],
-    dtype=torch.float32,
-)
 
 
 def get_tqdm_bar(iterable, desc: str, leave: bool = True):
     return tqdm(iterable, desc=desc, ncols=80, leave=leave)
-
-
-def extrinsic_to_cam_pose(extrinsic: torch.Tensor) -> torch.Tensor:
-    global oRc
-    oRc = oRc.to(extrinsic.device)
-    cam_pose = torch.zeros_like(extrinsic)
-    cam_pose[:3, :3] = extrinsic[:3, :3].T @ oRc
-    cam_pose[:3, 3] = -extrinsic[:3, :3].T @ extrinsic[:3, 3]
-    if cam_pose.shape[0] == 4:
-        cam_pose[3, 3] = 1.0  # homogeneous coordinate
-    return cam_pose
-
-
-def cam_pose_to_extrinsic(cam_pose: torch.Tensor) -> torch.Tensor:
-    global oRc
-    oRc = oRc.to(cam_pose.device)
-    extrinsic = torch.zeros_like(cam_pose)
-    extrinsic[:3, :3] = oRc @ cam_pose[:3, :3].T
-    extrinsic[:3, 3] = -extrinsic[:3, :3] @ cam_pose[:3, 3]
-    if extrinsic.shape[0] == 4:
-        extrinsic[3, 3] = 1.0
-    return extrinsic
-
-
-def transform_matrix_to_sapien_pose(matrix: torch.Tensor) -> sapien.Pose:
-    matrix = matrix.detach().cpu().numpy()
-    q = t3d.quaternions.mat2quat(matrix[:3, :3])
-    p = matrix[:3, 3]
-    return sapien.Pose(p=p, q=q)
-
-
-def depth_to_positions(
-    depth: torch.Tensor,
-    intrinsic: torch.Tensor,
-    extrinsic: torch.Tensor = None,
-    depth_scale: float = 1.0,
-) -> torch.Tensor:
-    h, w = depth.shape[0], depth.shape[1]
-    device = depth.device
-    dtype = intrinsic.dtype
-    depth = depth.to(dtype)
-    if depth_scale != 1.0:
-        depth = depth * depth_scale
-    # Create a grid of pixel coordinates
-    pix = torch.stack(
-        [
-            *torch.meshgrid(  # +0.5 to get pixel centers instead of corners
-                torch.arange(h, dtype=dtype) + 0.5,
-                torch.arange(w, dtype=dtype) + 0.5,
-                indexing="xy",
-            ),
-            torch.ones(h, w, dtype=dtype),  # homogeneous coordinate
-        ],
-        dim=-1,  # shape (H, W, 3)
-    ).to(device)
-    # pixel coordinates to normalized device coordinates
-    # Note: This assumes the camera's principal point is at the center of the image
-    pix = pix @ torch.linalg.inv(intrinsic).T  # shape (H, W, 3)
-    # Scale by depth to get 3D points in camera coordinates
-    pix = pix * depth[..., torch.newaxis]  # shape (H, W, 3)
-    if extrinsic is not None:
-        # Now we have 3D points in camera coordinates, we need to transform them to world coordinates
-        rot = extrinsic[:3, :3]
-        t = -rot.T @ extrinsic[:3, 3]
-        pix = pix @ rot + t
-    return pix  # shape (H, W, 3) now in world coordinates
 
 
 class FakeLink:
@@ -369,6 +295,9 @@ class Config:
     load_agent: bool
     hide_episode_objects: bool
     truncate_trajectory_at_success: bool
+    fixed_task_plan_idx: int
+    fixed_init_config_idx: int
+    fixed_spawn_selection_idx: int
     visualize: bool
     visualize_rgb_gt: bool
     traj_h5: str
@@ -437,21 +366,29 @@ class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-        os.makedirs(os.path.dirname(self.cfg.output_file), exist_ok=True)
+        if self.cfg.load_agent:
+            msg = "Loading agent in the environment. The agent actions will affect the scene."
+            bar = f"{'WARNING':=^80}"
+            print(bar)
+            print(f"{msg:^80}")
+            print(bar)
 
-        # cache_file = "/home/daizhirui/results/mobile_language_mapping/cache.pkl"
-        # if os.path.exists(cache_file):
-        #     with open(cache_file, "rb") as f:
-        #         self.sensor_poses, self.actions, self.rgb_gt = pickle.load(f)
-        # else:
-        #     self.sensor_poses, self.actions, self.rgb_gt = (
-        #         self.load_poses_and_actions_from_h5()
-        #     )
-        #     os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-        #     with open(cache_file, "wb") as f:
-        #         pickle.dump((self.sensor_poses, self.actions, self.rgb_gt), f)
+        output_dir = os.path.dirname(self.cfg.output_file)
+        os.makedirs(output_dir, exist_ok=True)
 
-        self.sensor_poses, self.actions, self.rgb_gt = self.load_info_from_h5()
+        if self.cfg.visualize and self.cfg.visualize_rgb_gt:
+            # use cache to speed up loading
+            cache_file = os.path.join(output_dir, "cache.pkl")
+            if os.path.exists(cache_file):
+                with open(cache_file, "rb") as f:
+                    self.sensor_poses, self.actions, self.rgb_gt = pickle.load(f)
+            else:
+                self.sensor_poses, self.actions, self.rgb_gt = self.load_info_from_h5()
+                os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+                with open(cache_file, "wb") as f:
+                    pickle.dump((self.sensor_poses, self.actions, self.rgb_gt), f)
+        else:
+            self.sensor_poses, self.actions, self.rgb_gt = self.load_info_from_h5()
 
         actions_0 = next(iter(self.actions.values()))
         self.actions_shape = actions_0.shape[1:]
@@ -535,9 +472,18 @@ class App:
 
     def read_episode_fp(self):
         with open(self.cfg.episode_fp, "r") as f:
-            data = json.load(f)
-        seed = data["episodes"][0]["episode_seed"][0]
-        episode_configs = [(episode["task_plan_idx"], episode["spawn_selection_idx"]) for episode in data["episodes"]]
+            episode_data = json.load(f)
+        seed = episode_data["episodes"][0]["episode_seed"][0]
+        episode_configs = [
+            {k: episode[k] for k in ["task_plan_idx", "init_config_idx", "spawn_selection_idx", "subtask_uid"]}
+            for episode in episode_data["episodes"]
+        ]
+        with open(self.cfg.eval_env.task_plan_fp, "r") as f:
+            plan_data = json.load(f)["plans"]
+        for episode_config in episode_configs:
+            tp = plan_data[episode_config["task_plan_idx"]]
+            episode_config["build_config_name"] = tp["build_config_name"]
+            episode_config["init_config_name"] = tp["init_config_name"]
         return seed, episode_configs
 
     def make_env(self):
@@ -627,20 +573,35 @@ class App:
         self.extrinsic_data = {k: [[] for _ in range(num_envs)] for k in sensor_names}
 
         for step in get_tqdm_bar(range(self.max_traj_len), "Steps", False):
-            self.unwrapped.step(self.traj_actions[:, step])  # step the env
-            # self.scene.step()
+            if self.cfg.load_agent:
+                self.unwrapped.step(self.traj_actions[:, step])  # step the env
             for sensor_name, poses in self.traj_sensor_poses.items():
                 self.collect_sensor_obs(step, sensor_name, poses)
 
     def process_batch(self, traj_start_idx: int, traj_end_idx: int):
-        task_plan_idxs = torch.tensor([self.episode_configs[i][0] for i in range(traj_start_idx, traj_end_idx)]).int()
-        spawn_selection_idxs = [self.episode_configs[i][1] for i in range(traj_start_idx, traj_end_idx)]
+        if self.cfg.fixed_task_plan_idx >= 0:
+            task_plan_idxs = torch.tensor([self.cfg.fixed_task_plan_idx] * (traj_end_idx - traj_start_idx)).int()
+        else:
+            task_plan_idxs = torch.tensor(
+                [self.episode_configs[i]["task_plan_idx"] for i in range(traj_start_idx, traj_end_idx)]
+            ).int()
+        if self.cfg.fixed_init_config_idx >= 0:
+            init_config_idxs = [self.cfg.fixed_init_config_idx] * (traj_end_idx - traj_start_idx)
+        else:
+            init_config_idxs = [self.episode_configs[i]["init_config_idx"] for i in range(traj_start_idx, traj_end_idx)]
+        if self.cfg.fixed_spawn_selection_idx >= 0:
+            spawn_selection_idxs = [self.cfg.fixed_spawn_selection_idx] * (traj_end_idx - traj_start_idx)
+        else:
+            spawn_selection_idxs = [
+                self.episode_configs[i]["spawn_selection_idx"] for i in range(traj_start_idx, traj_end_idx)
+            ]
         # reset
         self.unwrapped.reset(
             self.seed,
             dict(
                 reconfigure=True,
                 task_plan_idxs=task_plan_idxs,
+                init_config_idxs=init_config_idxs,
                 spawn_selection_idxs=spawn_selection_idxs,
             ),
         )
@@ -687,8 +648,7 @@ class App:
 
                 if self.cfg.visualize:
                     self.visualize(traj_idx, sensor_name, traj_sensor_data[sensor_name])
-            traj_sensor_data["task_plan_idx"] = self.episode_configs[traj_idx][0]
-            traj_sensor_data["spawn_selection_idx"] = self.episode_configs[traj_idx][1]
+            traj_sensor_data.update(self.episode_configs[traj_idx])
             output[f"traj_{traj_idx}"] = traj_sensor_data
 
     def save_as_pt(self):
@@ -708,6 +668,7 @@ class App:
             bbox_max=torch.from_numpy(self.unwrapped.scene_bounding_box[1]).float(),
         )
         output["seed"] = self.seed
+        output["episode_configs"] = self.episode_configs
         torch.save(output, self.cfg.output_file)
 
     def save_to_h5(self, f: h5py.File, traj_start_idx: int, traj_end_idx: int):
@@ -747,6 +708,12 @@ class App:
         f.flush()
 
     def save_as_h5(self):
+        msg = "Deprecated as other tools prefer PyTorch format. Use save_as_pt() instead."
+        bar = f"{'WARNING':=^80}"
+        print(bar)
+        print(f"{msg:^80}")
+        print(bar)
+
         f = h5py.File(self.cfg.output_file, "w")
         num_envs = self.cfg.eval_env.num_envs
         num_traj = len(self.episode_configs)
@@ -765,6 +732,10 @@ class App:
         bbox_group = f.create_group("scene_bounding_box")
         bbox_group.attrs["bbox_min"] = bbox_min
         bbox_group.attrs["bbox_max"] = bbox_max
+
+        f.attrs["seed"] = self.seed
+        f.attrs["episode_configs"] = json.dumps(self.episode_configs)
+
         f.flush()
         f.close()
 

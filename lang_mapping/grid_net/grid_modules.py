@@ -3,8 +3,10 @@ import torch
 import torch.nn.functional as F
 import logging
 from .utils import all_grid_positions, normalize_coordinates, denormalize_coordinates
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
 
 class FeatureGridBase(torch.nn.Module):
     def __init__(self, d, fdim, bound, cell_size, name="grid", dtype=torch.float32):
@@ -12,25 +14,31 @@ class FeatureGridBase(torch.nn.Module):
         assert d == 2 or d == 3
         self.d = d
         self.fdim = fdim
-        self.bound = bound
+        self.bound = torch.nn.Buffer(bound)
         self.cell_size = cell_size
         self.dtype = dtype
         self.name = name
         assert self.bound.shape == (d, 2)
+
     def interpolate(self, x):
         raise NotImplementedError
+
     def norm(self):
         raise NotImplementedError
+
     def num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
     def lock(self):
-        #logger.debug(f"Locked grid: {self.name}.")
+        # logger.debug(f"Locked grid: {self.name}.")
         for param in self.parameters():
             param.requires_grad = False
+
     def unlock(self):
-        #logger.debug(f"Unlocked grid: {self.name}.")
+        # logger.debug(f"Unlocked grid: {self.name}.")
         for param in self.parameters():
             param.requires_grad = True
+
     def zero_features(self):
         raise NotImplementedError
 
@@ -39,9 +47,21 @@ class FeatureGrid(FeatureGridBase):
     """Regular (dense) 2D/3D feature grid, where each voxel stores a latent feature of
     dimension fdim.
     """
-    def __init__(self, d, fdim, bound, cell_size, name="grid", dtype=torch.float32, initial_feature=None, init_stddev=0.0, second_order_grid_sample=False):
+
+    def __init__(
+        self,
+        d,
+        fdim,
+        bound,
+        cell_size,
+        name="grid",
+        dtype=torch.float32,
+        initial_feature=None,
+        init_stddev=0.0,
+        second_order_grid_sample=False,
+    ):
         super().__init__(d=d, fdim=fdim, bound=bound, cell_size=cell_size, name=name, dtype=dtype)
-        grid_len = (self.bound[:,1] - self.bound[:,0]).cpu().numpy()
+        grid_len = (self.bound[:, 1] - self.bound[:, 0]).cpu().numpy()
         grid_size = np.ceil(grid_len / cell_size).astype(int)
         # Initialize 2D or 3D feature grid
         # Notice that we change the order of grid_size due to the behavior of grid_sample
@@ -59,7 +79,9 @@ class FeatureGrid(FeatureGridBase):
         self.feature = torch.nn.Parameter(initial_feature)
         # Use standard pytorch implementation
         self.grid_sample_func = F.grid_sample
-        logger.info(f"Regular {self.name}: cell_size={self.cell_size:.2f}, feature shape={feature_shape}, init_avail={init_avail}, 2nd_order_sample={second_order_grid_sample}, init_norm={initial_feature.norm():.1e}.")
+        logger.info(
+            f"Regular {self.name}: cell_size={self.cell_size:.2f}, feature shape={feature_shape}, init_avail={init_avail}, 2nd_order_sample={second_order_grid_sample}, init_norm={initial_feature.norm():.1e}."
+        )
 
     def interpolate(self, x):
         # Normalize query coordinates (required by F.grid_sample)
@@ -67,31 +89,25 @@ class FeatureGrid(FeatureGridBase):
         if self.d == 2:
             N = x.shape[0]
             sample_coords = x.reshape(1, N, 1, 2)
-            feats = self.grid_sample_func(
-                self.feature,
-                sample_coords, 
-                align_corners=False,
-                padding_mode='zeros'
-            )[0, :, :, 0].transpose(0, 1)
+            feats = self.grid_sample_func(self.feature, sample_coords, align_corners=False, padding_mode="zeros")[
+                0, :, :, 0
+            ].transpose(0, 1)
         else:
             N = x.shape[0]
             sample_coords = x.reshape(1, N, 1, 1, 3)
-            feats = self.grid_sample_func(
-                self.feature,
-                sample_coords,
-                align_corners=False,
-                padding_mode='zeros'
-            )[0, :, :, 0, 0].transpose(0, 1)
+            feats = self.grid_sample_func(self.feature, sample_coords, align_corners=False, padding_mode="zeros")[
+                0, :, :, 0, 0
+            ].transpose(0, 1)
         return feats
 
     def norm(self):
         return self.feature.norm()
-    
+
     def zero_features(self):
         logger.info(f"Set grid features to zero: {self.name}.")
         with torch.no_grad():
             self.feature.copy_(torch.zeros_like(self.feature))
-    
+
     def randn_features(self, std):
         logger.info(f"Set grid features to randn: {self.name}, std={std:.2e}.")
         with torch.no_grad():
@@ -103,7 +119,7 @@ class FeatureGrid(FeatureGridBase):
         Args:
             denormalize (bool, optional): Whether to denormalize positions. Defaults to True.
         Returns:
-            torch.Tensor: The 3D positions of grid vertices, unnormalized by default. 
+            torch.Tensor: The 3D positions of grid vertices, unnormalized by default.
         """
         pos_nrm = all_grid_positions(self.feature)
         pos_nrm = torch.flatten(pos_nrm.squeeze(), start_dim=0, end_dim=-2)  # N,3
@@ -111,17 +127,19 @@ class FeatureGrid(FeatureGridBase):
             return denormalize_coordinates(pos_nrm, self.bound.to(pos_nrm))
         else:
             return pos_nrm
-        
+
+
 class FeatureGridVM(FeatureGridBase):
     """3D feature grid store using low-rank VM factorization.
     Ref:
     Chen et al., TensoRF: Tensorial Radiance Fields
     """
+
     def __init__(self, d, fdim, bound, cell_size, name="grid", dtype=torch.float32, rank=10, init_stddev=0.0):
         super().__init__(d=d, fdim=fdim, bound=bound, cell_size=cell_size, name=name, dtype=dtype)
         assert self.d == 3, "VM factorization only supports 3D grid!"
         self.rank = rank
-        grid_len = (self.bound[:,1] - self.bound[:,0]).cpu().numpy()
+        grid_len = (self.bound[:, 1] - self.bound[:, 0]).cpu().numpy()
         grid_size = np.ceil(grid_len / cell_size).astype(int)
         xsize, ysize, zsize = grid_size
         # XY + Z decomp
@@ -134,7 +152,6 @@ class FeatureGridVM(FeatureGridBase):
         self.feats_YZ = torch.nn.Parameter(torch.randn((1, self.rank, zsize, ysize), dtype=self.dtype) * init_stddev)
         self.feats_X = torch.nn.Parameter(torch.randn((1, self.rank, xsize, 1), dtype=self.dtype) * init_stddev)
         logger.info(f"VM-{self.name}: cell_size={self.cell_size}, rank={self.rank}, num_param={self.num_params()}.")
-    
 
     def _interpolate_helper(self, feats, x_nrm):
         N, d = x_nrm.shape
@@ -147,49 +164,38 @@ class FeatureGridVM(FeatureGridBase):
             assert feats.shape[-1] == 1
         assert x_nrm.shape == (N, 2)
         sample_coords = x_nrm.reshape(1, N, 1, 2)
-        feats = F.grid_sample(
-            feats,
-            sample_coords, 
-            align_corners=False,
-            mode='bilinear',
-            padding_mode='zeros'
-        )[0, :, :, 0].transpose(0, 1)
+        feats = F.grid_sample(feats, sample_coords, align_corners=False, mode="bilinear", padding_mode="zeros")[
+            0, :, :, 0
+        ].transpose(0, 1)
         return feats
-
 
     def interpolate(self, x):
         # Normalize query coordinates (required by F.grid_sample)
         x = normalize_coordinates(x, self.bound)
 
         # Interpolate on XY+Z factors
-        coeffs_xy = self._interpolate_helper(self.feats_XY, x[:, [0,1]])
+        coeffs_xy = self._interpolate_helper(self.feats_XY, x[:, [0, 1]])
         coeffs_z = self._interpolate_helper(self.feats_Z, x[:, [2]])
         coeffs_xy_z = coeffs_xy * coeffs_z  # (N, R)
-        
+
         # Interpolate on XZ+Y factors
-        coeffs_xz = self._interpolate_helper(self.feats_XZ, x[:, [0,2]])
+        coeffs_xz = self._interpolate_helper(self.feats_XZ, x[:, [0, 2]])
         coeffs_y = self._interpolate_helper(self.feats_Y, x[:, [1]])
         coeffs_xz_y = coeffs_xz * coeffs_y
 
         # Interpolate on YZ+X factors
-        coeffs_yz = self._interpolate_helper(self.feats_YZ, x[:, [1,2]])
+        coeffs_yz = self._interpolate_helper(self.feats_YZ, x[:, [1, 2]])
         coeffs_x = self._interpolate_helper(self.feats_X, x[:, [0]])
         coeffs_yz_x = coeffs_yz * coeffs_x
 
-        coeffs_dict = {
-            'xy_z': coeffs_xy_z,
-            'xz_y': coeffs_xz_y,
-            'yz_x': coeffs_yz_x
-        }
+        coeffs_dict = {"xy_z": coeffs_xy_z, "xz_y": coeffs_xz_y, "yz_x": coeffs_yz_x}
 
         return coeffs_dict
-    
-    
+
     def norm(self):
         # TODO:
         logger.warning("norm for FeatureGridVM is not implemented!")
         return -1
-    
 
     # def visualize_planes(self, prefix_path):
     #     feats_XY = self.feats_XY.squeeze().permute([2, 1, 0])
@@ -206,7 +212,9 @@ class FeatureGridVM(FeatureGridBase):
 
 
 class BasisVM(torch.nn.Module):
-    def __init__(self, fdim, name="basis", dtype=torch.float32, rank=10, init_stddev=0.0, pretrained_path=None, no_optimize=False):
+    def __init__(
+        self, fdim, name="basis", dtype=torch.float32, rank=10, init_stddev=0.0, pretrained_path=None, no_optimize=False
+    ):
         super().__init__()
         self.rank = rank
         self.fdim = fdim
@@ -226,11 +234,11 @@ class BasisVM(torch.nn.Module):
 
     def forward(self, coeffs_dict):
         # coeffs: (N, R)
-        feats_xy_z = coeffs_dict['xy_z'] @ self.B_XY_Z.T  # (N, fdim)
-        feats_xz_y = coeffs_dict['xz_y'] @ self.B_XZ_Y.T 
-        feats_yz_x = coeffs_dict['yz_x'] @ self.B_YZ_X.T
+        feats_xy_z = coeffs_dict["xy_z"] @ self.B_XY_Z.T  # (N, fdim)
+        feats_xz_y = coeffs_dict["xz_y"] @ self.B_XZ_Y.T
+        feats_yz_x = coeffs_dict["yz_x"] @ self.B_YZ_X.T
         return feats_xy_z + feats_xz_y + feats_yz_x
-    
+
     def save(self, filepath):
         torch.save(self.state_dict(), filepath)
 

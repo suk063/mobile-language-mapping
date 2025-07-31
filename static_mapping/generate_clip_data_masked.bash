@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="/home/daizhirui/Data/mobile_language_mapping"
+DATA_DIR="${HOME}/Data/mobile_language_mapping"
 export PYTHONPATH=${SCRIPT_DIR}/..
 for file in $(find ${DATA_DIR}/ -name "all_static.pt"); do
     echo ${file}
@@ -25,7 +25,7 @@ for file in $(find ${DATA_DIR}/ -name "all_static.pt"); do
             torso_lift_link \
             head_pan_link \
             head_tilt_link \
-            head_camear_link \
+            head_camera_link \
             head_camera_rgb_frame \
             head_camera_rgb_optical_frame \
             head_camera_depth_frame \

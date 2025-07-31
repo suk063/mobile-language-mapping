@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import reduce
 from typing import Optional
-import matplotlib.pyplot as plt
+
 import open_clip
 import torch
 from tqdm import tqdm
@@ -50,6 +50,8 @@ def generate_clip_data(cfg: Config):
             continue
         traj_output = dict()
         for sensor_name, sensor_data in traj_data.items():
+            if not isinstance(sensor_data, dict):
+                continue
             n = sensor_data["depth"].shape[0]
             clip_features = []
             for i in range(0, n, bs):
@@ -57,7 +59,7 @@ def generate_clip_data(cfg: Config):
                 rgb = sensor_data["rgb"][i:j].permute(0, 3, 1, 2)
 
                 segmentation = sensor_data["segmentation"][i:j]
-                segmentation = segmentation.squeeze(3).unsqueeze(1)
+                segmentation = segmentation.unsqueeze(1)
                 for seg_id in mask_out_ids:
                     rgb[segmentation == seg_id] = 0
 

@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_DIR=/home/daizhirui/results/mobile_language_mapping/static_mapping
+OUTPUT_DIR=/home/daizhirui/results/mobile_language_mapping/static_mapping_masked
 export PYTHONPATH=${SCRIPT_DIR}/..
 
 set -x

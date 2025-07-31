@@ -1,12 +1,15 @@
+import json
 import os.path
 import random
 import sys
 from collections import defaultdict
+from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from functools import reduce
 from typing import Optional, Union
-from dataclasses import field
+
 import h5py
 import numpy as np
 import open_clip
@@ -18,8 +21,7 @@ from ruamel import yaml
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
 
-from lang_mapping.mapper.mapper import VoxelHashTable
-
+from lang_mapping.grid_net import GridNet
 from lang_mapping.module import ImplicitDecoder
 from lang_mapping.utils import get_visual_features
 from mshab.utils.config import parse_cfg
@@ -33,6 +35,8 @@ class DataConfig:
     clip_cache_files: list[str]
     load_clip_cache: bool
     mask_out_classes: list[str]
+    build_config_names: Optional[list[str]]
+    sensor_names: list[str]
     valid_ratio: float
     batch_size: int
     num_workers: int
@@ -66,12 +70,18 @@ class GridCfg:
     spatial_dim: int = 3
     grid: GridDefinition = field(default_factory=GridDefinition)
 
+    def as_dict(self):
+        out = vars(self)
+        out["grid"] = vars(self.grid)
+        return out
+
 
 @dataclass
 class Config:
     seed: int
     torch_deterministic: bool
-    device: str
+    device_clip: str
+    device_decoder: str
     epochs: int
     optimizer: str
     optimizer_kwargs: dict
@@ -90,7 +100,7 @@ class Config:
         out = vars(self)
         out["data"] = vars(self.data)
         out["clip_model"] = vars(self.clip_model)
-        out["grid_cfg"] = vars(self.grid_cfg)
+        out["grid_cfg"] = self.grid_cfg.as_dict()
         return out
 
 
@@ -107,11 +117,16 @@ class StaticMappingDataset(ClosableDataset):
         self.clip_cache_fps: list[Union[dict, h5py.File]] = []
         self.mask_out_ids: list[list[int]] = []
         self.records = []
+        self.episode_configs: list[dict] = []
+        self.scene_ids: dict[str, int] = {}
+
+        self._open_fps()
+        self._build_scene_ids()
+
         if records is not None:
             self.records = records
-            self._open_fps()
         else:
-            self.load()
+            self._create_records()
 
     def __del__(self):
         self.close()
@@ -188,16 +203,40 @@ class StaticMappingDataset(ClosableDataset):
         else:
             raise ValueError(f"Unsupported file format: {file}")
 
-    def load(self):
+    def _build_scene_ids(self):
+        # build the scene_ids for grid_net
+        init_config_names = set()
+        self.episode_configs = []
+        for fp in self.fps:
+            if isinstance(fp, h5py.File):
+                episode_configs = json.loads(fp.attrs["episode_configs"])
+            else:
+                episode_configs = fp["episode_configs"]
+            for episode_config in episode_configs:
+                init_config_names.add(episode_config["init_config_name"])
+            self.episode_configs.append(
+                {f"traj_{i}": episode_config for i, episode_config in enumerate(episode_configs)}
+            )
+        init_config_names = sorted(list(init_config_names))
+        self.scene_ids = {init_config_name: i for i, init_config_name in enumerate(init_config_names)}
+
+    def _create_records(self):
         tqdm.write("Loading data from files...")
-        self._open_fps()
 
         for fp_idx, fp in tqdm(list(enumerate(self.fps)), desc="Files", ncols=80):
+            episode_configs = self.episode_configs[fp_idx]
             for traj_name in fp.keys():
                 if not traj_name.startswith("traj"):
                     continue
+                build_config_name = episode_configs[traj_name]["build_config_name"]
+                if self.cfg.build_config_names is not None and build_config_name not in self.cfg.build_config_names:
+                    tqdm.write(
+                        f"Skipping trajectory {traj_name} in file {fp_idx} "
+                        f"due to build config name {build_config_name} not in allowed list."
+                    )
+                    continue
                 traj_data = fp[traj_name]
-                for sensor_name in traj_data.keys():
+                for sensor_name in self.cfg.sensor_names:
                     sensor_data = traj_data[sensor_name]
                     n = sensor_data["rgb"].shape[0]
                     self.records += [(fp_idx, traj_name, sensor_name, i) for i in range(n)]
@@ -217,7 +256,13 @@ class StaticMappingDataset(ClosableDataset):
         fp = self.fps[fp_idx]
         sensor_data = fp[traj_name][sensor_name]
 
-        out = dict(extrinsic=self.to_tensor(sensor_data["extrinsic"][i]))
+        out = dict(
+            extrinsic=self.to_tensor(sensor_data["extrinsic"][i]),
+            scene_ids=torch.tensor(
+                self.scene_ids[self.episode_configs[fp_idx][traj_name]["init_config_name"]],
+                dtype=torch.int32,
+            ),
+        )
 
         depth = self.to_tensor(sensor_data["depth"][i])  # (h, w)
         mask_out_ids = self.mask_out_ids[fp_idx]
@@ -348,10 +393,14 @@ class Pipeline:
         torch.manual_seed(cfg.seed)
         torch.backends.cudnn.deterministic = cfg.torch_deterministic
 
-        device = torch.device(cfg.device)
-
         # Load datasets
         dataset = StaticMappingDataset(self.cfg.data)
+        if len(dataset.scene_ids) != self.cfg.grid_cfg.grid.n_scenes:
+            raise ValueError(
+                f"Number of scenes in dataset ({len(dataset.scene_ids)}) "
+                f"does not match grid_cfg.grid.n_scenes ({self.cfg.grid_cfg.grid.n_scenes})."
+            )
+
         self.train_dataset, self.valid_dataset = dataset.split(self.cfg.data.valid_ratio)
         self.train_loader = ClosableDataLoader(
             self.train_dataset,
@@ -385,26 +434,21 @@ class Pipeline:
             self.clip_model = open_clip.create_model_and_transforms(
                 self.cfg.clip_model.model_name,
                 self.cfg.clip_model.model_pretrained,
-            )[0].to(device)
+            )[0].to(self.cfg.device_clip)
             self.clip_model.eval()
-        self.hash_voxel = VoxelHashTable(
-            resolution=self.cfg.voxel_hash_table.resolution,
-            hash_table_size=self.cfg.voxel_hash_table.hash_table_size,
-            feature_dim=self.cfg.voxel_hash_table.voxel_feature_dim,
-            scene_bound_min=self.cfg.voxel_hash_table.scene_bound_min,
-            scene_bound_max=self.cfg.voxel_hash_table.scene_bound_max,
-            device=device,
-        ).to(device)
+        self.grid_net = GridNet(cfg=asdict(self.cfg.grid_cfg))
         self.implicit_decoder = ImplicitDecoder(
-            voxel_feature_dim=self.cfg.voxel_hash_table.voxel_feature_dim,
+            voxel_feature_dim=self.cfg.grid_cfg.grid.feature_dim * self.cfg.grid_cfg.grid.n_levels,
             hidden_dim=self.cfg.decoder_hidden_dim,
             output_dim=self.cfg.decoder_output_dim,
-        ).to(device)
+        ).to(self.cfg.device_decoder)
 
+    def train(self):
         # create optimizer
-        params = list(self.hash_voxel.parameters())
+        self.grid_net.distribute_to_devices()
+        params = list(self.grid_net.parameters())
         params += list(self.implicit_decoder.parameters())
-        self.optimizer = getattr(torch.optim, self.cfg.optimizer)(params, **self.cfg.optimizer_kwargs)
+        optimizer = getattr(torch.optim, self.cfg.optimizer)(params, **self.cfg.optimizer_kwargs)
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.cfg.output_dir = os.path.join(self.cfg.output_dir, timestamp)
@@ -414,8 +458,9 @@ class Pipeline:
         yaml_obj.indent(mapping=4, sequence=6, offset=4)
         with open(os.path.join(self.cfg.output_dir, "config.yaml"), "w") as f:
             yaml_obj.dump(self.cfg.as_dict(), f)
+        with open(os.path.join(self.cfg.output_dir, "scene_ids.yaml"), "w") as f:
+            yaml_obj.dump(self.train_dataset.scene_ids, f)
 
-    def train(self):
         batch_cnt = 0
         valid_loss_min = float("inf")
         for epoch in tqdm(range(self.cfg.epochs), desc="Epoch", ncols=80, position=0):
@@ -425,9 +470,9 @@ class Pipeline:
                 with torch.enable_grad():
                     result = self.forward_model(batch)
                     loss = result["loss"]
-                    self.optimizer.zero_grad()
+                    optimizer.zero_grad()
                     loss.backward()
-                    self.optimizer.step()
+                    optimizer.step()
 
                     loss = loss.item()
                     train_loss += loss
@@ -465,15 +510,14 @@ class Pipeline:
         return valid_loss
 
     def test(self):
-        state = torch.load(
-            os.path.join(self.cfg.test_model_dir, "hash_voxel.pt"),
-            map_location=self.cfg.device,
-        )
-        self.hash_voxel.load_state_dict(state["model"])
-        self.hash_voxel.eval()
+        assert self.cfg.test_model_dir is not None, "Test model directory must be specified."
+        state = torch.load(os.path.join(self.cfg.test_model_dir, "grid_net.pt"), map_location="cpu")
+        self.grid_net.to("cpu").load_state_dict(state["model"])
+        self.grid_net.distribute_to_devices()
+        self.grid_net.eval()
         state = torch.load(
             os.path.join(self.cfg.test_model_dir, "implicit_decoder.pt"),
-            map_location=self.cfg.device,
+            map_location=self.cfg.device_decoder,
         )
         self.implicit_decoder.load_state_dict(state["model"])
         self.implicit_decoder.eval()
@@ -483,19 +527,21 @@ class Pipeline:
     def setup_model(self, training=True):
         if self.clip_model is not None:
             self.clip_model.eval()
-        self.hash_voxel.train(training)
+        self.grid_net.train(training)
         self.implicit_decoder.train(training)
 
     def forward_model(self, batch: dict):
-        depth = batch["depth"].to(self.cfg.device) / 1000.0
-        extrinsic = batch["extrinsic"].to(self.cfg.device)
+        depth = batch["depth"].to(self.cfg.device_decoder) / 1000.0  # Convert depth from mm to m
+        extrinsic = batch["extrinsic"].to(self.cfg.device_decoder)
+        scene_ids = batch["scene_ids"].to(self.cfg.device_decoder)
 
         with torch.no_grad():
             if self.clip_model is None:
-                visual_features = batch["clip"].to(self.cfg.device)
+                visual_features = batch["clip"].to(self.cfg.device_decoder)
             else:
-                rgb = batch["rgb"].float().to(self.cfg.device) / 255.0
+                rgb = batch["rgb"].float().to(self.cfg.device_clip) / 255.0
                 visual_features = get_visual_features(self.clip_model, rgb)
+                visual_features = visual_features.to(self.cfg.device_decoder)
 
             coords_world = None
             original_size = depth.shape[-1]
@@ -531,16 +577,18 @@ class Pipeline:
                     self.cy,
                     original_size,
                 )[0]
-        mask = depth > 0.0
-        visual_features = visual_features[..., mask]  # [bs, c, h, w] -> [bs, c, n]
-        coords_world = coords_world[..., mask]  # [bs, 3, h, w] -> [bs, 3, n]
-        # bs, c, n -> bs * n, c
-        c = visual_features.shape[1]  # feature dim, e.g. 768 for EVA02-L-14
-        visual_features = visual_features.permute(0, 2, 1).reshape(-1, c)
-        # bs, 3, n -> bs * n, 3
-        coords_world = coords_world.permute(0, 2, 1).reshape(-1, 3)
 
-        voxel_features = self.hash_voxel.query_voxel_feature(coords_world)
+            h, w = coords_world.shape[-2:]
+            scene_ids = scene_ids.view(-1, 1, 1).expand(-1, h, w)
+
+            # bs, c, h, w -> n, c
+            mask = (depth > 0.0).flatten()  # [bs, h, w] -> [bs * h * w]
+            c = visual_features.shape[1]  # feature dim, e.g. 768 for EVA02-L-14
+            visual_features = visual_features.permute(0, 2, 3, 1).reshape(-1, c)[mask]
+            coords_world = coords_world.permute(0, 2, 3, 1).reshape(-1, 3)[mask]
+            scene_ids = scene_ids.flatten()[mask]
+
+        voxel_features = self.grid_net.query_feature(coords_world, scene_ids)
         decoded_features = self.implicit_decoder(voxel_features, coords_world)
         cos_sim = F.cosine_similarity(decoded_features, visual_features, dim=-1)
         loss = 1.0 - cos_sim.mean()
@@ -556,16 +604,21 @@ class Pipeline:
         folder = os.path.join(self.cfg.output_dir, name)
         os.makedirs(folder, exist_ok=True)
 
-        # --------------------------------------------
-        dense_path = os.path.join(folder, "hash_voxel_dense.pt")
-        sparse_path = os.path.join(folder, "hash_voxel_sparse.pt")
-        self.hash_voxel.save_dense(dense_path)  # full state_dict
-        self.hash_voxel.save_sparse(sparse_path)  # only accessed voxels
-
+        torch.save(
+            dict(model=self.grid_net.state_dict(), epoch=epoch),
+            os.path.join(folder, "grid_net.pt"),
+        )
         torch.save(
             dict(model=self.implicit_decoder.state_dict(), epoch=epoch),
             os.path.join(folder, "implicit_decoder.pt"),
         )
+
+    def run(self):
+        if self.cfg.test_model_dir is not None:
+            tqdm.write("Testing the model...")
+            self.test()
+            return
+        self.train()
 
 
 def main():
@@ -582,11 +635,7 @@ def main():
     else:
         torch.backends.cudnn.benchmark = True
     pipeline = Pipeline(cfg)
-    if cfg.test_model_dir is not None:
-        tqdm.write("Testing the model...")
-        pipeline.test()
-        return
-    pipeline.train()
+    pipeline.run()
 
 
 if __name__ == "__main__":
