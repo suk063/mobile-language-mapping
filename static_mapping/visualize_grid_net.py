@@ -45,10 +45,10 @@ class App:
 
         # Load datasets
         self.dataset = StaticMappingDataset(self.cfg.data)
-        if len(self.dataset.scene_ids) != self.cfg.grid_cfg.grid.n_scenes:
+        if len(self.dataset.scene_ids) != self.cfg.grid_cfg.grid_net.n_scenes:
             raise ValueError(
                 f"Number of scenes in dataset ({len(self.dataset.scene_ids)}) "
-                f"does not match grid_cfg.grid.n_scenes ({self.cfg.grid_cfg.grid.n_scenes})."
+                f"does not match grid_cfg.grid.n_scenes ({self.cfg.grid_cfg.grid_net.n_scenes})."
             )
         # self.dataset.scene_ids: episode_id -> scene_id (map_id)
         scene_ids = self.dataset.scene_ids
@@ -65,7 +65,7 @@ class App:
         # Create model
         self.grid_net = GridNet(cfg=asdict(self.cfg.grid_cfg))
         self.implicit_decoder = ImplicitDecoder(
-            voxel_feature_dim=self.cfg.grid_cfg.grid.feature_dim * self.cfg.grid_cfg.grid.n_levels,
+            voxel_feature_dim=self.cfg.grid_cfg.grid_net.feature_dim * self.cfg.grid_cfg.grid_net.n_levels,
             hidden_dim=self.cfg.decoder_hidden_dim,
             output_dim=self.cfg.decoder_output_dim,
         ).to(self.cfg.device_decoder)
@@ -94,10 +94,10 @@ class App:
         self.pcd_map = o3d.geometry.PointCloud()
         self.pcd_decoder = o3d.geometry.PointCloud()
         self.current_grid_map = self.app_cfg.init_grid_map_id
-        if self.current_grid_map < 0 or self.current_grid_map >= self.cfg.grid_cfg.grid.n_scenes:
+        if self.current_grid_map < 0 or self.current_grid_map >= self.cfg.grid_cfg.grid_net.n_scenes:
             raise ValueError(
                 f"Invalid initial grid map ID: {self.current_grid_map}. "
-                f"Must be in range [0, {self.cfg.grid_cfg.grid.n_scenes - 1}]."
+                f"Must be in range [0, {self.cfg.grid_cfg.grid_net.n_scenes - 1}]."
             )
         self._update_pcd()
         self.vis.add_geometry(self.pcd_color)
@@ -116,10 +116,10 @@ class App:
         """Navigate to the next grid map."""
         if action != 0:  # Only handle key press events
             return False
-        if self.current_grid_map < self.cfg.grid_cfg.grid.n_scenes - 1:
+        if self.current_grid_map < self.cfg.grid_cfg.grid_net.n_scenes - 1:
             self.current_grid_map += 1
             self._update_display()
-            print(f"Grid map: {self.current_grid_map + 1}/{self.cfg.grid_cfg.grid.n_scenes}")
+            print(f"Grid map: {self.current_grid_map + 1}/{self.cfg.grid_cfg.grid_net.n_scenes}")
         else:
             print("Already at the last grid map")
             return False
@@ -131,7 +131,7 @@ class App:
         if self.current_grid_map > 0:
             self.current_grid_map -= 1
             self._update_display()
-            print(f"Grid map: {self.current_grid_map + 1}/{self.cfg.grid_cfg.grid.n_scenes}")
+            print(f"Grid map: {self.current_grid_map + 1}/{self.cfg.grid_cfg.grid_net.n_scenes}")
         else:
             print("Already at the first grid map")
             return False
@@ -149,7 +149,7 @@ class App:
         data_ids = self.map_id_to_data_ids[self.current_grid_map]
         print(
             f"{len(data_ids)} frames are available for "
-            f"grid map {self.current_grid_map + 1}/{self.cfg.grid_cfg.grid.n_scenes}"
+            f"grid map {self.current_grid_map + 1}/{self.cfg.grid_cfg.grid_net.n_scenes}"
         )
         if self.app_cfg.frame_downsample_factor > 1:
             data_ids = random.sample(data_ids, len(data_ids) // self.app_cfg.frame_downsample_factor)
@@ -218,7 +218,7 @@ class App:
             return
 
         print(
-            f"Collected {len(vertices)} vertices for grid map {self.current_grid_map + 1}/{self.cfg.grid_cfg.grid.n_scenes}"
+            f"Collected {len(vertices)} vertices for grid map {self.current_grid_map + 1}/{self.cfg.grid_cfg.grid_net.n_scenes}"
         )
 
         # Update point cloud for color visualization

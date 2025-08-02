@@ -22,11 +22,15 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
 
 from lang_mapping.grid_net import GridNet
+from lang_mapping.mapper import MultiVoxelHashTable
 from lang_mapping.module import ImplicitDecoder
 from lang_mapping.utils import get_visual_features
 from mshab.utils.config import parse_cfg
 from mshab.utils.dataset import ClosableDataLoader
 from mshab.utils.dataset import ClosableDataset
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 
 @dataclass
@@ -58,21 +62,34 @@ class GridDefinition:
     base_cell_size: float = 0.4
     per_level_scale: float = 2.0
     n_levels: int = 2
-    # n_scenes: int = 122
-    # n_scenes: int = 173
-    n_scenes: int = 161
     second_order_grid_sample: bool = False
 
 
 @dataclass
+class VoxelHashTableConfig:
+    resolution: float  # finest cell size (e.g. 0.12)
+    num_levels: int  # pyramid depth (e.g. 2)
+    level_scale: float  # ratio between levels (e.g. 2.0)
+    voxel_feature_dim: int  # per-level feature width (e.g. 32)
+    hash_table_size: int  # buckets per level (power of two)
+    scene_bound_min: list[float]  # xyz lower corner
+    scene_bound_max: list[float]  # xyz upper corner
+
+
+@dataclass
 class GridCfg:
-    name: str = "grid_net"
+    name: str = "grid_net"  # grid_net or voxel_hash_table
     spatial_dim: int = 3
-    grid: GridDefinition = field(default_factory=GridDefinition)
+    n_scenes: int = 161
+    grid_net: Optional[GridDefinition] = None
+    voxel_hash_table: Optional[VoxelHashTableConfig] = None
 
     def as_dict(self):
         out = vars(self)
-        out["grid"] = vars(self.grid)
+        if self.grid_net is not None:
+            out["grid_net"] = vars(self.grid_net)
+        if self.voxel_hash_table is not None:
+            out["voxel_hash_table"] = vars(self.voxel_hash_table)
         return out
 
 
@@ -395,10 +412,10 @@ class Pipeline:
 
         # Load datasets
         dataset = StaticMappingDataset(self.cfg.data)
-        if len(dataset.scene_ids) != self.cfg.grid_cfg.grid.n_scenes:
+        if len(dataset.scene_ids) != self.cfg.grid_cfg.n_scenes:
             raise ValueError(
                 f"Number of scenes in dataset ({len(dataset.scene_ids)}) "
-                f"does not match grid_cfg.grid.n_scenes ({self.cfg.grid_cfg.grid.n_scenes})."
+                f"does not match grid_cfg.n_scenes ({self.cfg.grid_cfg.n_scenes})."
             )
 
         self.train_dataset, self.valid_dataset = dataset.split(self.cfg.data.valid_ratio)
@@ -436,12 +453,35 @@ class Pipeline:
                 self.cfg.clip_model.model_pretrained,
             )[0].to(self.cfg.device_clip)
             self.clip_model.eval()
-        self.grid_net = GridNet(cfg=asdict(self.cfg.grid_cfg))
-        self.implicit_decoder = ImplicitDecoder(
-            voxel_feature_dim=self.cfg.grid_cfg.grid.feature_dim * self.cfg.grid_cfg.grid.n_levels,
-            hidden_dim=self.cfg.decoder_hidden_dim,
-            output_dim=self.cfg.decoder_output_dim,
-        ).to(self.cfg.device_decoder)
+        if self.cfg.grid_cfg.name == "voxel_hash_table":
+            assert self.cfg.grid_cfg.voxel_hash_table is not None, "voxel_hash_table config must be provided"
+            vht_cfg = self.cfg.grid_cfg.voxel_hash_table
+            self.grid_net = MultiVoxelHashTable(
+                n_scenes=self.cfg.grid_cfg.n_scenes,
+                resolution=vht_cfg.resolution,
+                num_levels=vht_cfg.num_levels,
+                level_scale=vht_cfg.level_scale,
+                feature_dim=vht_cfg.voxel_feature_dim,
+                hash_table_size=vht_cfg.hash_table_size,
+                scene_bound_min=vht_cfg.scene_bound_min,
+                scene_bound_max=vht_cfg.scene_bound_max,
+            )
+            self.implicit_decoder = ImplicitDecoder(
+                voxel_feature_dim=vht_cfg.voxel_feature_dim * vht_cfg.num_levels,
+                hidden_dim=self.cfg.decoder_hidden_dim,
+                output_dim=self.cfg.decoder_output_dim,
+            ).to(self.cfg.device_decoder)
+        elif self.cfg.grid_cfg.name == "grid_net":
+            assert self.cfg.grid_cfg.grid_net is not None, "grid_cfg.grid must be specified for grid_net"
+            grid_cfg = self.cfg.grid_cfg.grid_net
+            self.grid_net = GridNet(cfg=asdict(grid_cfg))
+            self.implicit_decoder = ImplicitDecoder(
+                voxel_feature_dim=grid_cfg.feature_dim * grid_cfg.n_levels,
+                hidden_dim=self.cfg.decoder_hidden_dim,
+                output_dim=self.cfg.decoder_output_dim,
+            ).to(self.cfg.device_decoder)
+        else:
+            raise ValueError(f"Unknown grid_cfg.name: {self.cfg.grid_cfg.name}")
 
     def train(self):
         # create optimizer
@@ -511,10 +551,18 @@ class Pipeline:
 
     def test(self):
         assert self.cfg.test_model_dir is not None, "Test model directory must be specified."
-        state = torch.load(os.path.join(self.cfg.test_model_dir, "grid_net.pt"), map_location="cpu")
-        self.grid_net.to("cpu").load_state_dict(state["model"])
+        self.grid_net.to("cpu")
+        if isinstance(self.grid_net, MultiVoxelHashTable):
+            self.grid_net = MultiVoxelHashTable.load_sparse(
+                os.path.join(self.cfg.test_model_dir, "hash_voxel_sparse.pt")
+            )
+        else:
+            state = torch.load(os.path.join(self.cfg.test_model_dir, "grid_net.pt"), map_location="cpu")
+            self.grid_net.load_state_dict(state["model"])
+
         self.grid_net.distribute_to_devices()
         self.grid_net.eval()
+
         state = torch.load(
             os.path.join(self.cfg.test_model_dir, "implicit_decoder.pt"),
             map_location=self.cfg.device_decoder,
@@ -604,10 +652,17 @@ class Pipeline:
         folder = os.path.join(self.cfg.output_dir, name)
         os.makedirs(folder, exist_ok=True)
 
-        torch.save(
-            dict(model=self.grid_net.state_dict(), epoch=epoch),
-            os.path.join(folder, "grid_net.pt"),
-        )
+        if isinstance(self.grid_net, MultiVoxelHashTable):
+            dense_path = os.path.join(folder, "hash_voxel_dense.pt")
+            sparse_path = os.path.join(folder, "hash_voxel_sparse.pt")
+            self.grid_net.save_dense(dense_path)
+            self.grid_net.save_sparse(sparse_path)
+        else:
+            torch.save(
+                dict(model=self.grid_net.state_dict(), epoch=epoch),
+                os.path.join(folder, "grid_net.pt"),
+            )
+
         torch.save(
             dict(model=self.implicit_decoder.state_dict(), epoch=epoch),
             os.path.join(folder, "implicit_decoder.pt"),

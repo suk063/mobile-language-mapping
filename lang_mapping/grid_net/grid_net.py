@@ -1,13 +1,10 @@
-import os
 import numpy as np
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from .base_net import BaseNet
-from .grid_modules import *
+from lang_mapping.grid_net.base_net import BaseNet
+from lang_mapping.grid_net.grid_modules import *
 import logging
-from .utils import grid_interp_regular, grid_interp_VM
+from lang_mapping.grid_net.utils import grid_interp_regular, grid_interp_VM
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -18,7 +15,7 @@ class GridNet(BaseNet):
         super(GridNet, self).__init__(cfg, "cpu", dtype)
         self.devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
         self.initial_features = initial_features  # Allow to use initial guesses for features
-        self.n_scenes = cfg["grid"]["n_scenes"]
+        self.n_scenes = cfg["n_scenes"]
         self.init_grid(cfg)
 
     def distribute_to_devices(self):
@@ -31,13 +28,13 @@ class GridNet(BaseNet):
                 self.bases[scene_id].to(device)
 
     def init_grid(self, cfg):
-        self.num_levels = cfg["grid"]["n_levels"]
-        base_cell_size = cfg["grid"]["base_cell_size"]
-        scale_factor = cfg["grid"]["per_level_scale"]
-        self.fdim = cfg["grid"]["feature_dim"]
+        self.num_levels = cfg["n_levels"]
+        base_cell_size = cfg["base_cell_size"]
+        scale_factor = cfg["per_level_scale"]
+        self.fdim = cfg["feature_dim"]
         self.features = nn.ModuleList()
         self.bases = nn.ModuleList()
-        self.grid_type = cfg["grid"]["type"]
+        self.grid_type = cfg["type"]
         self.cell_sizes = []
         self.ignore_level_ = [np.zeros(self.num_levels).astype(bool) for _ in range(self.n_scenes)]
 
@@ -62,7 +59,7 @@ class GridNet(BaseNet):
                         name=f"scene{scene_idx}-feat-{level}",  # Naming includes scene_id
                         dtype=self.dtype,
                         initial_feature=init_feature,
-                        init_stddev=cfg["grid"]["init_stddev"],
+                        init_stddev=cfg["init_stddev"],
                     )
                     basis = None
                 elif self.grid_type == "VM":
@@ -73,16 +70,14 @@ class GridNet(BaseNet):
                         cell_size=cell_size,
                         name=f"{level}",
                         dtype=self.dtype,
-                        init_stddev=cfg["grid"]["init_stddev"],
-                        # rank=cfg['grid']['VM']['rank'],
-                        rank=cfg["grid"]["rank"],
+                        init_stddev=cfg["init_stddev"],
+                        rank=cfg["rank"],
                     )
                     basis = BasisVM(
                         fdim=self.fdim,
                         name=f"{level}",
-                        # rank=cfg['grid']['VM']['rank'],
-                        rank=cfg["grid"]["rank"],
-                        init_stddev=cfg["grid"]["init_stddev"],
+                        rank=cfg["rank"],
+                        init_stddev=cfg["init_stddev"],
                         dtype=self.dtype,
                         pretrained_path=None,
                         no_optimize=False,

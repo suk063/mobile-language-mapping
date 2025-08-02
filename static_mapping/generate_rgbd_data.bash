@@ -7,7 +7,7 @@ SEED=1
 TASK=${TASK:-set_table}
 SUBTASK=${SUBTASK:-pick}
 SPLIT=train
-OBJ=all
+OBJ=${OBJ:-all}
 
 # shader_dir: minimal, default, rt, rt-med, rt-fast. See: ManiSkill/mani_skill/render/shaders.py#L41
 
@@ -43,8 +43,8 @@ args=(
     "output_file=${OUTPUT_FILE}"
 )
 
+set -x
 if [ ! -f ${OUTPUT_FILE} ]; then
-    set -x
     CUDA_VISIBLE_DEVICES=${CUDA_DEVICE} python generate_rgbd_data.py \
         ${SCRIPT_DIR}/../configs/experiment/01_bc_pick_static.yml \
         "${args[@]}"

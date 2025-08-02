@@ -8,22 +8,22 @@ optimizer_kwargs:
     lr: 0.001
 data:
     files:
-        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/pick/all_static.pt
-        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/place/all_static.pt
-        - /home/daizhirui/Data/mobile_language_mapping/set_table/pick/all_static.pt
-        - /home/daizhirui/Data/mobile_language_mapping/set_table/place/all_static.pt
-        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/pick/all_static.pt
-        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/place/all_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/pick/all_10_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/pick/all_13_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/set_table/pick/all_10_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/set_table/pick/all_13_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/pick/all_10_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/pick/all_13_static.pt
     clip_cache_files:
-        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/pick/all_static_clip.pt
-        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/place/all_static_clip.pt
-        - /home/daizhirui/Data/mobile_language_mapping/set_table/pick/all_static_clip.pt
-        - /home/daizhirui/Data/mobile_language_mapping/set_table/place/all_static_clip.pt
-        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/pick/all_static_clip.pt
-        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/place/all_static_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/pick/all_10_static_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/prepare_groceries/pick/all_13_static_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/set_table/pick/all_10_static_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/set_table/pick/all_13_static_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/pick/all_10_static_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping/tidy_house/pick/all_13_static_clip.pt
     load_clip_cache: true
     mask_out_classes: []
-    build_config_names: [v3_sc1_staging_13.scene_instance.json]
+    build_config_names: [v3_sc1_staging_10.scene_instance.json,v3_sc1_staging_13.scene_instance.json]
     sensor_names: [fetch_hand, fetch_head]
     valid_ratio: 0.1
     batch_size: 32
@@ -33,10 +33,11 @@ clip_model:
     model_name: EVA02-L-14
     model_pretrained: merged2b_s4b_b131k
 grid_cfg:
-    name: grid_net
-    spatial_dim: 3
-    grid:
+    name: voxel_hash_table
+    n_scenes: 941
+    grid_net:
         type: regular
+        spatial_dim: 3
         feature_dim: 60
         init_stddev: 0.2
         bound:
@@ -46,8 +47,15 @@ grid_cfg:
         base_cell_size: 0.4
         per_level_scale: 2.0
         n_levels: 2
-        n_scenes: 440
         second_order_grid_sample: false
+    voxel_hash_table:
+        resolution: 0.21
+        num_levels: 2
+        level_scale: 2.0
+        hash_table_size: 2097152  # 2**21
+        voxel_feature_dim: 64
+        scene_bound_min: [-2.6, -8.1, 0.0]
+        scene_bound_max: [4.6, 4.7, 3.1]
 depth_downsample_method: nearest
 decoder_hidden_dim: 240
 decoder_output_dim: 768
