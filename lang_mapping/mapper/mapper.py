@@ -36,7 +36,9 @@ class _TrainLevel(nn.Module):
         ys = torch.arange(smin[1], smax[1], res, device=dev)
         zs = torch.arange(smin[2], smax[2], res, device=dev)
         gx, gy, gz = torch.meshgrid(xs, ys, zs, indexing="ij")
-        self.coords = torch.stack([gx, gy, gz], -1).view(-1, 3)  # (N,3)
+
+        self.register_buffer("coords", torch.stack([gx, gy, gz], -1).view(-1, 3), persistent=False)
+        self.coords: torch.Tensor
         self.N = self.coords.size(0)
 
         self.voxel_features = nn.Parameter(torch.zeros(self.N, d, device=dev).normal_(0, 0.01))
