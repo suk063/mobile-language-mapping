@@ -34,7 +34,7 @@ voxel_hash_table:
     num_levels: 2
     level_scale: 2.0
     hash_table_size: 2097152  # 2**21
-    voxel_feature_dim: 32
+    voxel_feature_dim: 64
     scene_bound_min: [-2.6, -8.1, 0.0]
     scene_bound_max: [4.6, 4.7, 3.1]
 depth_downsample_method: nearest-exact
