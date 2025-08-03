@@ -29,6 +29,7 @@ class _TrainLevel(nn.Module):
         super().__init__()
         self.res, self.d, self.buckets = res, d, buckets
         self.smin = torch.tensor(smin, device=dev, dtype=torch.float)
+        self.smax = torch.tensor(smax, device=dev, dtype=torch.float)
 
         self.register_buffer("primes", primes, persistent=False)
         self.primes: torch.Tensor
@@ -41,7 +42,7 @@ class _TrainLevel(nn.Module):
         self.register_buffer("coords", torch.stack([gx, gy, gz], -1).view(-1, 3), persistent=False)
         self.coords: torch.Tensor
         self.N = self.coords.size(0)
-
+        
         self.voxel_features = nn.Parameter(torch.zeros(self.N, d, device=dev).normal_(0, 0.01))
 
         self.register_buffer("hash2vox", torch.full((buckets,), -1, dtype=torch.long, device=dev))
@@ -73,7 +74,13 @@ class _TrainLevel(nn.Module):
     @torch.no_grad()  # sparse dump
     def export_sparse(self):
         used = self.get_accessed_indices()
-        return dict(resolution=self.res, coords=self.coords[used].cpu(), features=self.voxel_features[used].cpu())
+        return dict(
+            resolution=self.res,
+            coords=self.coords[used].cpu(),
+            features=self.voxel_features[used].cpu(),
+            smin=self.smin.cpu(),
+            smax=self.smax.cpu(),
+        )
 
     # ---------- internals
     def _lookup(self, idxg):
@@ -110,7 +117,9 @@ class _InferLevel(nn.Module):
         coords, feats = pay["coords"].to(dev), pay["features"].to(dev)
         self.register_buffer("coords", coords, persistent=False)
         self.voxel_features = nn.Parameter(feats, requires_grad=False)
-        self.smin = coords.min(0)[0].float()
+        # Use provided scene bounds if available, else fall back to coords min/max
+        self.smin = torch.tensor(pay['smin'], device=dev).float()
+        self.smax = torch.tensor(pay['smax'], device=dev).float()
 
         self.register_buffer("hash2vox", torch.full((buckets,), -1, dtype=torch.long, device=dev), persistent=False)
         idx = torch.floor((coords - self.smin) / self.res).long()
