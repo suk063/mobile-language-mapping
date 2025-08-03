@@ -28,6 +28,7 @@ class _TrainLevel(nn.Module):
     def __init__(self, res, d, buckets, smin, smax, primes, dev):
         super().__init__()
         self.res, self.d, self.buckets = res, d, buckets
+        self.smin = torch.tensor(smin, device=dev, dtype=torch.float)
 
         self.register_buffer("primes", primes, persistent=False)
         self.primes: torch.Tensor
@@ -48,7 +49,7 @@ class _TrainLevel(nn.Module):
         self.register_buffer("access", torch.zeros(self.N, dtype=torch.bool, device=dev), persistent=False)
 
     def _fill(self):
-        idx = torch.floor(self.coords / self.res).long()
+        idx = torch.floor((self.coords - self.smin) / self.res).long()
         hv = (idx * self.primes).sum(-1) % self.buckets
         empty = self.hash2vox[hv] == -1
         self.hash2vox[hv[empty]] = torch.arange(self.N, device=self.voxel_features.device)[empty]
@@ -86,7 +87,7 @@ class _TrainLevel(nn.Module):
         return out
 
     def query(self, pts):
-        q, offs = pts / self.res, _corner_offsets(pts.device)
+        q, offs = (pts - self.smin) / self.res, _corner_offsets(pts.device)
         base = torch.floor(q).long()
         frac = q - base.float()
         idx = base[:, None, :] + offs[None, :, :]
@@ -109,15 +110,24 @@ class _InferLevel(nn.Module):
         coords, feats = pay["coords"].to(dev), pay["features"].to(dev)
         self.register_buffer("coords", coords, persistent=False)
         self.voxel_features = nn.Parameter(feats, requires_grad=False)
+        self.smin = coords.min(0)[0].float()
 
         self.register_buffer("hash2vox", torch.full((buckets,), -1, dtype=torch.long, device=dev), persistent=False)
-        idx = torch.floor(coords / self.res).long()
+        idx = torch.floor((coords - self.smin) / self.res).long()
         hv = (idx * self.primes).sum(-1) % buckets
+
+        # detect collisions by counting duplicate hash values
+        dup = hv.unique(return_counts=True)[1] > 1
+        self.register_buffer("col", torch.tensor(int(dup.sum()), device=dev), persistent=False)
+
+        # Sunghwan:log collisions and total voxels for debugging
+        logging.info(f"[InferLevel] Initialized with {coords.size(0)} voxels, {int(dup.sum())} collisions")
+
         self.hash2vox[hv] = torch.arange(coords.size(0), device=dev)
 
-    # dummy stats
+    # short stats
     def collision_stats(self):
-        return dict(total=self.coords.size(0), col=0)
+        return dict(total=self.coords.size(0), col=int(self.col))
 
     def get_accessed_indices(self):
         return torch.empty(0, dtype=torch.long, device=self.coords.device)
@@ -135,7 +145,7 @@ class _InferLevel(nn.Module):
         return out
 
     def query(self, pts):
-        q, offs = pts / self.res, _corner_offsets(pts.device)
+        q, offs = (pts - self.smin) / self.res, _corner_offsets(pts.device)
         base = torch.floor(q).long()
         frac = q - base.float()
         idx = base[:, None, :] + offs[None, :, :]
