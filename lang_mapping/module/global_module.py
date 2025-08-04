@@ -6,8 +6,8 @@ from typing import Tuple, Optional
 
 from pytorch3d.ops import ball_query, sample_farthest_points
 
-from ..module.transformer import TransformerLayer
-from ..utils import rotary_pe_3d
+from lang_mapping.module.transformer import TransformerLayer
+from lang_mapping.utils.utils import rotary_pe_3d
 
 def init_weights_kaiming(m):
     if isinstance(m, nn.Linear):

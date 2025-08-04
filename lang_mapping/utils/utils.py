@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 from torchvision import transforms
 
-
 def get_visual_features(model, x):
     """
     Extracts normalized visual features from a CLIP-based visual encoder.
@@ -23,24 +22,6 @@ def get_visual_features(model, x):
     dense_features = dense_features.permute(0, 2, 1)
     dense_features = dense_features.reshape(x.shape[0], -1, grid_size, grid_size)
     return dense_features
-
-
-def get_visual_features_dino(model, x):
-    """
-    x: (B, C, H, W)
-    return: (B, 1024, H//14, W//14)
-    """
-    B, C, H, W = x.size()
-
-    x = model.prepare_tokens_with_masks(x)
-
-    for idx, blk in enumerate(model.blocks):
-        x = blk(x)
-
-    x = x[:, 1:, :].permute(0, 2, 1).reshape(B, 1024, H // 14, W // 14).contiguous()
-
-    return x
-
 
 def positional_encoding(x: torch.Tensor, L: int = 10) -> torch.Tensor:
     """
@@ -219,172 +200,6 @@ def _rotary_pe_3d_impl(
     x_out = torch.stack(out_blocks, dim=2).view(B, S, D)
     return x_out
 
-
-def chamfer_cosine_weighted(
-    pred_feat: torch.Tensor,  # [B, N, D] - predicted features
-    gt_feat: torch.Tensor,  # [B, M, D] - ground-truth (target) features
-    pred_weights: torch.Tensor,  # [B, N]   - scalar weight for each predicted point
-    threshold: float = 0.01,
-) -> torch.Tensor:
-    """
-    Computes a Chamfer-like distance using (1 - cosine similarity),
-    applying 'pred_weights' to the predicted side (row2col) only.
-
-    Args:
-        pred_feat: [B, N, D] predicted features
-        gt_feat:   [B, M, D] target features
-        pred_weights: [B, N], point-wise weighting factor
-        threshold: (float), distances exceeding this threshold are masked out
-
-    Returns:
-        (torch.Tensor) - a single scalar representing the weighted Chamfer-cosine distance.
-    """
-    B, N, D = pred_feat.shape
-    _, M, _ = gt_feat.shape
-
-    # 1) Normalize
-    pred_norm = F.normalize(pred_feat, dim=-1)  # (B, N, D)
-    gt_norm = F.normalize(gt_feat, dim=-1)  # (B, M, D)
-
-    # 2) distance = 1 - cosine_similarity
-    #    cos_sim shape: (B, N, M)
-    cos_sim = torch.bmm(pred_norm, gt_norm.transpose(1, 2))
-    dist = 1.0 - cos_sim  # (B, N, M)
-
-    # 3) Mask out distances over threshold
-    dist_masked = dist.clone()
-    dist_masked[dist_masked > threshold] = 9999.0
-
-    # row2col: for each predicted feature, find nearest GT feature
-    row2col_vals, row2col_idx = dist_masked.min(dim=2)  # (B, N)
-
-    valid_mask = row2col_vals < 9999.0
-    valid_vals = row2col_vals[valid_mask]
-    valid_weights = pred_weights[valid_mask] ** 2
-
-    # print("----- Debug Info -----")
-    # for b_idx in range(B):
-    #     num_valid = valid_mask[b_idx].sum().item()
-    #     print(f"[Batch {b_idx}] #points below threshold: {num_valid}/{N}")
-    #     valid_pred_indices = torch.where(valid_mask[b_idx])[0]
-    #     valid_gt_indices   = row2col_idx[b_idx][valid_pred_indices]
-    #     unique_gt_idx, counts = torch.unique(valid_gt_indices, return_counts=True)
-    #     print(f"  -> Mapped GT idx: {unique_gt_idx.tolist()}")
-    #     print(f"  -> Counts:       {counts.tolist()}")
-
-    if valid_vals.numel() > 0:
-        row_loss = (valid_vals * valid_weights).mean()
-    else:
-        # If no valid points remain, return 0 or some default
-        row_loss = torch.tensor(0.0, device=pred_feat.device)
-
-    return row_loss
-
-
-def chamfer_cosine_coverage_loss(
-    pred_feat: torch.Tensor,  # [B, N, D]
-    gt_feat: torch.Tensor,  # [B, M, D]
-    pred_weights: torch.Tensor,  # [B, N]
-    threshold: float = 0.01,
-) -> torch.Tensor:
-    """
-    Computes coverage-based loss using:
-      distance = 1 - cosine_similarity
-      coverage = (sum of squared weights of valid points) / (sum of squared weights of all points)
-      loss = 1 - coverage
-    """
-    B, N, D = pred_feat.shape
-    _, M, _ = gt_feat.shape
-
-    # 1) Normalize predicted and GT features
-    pred_norm = F.normalize(pred_feat, dim=-1)  # [B, N, D]
-    gt_norm = F.normalize(gt_feat, dim=-1)  # [B, M, D]
-
-    # 2) Compute distance = 1 - cos_sim
-    cos_sim = torch.bmm(pred_norm, gt_norm.transpose(1, 2))  # [B, N, M]
-    dist = 1.0 - cos_sim  # [B, N, M]
-
-    # 3) For each predicted point, get min distance and index
-    row2col_vals, row2col_idx = dist.min(dim=2)  # [B, N], [B, N]
-
-    # 4) Create valid mask (distance <= threshold)
-    valid_mask = row2col_vals <= threshold  # [B, N] (bool)
-
-    # Debugging prints
-    # print("----- Debug Info -----")
-    # for b_idx in range(B):
-    #     num_valid = valid_mask[b_idx].sum().item()
-    #     print(f"[Batch {b_idx}] #points below threshold: {num_valid}/{N}")
-    #     valid_pred_indices = torch.where(valid_mask[b_idx])[0]
-    #     valid_gt_indices   = row2col_idx[b_idx][valid_pred_indices]
-    #     unique_gt_idx, counts = torch.unique(valid_gt_indices, return_counts=True)
-    #     print(f"  -> Mapped GT idx: {unique_gt_idx.tolist()}")
-    #     print(f"  -> Counts:       {counts.tolist()}")
-
-    # 5) Compute coverage using squared weights
-    weights_sq = pred_weights**2  # [B, N]
-    sum_all = weights_sq.sum(dim=1) + 1e-8  # [B]
-    sum_valid = (weights_sq * valid_mask).sum(dim=1)  # [B]
-
-    coverage_per_batch = sum_valid / sum_all  # [B]
-    coverage = coverage_per_batch.mean()  # scalar
-
-    # 6) Define loss = 1 - coverage
-    loss = 1.0 - coverage
-    return loss
-
-
-def chamfer_3d_weighted(
-    pred_points: torch.Tensor,  # (B, N_pred, 3)
-    gt_points: torch.Tensor,  # (B, N_gt, 3)
-    mask_pred: torch.Tensor,  # (B, N_pred) -> True if dist <= 1m
-    mask_gt: torch.Tensor,  # (B, N_gt)   -> True if dist <= 1m
-    pred_weights: torch.Tensor = None,
-):
-    """
-    Computes Chamfer distance for points within 1m (mask==True).
-    - row2col + col2row
-    - No regularization term is included here.
-
-    Args:
-        pred_points: (B, N_pred, 3)
-        gt_points:   (B, N_gt, 3)
-        mask_pred:   (B, N_pred)
-        mask_gt:     (B, N_gt)
-        pred_weights:(B, N_pred), optional weighting
-
-    Returns:
-        chamfer_loss = row_loss + col_loss
-    """
-    device = pred_points.device
-    # (B, N_pred, N_gt)
-    dist = torch.cdist(pred_points, gt_points, p=2)
-
-    # row2col
-    row2col_vals, row2col_idx = dist.min(dim=2)  # dist.shape = (B, N_pred, N_gt)
-    gt_valid_for_pred = torch.gather(mask_gt, 1, row2col_idx)  # (B, N_pred)
-    row_valid = mask_pred & gt_valid_for_pred
-    row2col_selected = row2col_vals[row_valid]
-    row_loss = (
-        row2col_selected.mean()
-        if row2col_selected.numel() > 0
-        else torch.tensor(0.0, device=device)
-    )
-
-    # col2row (gt->pred)
-    col2row_vals, col2row_idx = dist.min(dim=1)  # (B, N_gt)
-    pred_valid_for_gt = torch.gather(mask_pred, 1, col2row_idx)  # (B, N_gt)
-    col_valid = mask_gt & pred_valid_for_gt
-    col2row_selected = col2row_vals[col_valid]
-    col_loss = (
-        col2row_selected.mean()
-        if col2row_selected.numel() > 0
-        else torch.tensor(0.0, device=device)
-    )
-
-    return row_loss + col_loss
-
-
 def gate_with_text(feats: torch.Tensor,
                    text_embed: torch.Tensor) -> torch.Tensor:
     """
@@ -403,6 +218,11 @@ def gate_with_text(feats: torch.Tensor,
     gated = feats + feats* score                                   # residual
 
     return gated    
+
+
+def exp_decay_weights(dists: torch.Tensor, alpha: float) -> torch.Tensor:
+    w = torch.exp(-alpha * dists.float())
+    return w
 
 # Basic image transform
 transform = transforms.Compose(

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ..utils import rotary_pe_3d  
+from lang_mapping.utils.utils import rotary_pe_3d  
 import math
 
 def init_weights_kaiming(m):

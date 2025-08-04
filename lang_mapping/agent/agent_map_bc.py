@@ -3,13 +3,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # Local imports
-from ..module.transformer import ActionTransformerDecoder, TransformerEncoder
-from ..module.mlp import ImplicitDecoder, DimReducer, StateProj
-from ..module.global_module import HierarchicalSceneTransformer, LocalFeatureFusion
+from lang_mapping.module.transformer import ActionTransformerDecoder, TransformerEncoder
+from lang_mapping.module.mlp import ImplicitDecoder, DimReducer, StateProj
+from lang_mapping.module.global_module import HierarchicalSceneTransformer, LocalFeatureFusion
 
 from lang_mapping.grid_net import GridNet
 
-from ..utils import get_3d_coordinates, get_visual_features, transform, gate_with_text
+from lang_mapping.utils.utils import get_3d_coordinates, get_visual_features, transform, gate_with_text
 import open_clip
 
 class Agent_map_bc(nn.Module):
@@ -176,7 +176,7 @@ class Agent_map_bc(nn.Module):
 
             return kv_coords, kv_feats, kv_pad_mask
     
-    def forward_policy(self, observations, object_labels, batch_episode_ids):
+    def forward(self, observations, object_labels, batch_episode_ids):
 
         hand_rgb   = observations["fetch_hand_rgb"]
         head_rgb   = observations["fetch_head_rgb"]

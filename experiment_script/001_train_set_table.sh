@@ -10,17 +10,16 @@ SPLIT=train
 OBJ=all_13
 
 # Change according to the task
-# ALL_PLAN_COUNT=244
 ALL_PLAN_COUNT=244
 NUM_ENVS=20
 
 # shellcheck disable=SC2001 
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
 WORKSPACE="mshab_exps"
-GROUP=$TASK-map_set_table-$SUBTASK
-EXP_NAME="$ENV_ID/$GROUP/bc-$SUBTASK-$OBJ-map_set_table-trajs_per_obj=$TRAJS_PER_OBJ"
+GROUP=$TASK-set_table-$SUBTASK
+EXP_NAME="$ENV_ID/$GROUP/$SUBTASK-set_table-map"
 # shellcheck disable=SC2001
-PROJECT_NAME="map_set_table"
+PROJECT_NAME="set_table-map"
 
 WANDB=True
 TENSORBOARD=True
@@ -31,11 +30,7 @@ RESUME_CONFIG="$RESUME_LOGDIR/config.yml"
 
 MAX_CACHE_SIZE=0   # safe num for about 64 GiB system memory
 
-if [[ $SUBTASK == "open" || $SUBTASK == "close" || $SUBTASK == "pick" || $SUBTASK == "place" ]]; then
-    data_dir_fp="$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset/$TASK/$SUBTASK/$OBJ.h5"
-else
-    data_dir_fp="$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset/$TASK/$SUBTASK"
-fi
+data_dir_fp="$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset/$TASK/$SUBTASK/$OBJ.h5"
 
 args=(
     "logger.wandb_cfg.group=$GROUP"
@@ -64,18 +59,8 @@ args=(
     "logger.workspace=$WORKSPACE"
 )
 
-if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
-    echo "RESUMING"
-    SAPIEN_NO_DISPLAY=1 python -m experiment.001_train_set_table "$RESUME_CONFIG" RESUME_LOGDIR="$RESUME_LOGDIR" \
-        logger.clear_out="False" \
-        logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
-        "${args[@]}"
-
-else
-    echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m experiment.001_train_set_table configs/001_train_set_table.yml \
-        logger.clear_out="True" \
-        logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
-        "${args[@]}"
-        
-fi
+echo "STARTING"
+SAPIEN_NO_DISPLAY=1 python -m experiment.001_train_set_table configs/001_train_set_table.yml \
+logger.clear_out="True" \
+logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
+"${args[@]}"

@@ -178,6 +178,7 @@ bench_results/
 
 nohup*
 test*
+*copy.py
 
 ManiSkill/
 nautilus/
