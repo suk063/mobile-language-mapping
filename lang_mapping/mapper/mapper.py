@@ -1,5 +1,5 @@
 import torch, torch.nn as nn
-from typing import Tuple, Dict, Optional, List
+from typing import Dict, Optional, List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,11 +25,15 @@ def _corner_offsets(dev):  # (8,3) corner offsets
 #  dense level (train)                                                        #
 # --------------------------------------------------------------------------- #
 class _TrainLevel(nn.Module):
-    def __init__(self, res, d, buckets, smin, smax, primes, dev):
+    def __init__(self, res, d, buckets, smin, smax, primes, one_to_one, dev):
         super().__init__()
         self.res, self.d, self.buckets = res, d, buckets
-        self.smin = torch.tensor(smin, device=dev, dtype=torch.float)
-        self.smax = torch.tensor(smax, device=dev, dtype=torch.float)
+        self.one_to_one = one_to_one
+
+        self.register_buffer("smin", torch.tensor(smin).float().to(dev), persistent=False)
+        self.smin: torch.Tensor
+        self.register_buffer("smax", torch.tensor(smax).float().to(dev), persistent=False)
+        self.smax: torch.Tensor
 
         self.register_buffer("primes", primes, persistent=False)
         self.primes: torch.Tensor
@@ -37,26 +41,51 @@ class _TrainLevel(nn.Module):
         xs = torch.arange(smin[0], smax[0], res, device=dev)
         ys = torch.arange(smin[1], smax[1], res, device=dev)
         zs = torch.arange(smin[2], smax[2], res, device=dev)
+        self.register_buffer(
+            "grid_shape",
+            torch.tensor((xs.numel(), ys.numel(), zs.numel()), device=dev),
+            persistent=False,
+        )
+        self.grid_shape: torch.Tensor
+
+        # indexing="ij" for (x,y,z) meshgrid
+        # [(x,y,z) for x in xs for y in ys for z in zs]
         gx, gy, gz = torch.meshgrid(xs, ys, zs, indexing="ij")
 
         self.register_buffer("coords", torch.stack([gx, gy, gz], -1).view(-1, 3), persistent=False)
         self.coords: torch.Tensor
         self.N = self.coords.size(0)
-        
-        self.voxel_features = nn.Parameter(torch.zeros(self.N, d, device=dev).normal_(0, 0.01))
 
-        self.register_buffer("hash2vox", torch.full((buckets,), -1, dtype=torch.long, device=dev))
-        self._fill()
-        self.register_buffer("access", torch.zeros(self.N, dtype=torch.bool, device=dev), persistent=False)
+        self.register_buffer("corner_offsets", _corner_offsets(dev), persistent=False)
+        self.corner_offsets: torch.Tensor
 
-    def _fill(self):
-        idx = torch.floor((self.coords - self.smin) / self.res).long()
-        hv = (idx * self.primes).sum(-1) % self.buckets
-        empty = self.hash2vox[hv] == -1
-        self.hash2vox[hv[empty]] = torch.arange(self.N, device=self.voxel_features.device)[empty]
-        dup = hv.unique(return_counts=True)[1] > 1
-        self.register_buffer("col", torch.tensor(int(dup.sum()), device=self.voxel_features.device), persistent=False)
-        logging.info(f"Level filled: {self.N} voxels, {self.col} collisions")
+        if self.one_to_one:
+            # One-to-one mapping: each coord maps to a unique voxel
+            logging.info("Using one-to-one mapping for voxel features. The behavior is like a dense grid.")
+            self.buckets = self.N
+            n_collisions = 0
+            self.primes[2] = 1
+            self.primes[1] = self.grid_shape[2]
+            self.primes[0] = self.grid_shape[1] * self.grid_shape[2]
+        else:
+            # Hash mapping: coords to buckets
+            logging.info("Using hash mapping for voxel features.")
+            idx = torch.floor((self.coords - self.smin) / self.res).long()
+            hv = (idx * self.primes).sum(-1) % self.buckets
+            # empty = self.hash2vox[hv] == -1
+            # self.hash2vox[hv[empty]] = torch.arange(self.N, device=self.voxel_features.device)[empty]
+            dup = hv.unique(return_counts=True)[1] > 1
+            n_collisions = int(dup.sum())
+
+        self.voxel_features = nn.Parameter(torch.zeros(self.buckets, self.d, device=dev).normal_(0, 0.01))
+
+        self.register_buffer("col", torch.tensor(n_collisions, device=self.voxel_features.device), persistent=False)
+        self.col: torch.Tensor
+
+        self.register_buffer("access", torch.zeros(self.buckets, dtype=torch.bool, device=dev), persistent=False)
+        self.access: torch.BoolTensor
+
+        logging.info(f"Level filled: {self.buckets} voxels, {n_collisions} collisions")
 
     # ---------- public utils
     @torch.no_grad()  # short stats
@@ -73,33 +102,73 @@ class _TrainLevel(nn.Module):
 
     @torch.no_grad()  # sparse dump
     def export_sparse(self):
-        used = self.get_accessed_indices()
+        # if self.one_to_one:
+        #     accessed_indices = self.get_accessed_indices()
+        #     return dict(
+        #         one_to_one=True,
+        #         resolution=self.res,
+        #         buckets=self.buckets,
+        #         primes=self.primes.cpu(),
+        #         accessed_indices=accessed_indices.cpu(),
+        #         coords=self.coords[accessed_indices].cpu(),
+        #         features=self.voxel_features[accessed_indices].cpu(),
+        #         smin=self.smin.cpu(),
+        #         smax=self.smax.cpu(),
+        #     )
+        accessed_indices = self.get_accessed_indices()
         return dict(
+            one_to_one=self.one_to_one,
             resolution=self.res,
-            coords=self.coords[used].cpu(),
-            features=self.voxel_features[used].cpu(),
+            buckets=self.buckets,
+            grid_shape=self.grid_shape.cpu(),
+            primes=self.primes.cpu(),
+            accessed_indices=accessed_indices.cpu(),
+            coords=self.coords[accessed_indices].cpu() if self.one_to_one else self.coords.cpu(),
+            features=self.voxel_features[accessed_indices].cpu(),
             smin=self.smin.cpu(),
             smax=self.smax.cpu(),
+            col=self.col.cpu(),
         )
+
+        # used = self.get_accessed_indices()
+        # return dict(
+        #     resolution=self.res,
+        #     coords=self.coords[used].cpu(),
+        #     features=self.voxel_features[used].cpu(),
+        #     smin=self.smin.cpu(),
+        #     smax=self.smax.cpu(),
+        # )
 
     # ---------- internals
     def _lookup(self, idxg):
-        hv = (idxg * self.primes).sum(-1) % self.buckets
-        vid = self.hash2vox[hv]
-        valid = vid >= 0
-        out = torch.zeros(*idxg.shape[:-1], self.d, device=self.voxel_features.device, dtype=self.voxel_features.dtype)
-        if valid.any():
-            self.access[vid[valid]] = True
-            out[valid] = self.voxel_features[vid[valid]]
-        return out
+        vid = (idxg * self.primes).sum(-1) % self.buckets
+        self.access[vid] = True  # log access
+        return self.voxel_features[vid]
+
+        # hv = (idxg * self.primes).sum(-1) % self.buckets
+        # vid = self.hash2vox[hv]
+        # valid = vid >= 0
+        # out = torch.zeros(*idxg.shape[:-1], self.d, device=self.voxel_features.device, dtype=self.voxel_features.dtype)
+        # if valid.any():
+        #     self.access[vid[valid]] = True
+        #     out[valid] = self.voxel_features[vid[valid]]
+        # return out
 
     def query(self, pts):
-        q, offs = (pts - self.smin) / self.res, _corner_offsets(pts.device)
-        base = torch.floor(q).long()
-        frac = q - base.float()
-        idx = base[:, None, :] + offs[None, :, :]
+        with torch.no_grad():
+            if self.one_to_one:
+                q = (pts - self.smin) / self.res
+                mask = ((q < 0) | (q >= self.grid_shape)).any(dim=-1)
+                assert not mask.any(), f"Points out of bounds:\n{pts[mask]}"
+            else:
+                q = pts / self.res
+
+            base = torch.floor(q).long()
+            idx = base[:, None, :] + self.corner_offsets[None, :, :]
+
         feat = self._lookup(idx)
 
+        frac = q - base.float()
         wx = torch.stack([1 - frac[:, 0], frac[:, 0]], 1)
         wy = torch.stack([1 - frac[:, 1], frac[:, 1]], 1)
         wz = torch.stack([1 - frac[:, 2], frac[:, 2]], 1)
@@ -111,55 +180,123 @@ class _TrainLevel(nn.Module):
 #  sparse level (infer)                                                       #
 # --------------------------------------------------------------------------- #
 class _InferLevel(nn.Module):
-    def __init__(self, pay, d, buckets, primes, dev):
+
+    def __init__(self, state_dict):
+        """
+        Load a state_dict from _TrainLevel.export_sparse()
+        """
         super().__init__()
-        self.res, self.d, self.buckets, self.primes = float(pay["resolution"]), d, buckets, primes
-        coords, feats = pay["coords"].to(dev), pay["features"].to(dev)
-        self.register_buffer("coords", coords, persistent=False)
-        self.voxel_features = nn.Parameter(feats, requires_grad=False)
-        # Use provided scene bounds if available, else fall back to coords min/max
-        self.smin = torch.tensor(pay['smin'], device=dev).float()
-        self.smax = torch.tensor(pay['smax'], device=dev).float()
+        self.one_to_one = state_dict["one_to_one"]
+        self.res = float(state_dict["resolution"])
+        self.buckets = state_dict["buckets"]
 
-        self.register_buffer("hash2vox", torch.full((buckets,), -1, dtype=torch.long, device=dev), persistent=False)
-        idx = torch.floor((coords - self.smin) / self.res).long()
-        hv = (idx * self.primes).sum(-1) % buckets
+        self.register_buffer("grid_shape", state_dict["grid_shape"].to(torch.long), persistent=False)
+        self.grid_shape: torch.Tensor
 
-        # detect collisions by counting duplicate hash values
-        dup = hv.unique(return_counts=True)[1] > 1
-        self.register_buffer("col", torch.tensor(int(dup.sum()), device=dev), persistent=False)
+        self.register_buffer("primes", state_dict["primes"].to(torch.long), persistent=False)
+        self.primes: torch.Tensor
 
-        # Sunghwan:log collisions and total voxels for debugging
-        logging.info(f"[InferLevel] Initialized with {coords.size(0)} voxels, {int(dup.sum())} collisions")
+        self.register_buffer("coords", state_dict["coords"].to(torch.float32), persistent=False)
+        self.coords: torch.Tensor
 
-        self.hash2vox[hv] = torch.arange(coords.size(0), device=dev)
+        self.voxel_features = nn.Parameter(state_dict["features"].to(torch.float32), requires_grad=False)
+        self.d = self.voxel_features.size(-1)
+
+        self.register_buffer("smin", state_dict["smin"].to(torch.float32), persistent=False)
+        self.smin: torch.Tensor
+        self.register_buffer("smax", state_dict["smax"].to(torch.float32), persistent=False)
+        self.smax: torch.Tensor
+
+        self.register_buffer("col", state_dict["col"].to(torch.long), persistent=False)
+        self.col: torch.Tensor
+
+        # build the extra mapping from hash value to voxel index
+        # if -1, then not accessed during training
+        self.register_buffer(
+            "access",
+            torch.full((self.buckets,), -1, dtype=torch.long, device=self.coords.device),
+            persistent=False,
+        )
+        self.access: torch.Tensor
+        accessed_indices = state_dict["accessed_indices"]
+        self.access[accessed_indices] = torch.arange(accessed_indices.numel(), device=self.coords.device)
+
+        self.register_buffer("corner_offsets", _corner_offsets(self.coords.device), persistent=False)
+        self.corner_offsets: torch.Tensor
+
+    # def __init__(self, pay, d, buckets, primes, dev):
+    #     super().__init__()
+    #     self.res, self.d, self.buckets, self.primes = float(pay["resolution"]), d, buckets, primes
+    #     coords, feats = pay["coords"].to(dev), pay["features"].to(dev)
+    #     self.register_buffer("coords", coords, persistent=False)
+    #     self.voxel_features = nn.Parameter(feats, requires_grad=False)
+    #     # Use provided scene bounds if available, else fall back to coords min/max
+    #     self.smin = torch.tensor(pay["smin"], device=dev).float()
+    #     self.smax = torch.tensor(pay["smax"], device=dev).float()
+
+    #     self.register_buffer("hash2vox", torch.full((buckets,), -1, dtype=torch.long, device=dev), persistent=False)
+    #     idx = torch.floor((coords - self.smin) / self.res).long()
+    #     hv = (idx * self.primes).sum(-1) % buckets
+
+    #     # detect collisions by counting duplicate hash values
+    #     dup = hv.unique(return_counts=True)[1] > 1
+    #     self.register_buffer("col", torch.tensor(int(dup.sum()), device=dev), persistent=False)
+
+    #     # Sunghwan:log collisions and total voxels for debugging
+    #     logging.info(f"[InferLevel] Initialized with {coords.size(0)} voxels, {int(dup.sum())} collisions")
+
+    #     self.hash2vox[hv] = torch.arange(coords.size(0), device=dev)
 
     # short stats
     def collision_stats(self):
         return dict(total=self.coords.size(0), col=int(self.col))
 
     def get_accessed_indices(self):
-        return torch.empty(0, dtype=torch.long, device=self.coords.device)
+        return torch.nonzero(self.access).flatten()
+        # return torch.empty(0, dtype=torch.long, device=self.coords.device)
 
     def reset_access_log(self):
         pass
 
     def _lookup(self, idxg):
-        hv = (idxg * self.primes).sum(-1) % self.buckets
-        vid = self.hash2vox[hv]
+        vid = (idxg * self.primes).sum(-1) % self.buckets
+        vid = self.access[vid]
         valid = vid >= 0
         out = torch.zeros(*idxg.shape[:-1], self.d, device=self.coords.device, dtype=self.voxel_features.dtype)
         if valid.any():
             out[valid] = self.voxel_features[vid[valid]]
         return out
 
+        # hv = (idxg * self.primes).sum(-1) % self.buckets
+        # vid = self.hash2vox[hv]
+        # valid = vid >= 0
+        # out = torch.zeros(*idxg.shape[:-1], self.d, device=self.coords.device, dtype=self.voxel_features.dtype)
+        # if valid.any():
+        #     out[valid] = self.voxel_features[vid[valid]]
+        # return out
+
     def query(self, pts):
-        q, offs = (pts - self.smin) / self.res, _corner_offsets(pts.device)
-        base = torch.floor(q).long()
-        frac = q - base.float()
-        idx = base[:, None, :] + offs[None, :, :]
+        with torch.no_grad():
+            if self.one_to_one:
+                q = (pts - self.smin) / self.res
+                assert torch.all(q >= 0) and torch.all(
+                    q < self.grid_shape
+                ), "Points out of bounds for one-to-one mapping"
+            else:
+                q = pts / self.res
+
+            base = torch.floor(q).long()
+            idx = base[:, None, :] + self.corner_offsets[None, :, :]
+
         feat = self._lookup(idx)
 
+        # q, offs = (pts - self.smin) / self.res, _corner_offsets(pts.device)
+        # base = torch.floor(q).long()
+        # frac = q - base.float()
+        # idx = base[:, None, :] + offs[None, :, :]
+        # feat = self._lookup(idx)
+
+        frac = q - base.float()
         wx = torch.stack([1 - frac[:, 0], frac[:, 0]], 1)
         wy = torch.stack([1 - frac[:, 1], frac[:, 1]], 1)
         wz = torch.stack([1 - frac[:, 2], frac[:, 2]], 1)
@@ -177,13 +314,14 @@ class VoxelHashTable(nn.Module):
 
     def __init__(
         self,
+        one_to_one: bool = True,
         resolution: float = 0.12,
         num_levels: int = 2,
         level_scale: float = 2.0,
         feature_dim: int = 32,
         hash_table_size: int = 2**21,
-        scene_bound_min: Tuple[float, float, float] = (-2.6, -8.1, 0),
-        scene_bound_max: Tuple[float, float, float] = (4.6, 4.7, 3.1),
+        scene_bound_min: tuple[float, ...] = (-2.6, -8.1, 0),
+        scene_bound_max: tuple[float, ...] = (4.6, 4.7, 3.1),
         device: str = "cuda:0",
         mode: str = "train",
         sparse_data: Optional[Dict] = None,
@@ -199,15 +337,17 @@ class VoxelHashTable(nn.Module):
             for lv in range(num_levels):
                 res = resolution * (level_scale ** (num_levels - 1 - lv))
                 self.levels.append(
-                    _TrainLevel(res, feature_dim, hash_table_size, scene_bound_min, scene_bound_max, primes, dev)
+                    _TrainLevel(
+                        res, feature_dim, hash_table_size, scene_bound_min, scene_bound_max, primes, one_to_one, dev
+                    )
                 )
         elif mode == "infer":
             if sparse_data is None:
                 raise ValueError("sparse_data is required in infer mode")
             # Sort payloads from coarse (larger res) → fine (smaller res)
             sorted_levels = sorted(sparse_data["levels"], key=lambda p: p["resolution"], reverse=True)
-            for pay in sorted_levels:
-                self.levels.append(_InferLevel(pay, feature_dim, hash_table_size, primes, dev))
+            for level_state_dict in sorted_levels:
+                self.levels.append(_InferLevel(level_state_dict))
         else:
             raise ValueError("mode must be 'train' or 'infer'")
 
@@ -262,6 +402,7 @@ class MultiVoxelHashTable(nn.Module):
     def __init__(
         self,
         n_scenes: int,
+        one_to_one: bool = True,
         resolution: float = 0.12,
         num_levels: int = 2,
         level_scale: float = 2.0,
@@ -288,13 +429,14 @@ class MultiVoxelHashTable(nn.Module):
         for i in range(n_scenes):
             self.voxel_hash_tables.append(
                 VoxelHashTable(
+                    one_to_one=one_to_one,
                     resolution=resolution,
                     num_levels=num_levels,
                     level_scale=level_scale,
                     feature_dim=feature_dim,
                     hash_table_size=hash_table_size,
-                    scene_bound_min=scene_bound_min,
-                    scene_bound_max=scene_bound_max,
+                    scene_bound_min=tuple(scene_bound_min),
+                    scene_bound_max=tuple(scene_bound_max),
                     device="cpu",
                     mode=mode,
                     sparse_data=sparse_data[i] if sparse_data is not None else None,

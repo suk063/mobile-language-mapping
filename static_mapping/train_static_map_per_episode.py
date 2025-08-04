@@ -67,6 +67,7 @@ class GridDefinition:
 
 @dataclass
 class VoxelHashTableConfig:
+    one_to_one: bool  # whether to use one-to-one mapping for voxel features
     resolution: float  # finest cell size (e.g. 0.12)
     num_levels: int  # pyramid depth (e.g. 2)
     level_scale: float  # ratio between levels (e.g. 2.0)
