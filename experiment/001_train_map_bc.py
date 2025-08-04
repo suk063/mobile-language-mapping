@@ -62,8 +62,6 @@ class BCConfig:
 
     # CLIP / Agent Settings
     clip_input_dim: int
-    open_clip_model_name: str
-    open_clip_model_pretrained: str
     text_input: List[str]
     camera_intrinsics: List[float]
     cos_loss_weight: float
@@ -195,14 +193,8 @@ def setup_models_and_optimizer(
     agent = Agent_map_bc(
         sample_obs=sample_obs,
         single_act_shape=single_act_shape,
-        device=device,
         transf_input_dim=cfg.algo.transf_input_dim,
-        open_clip_model=(
-            cfg.algo.open_clip_model_name,
-            cfg.algo.open_clip_model_pretrained,
-        ),
         text_input=cfg.algo.text_input,
-        clip_input_dim=cfg.algo.clip_input_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         static_map=static_maps,
         implicit_decoder=implicit_decoder,
@@ -251,7 +243,7 @@ def train_one_epoch(
             act, device=device, dtype="float"
         )
 
-        pi = agent(obs, subtask_labels, epi_ids)
+        pi = agent(obs, subtask_labels)
 
         total_bc_loss = F.smooth_l1_loss(pi, act, reduction="none")
         total_bc_loss = total_bc_loss * time_weights
@@ -289,7 +281,7 @@ def evaluate_agent(
 
     print("Run eval episode (single horizon)")
     stats_single = run_eval_episode(
-        eval_envs, eval_obs, agent, uid_to_label_map, uid2episode_id
+        eval_envs, eval_obs, agent, uid_to_label_map, uid2episode_id, device
     )
     _pretty_print_stats("[Eval-Single]", stats_single, logger, color="yellow")
 

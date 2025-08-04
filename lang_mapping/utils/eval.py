@@ -6,6 +6,7 @@ from mshab.utils.array import to_tensor
 from mani_skill.utils import common
 
 from mshab.utils.logger import Logger
+from lang_mapping.utils.dataset import get_object_labels_batch
 
 def _collect_stats(envs, device):
     stats = dict(
@@ -52,9 +53,8 @@ def _flatten_obs(
     return flat
 
 
-def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map, uid2episode_id):
+def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map, uid2episode_id, device):
     """Runs one episode of evaluation."""
-    device = agent.device
     max_steps = eval_envs.max_episode_steps
 
     # Get subtask info (labels and indices) for the episode
@@ -72,7 +72,7 @@ def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map, uid2episode_i
         agent_obs = _flatten_obs(eval_obs, device)
 
         with torch.no_grad():
-            action = agent.forward(agent_obs, subtask_labels, epi_ids)
+            action = agent(agent_obs, subtask_labels)
 
         # Environment step
         eval_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])

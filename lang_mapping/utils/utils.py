@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torchvision import transforms
 
-def get_visual_features(model, x):
+def get_visual_features_clip(model, x):
     """
     Extracts normalized visual features from a CLIP-based visual encoder.
     Returns features reshaped to (B, C, grid_size, grid_size).
@@ -22,6 +22,23 @@ def get_visual_features(model, x):
     dense_features = dense_features.permute(0, 2, 1)
     dense_features = dense_features.reshape(x.shape[0], -1, grid_size, grid_size)
     return dense_features
+
+def get_visual_features_dino(model, x):
+    """
+    x: (B, C, H, W)
+    return: (B, 1024, H//14, W//14)
+    """
+    B, C, H, W = x.size()
+
+    x = model.prepare_tokens_with_masks(x)
+
+    for idx, blk in enumerate(model.blocks):
+        x = blk(x)
+
+    x = x[:, 1:, :].permute(0, 2, 1).reshape(B, 384, H // 14, W // 14).contiguous()
+    
+    return x
+
 
 def positional_encoding(x: torch.Tensor, L: int = 10) -> torch.Tensor:
     """
