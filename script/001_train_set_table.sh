@@ -60,7 +60,7 @@ args=(
 )
 
 echo "STARTING"
-SAPIEN_NO_DISPLAY=1 python -m experiment.001_train_set_table configs/001_train_set_table.yml \
+SAPIEN_NO_DISPLAY=1 python -m experiment.001_train_map_bc configs/001_train_set_table.yml \
 logger.clear_out="True" \
 logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
 "${args[@]}"
