@@ -5,11 +5,9 @@ import torch.nn.functional as F
 # Local imports
 from lang_mapping.module.transformer import ActionTransformerDecoder, TransformerEncoder
 from lang_mapping.module.mlp import ImplicitDecoder, DimReducer, StateProj
-from lang_mapping.module.global_module import HierarchicalSceneTransformer, LocalFeatureFusion
-
-from lang_mapping.grid_net import GridNet
-
-from lang_mapping.utils.utils import get_3d_coordinates, get_visual_features, transform, gate_with_text
+from lang_mapping.module.scene_encoder import HierarchicalSceneTransformer, LocalFeatureFusion
+from lang_mapping.mapper.mapper import MultiVoxelHashTable
+from lang_mapping.utils.utils import get_3d_coordinates, get_visual_features, transform
 import open_clip
 
 class Agent_map_bc(nn.Module):
@@ -23,7 +21,7 @@ class Agent_map_bc(nn.Module):
         transf_input_dim: int = 768,
         device: str = "cuda",
         camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
-        static_map: GridNet = None,
+        static_map: MultiVoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
         num_heads: int = 8,
         num_layers_transformer: int = 4,
@@ -171,7 +169,6 @@ class Agent_map_bc(nn.Module):
                 vox_raw           = self.static_map.query_feature(coords, scene_ids_tensor)
                 vox_feat          = self.implicit_decoder(vox_raw)          # (L,F_dec)
 
-                # vox_feat              = gate_with_text(vox_feat.unsqueeze(0), text_emb[b:b+1]).squeeze(0)
                 kv_feats   [b, :L]    = self.voxel_proj(vox_feat)
 
             return kv_coords, kv_feats, kv_pad_mask
@@ -248,8 +245,6 @@ class Agent_map_bc(nn.Module):
         # --------------------------------------------------------------------- #
         text_emb = self.text_embeddings[object_labels]        # (B,768)
         
-        # feats_hand  = gate_with_text(feats_hand,  text_emb)        # (B*N,768)
-        # feats_head  = gate_with_text(feats_head,  text_emb)
         
         feats_hand  = self.dim_reducer_hand(feats_hand.reshape(B*N, -1)).reshape(B, N, -1) 
         feats_head  = self.dim_reducer_head(feats_head.reshape(B*N, -1)).reshape(B, N, -1)

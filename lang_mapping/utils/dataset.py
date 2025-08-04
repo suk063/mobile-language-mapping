@@ -61,17 +61,16 @@ class DPDataset(ClosableDataset):
             num_uncached_this_file = 0
             
             # Note (sh): sample based on trajectory idx
-            if single_traj_idx is not None:
-                keys = []
-                for t_idx in single_traj_idx:
-                    key_str = f"traj_{t_idx}"
-                    if key_str in f:
-                        keys.append(key_str)
+            # if single_traj_idx is not None:
+            #     keys = []
+            #     for t_idx in single_traj_idx:
+            #         key_str = f"traj_{t_idx}"
+            #         if key_str in f:
+            #             keys.append(key_str)
+            if trajs_per_obj == "all":
+                keys = list(f.keys())
             else:
-                if trajs_per_obj == "all":
-                    keys = list(f.keys())
-                else:
-                    keys = random.sample(list(f.keys()), k=trajs_per_obj)
+                keys = random.sample(list(f.keys()), k=trajs_per_obj)
 
             for k in tqdm(keys, desc=f"hf file {fp_num}"):
                 ep_num = int(k.replace("traj_", ""))
@@ -153,17 +152,16 @@ class DPDataset(ClosableDataset):
                 
                 pixel_obs.update(**cam_pose_obs)
                 
-                is_grasped_obs = to_tensor(
-                    recursive_h5py_to_numpy(
-                        dict(
-                            fetch_is_grasped=obs["extra"]["is_grasped"]
-                        ),
-                        slice=slice(success_cutoff + 1),
-                    ),
-                    dtype=torch.bool,
-                )
-                
-                pixel_obs.update(**is_grasped_obs)
+                # is_grasped_obs = to_tensor(
+                #     recursive_h5py_to_numpy(
+                #         dict(
+                #             fetch_is_grasped=obs["extra"]["is_grasped"]
+                #         ),
+                #         slice=slice(success_cutoff + 1),
+                #     ),
+                #     dtype=torch.bool,
+                # )
+                # pixel_obs.update(**is_grasped_obs)
 
                 trajectories["actions"].append(act)
                 trajectories["observations"].append(dict(state=state_obs, **pixel_obs))
@@ -266,74 +264,6 @@ class DPDataset(ClosableDataset):
     def close(self):
         for h5_file in self.h5_files:
             h5_file.close()
-
-class TempTranslateToPointDataset(DPDataset):
-    def __init__(self, *args, cat_state=True, cat_pixels=False, **kwargs):
-        assert (
-            cat_state
-        ), "This is a low-effort temp wrapper which requires cat_state=True"
-        assert (
-            not cat_pixels
-        ), "This is a low-effort temp wrapper which requires cat_pixels=False"
-        super().__init__(*args, **kwargs)
-
-    def __getitem__(self, index):
-        assert isinstance(index, int)
-        item = super().__getitem__(index)
-
-        # NOTE (arth): reformat DPDataset obs to work with current train code
-
-        state_obs = item["observations"]["state"]
-        assert state_obs.size(0) == 2
-        state_obs = {"state_m1": state_obs[0], "state": state_obs[1]}
-        
-        pixel_obs = {
-            "fetch_hand_depth_m1": item["observations"]["fetch_hand_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_depth": item["observations"]["fetch_hand_depth"][1].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb_m1": item["observations"]["fetch_hand_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_rgb": item["observations"]["fetch_hand_rgb"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth_m1": item["observations"]["fetch_head_depth"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_depth": item["observations"]["fetch_head_depth"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb_m1": item["observations"]["fetch_head_rgb"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_rgb": item["observations"]["fetch_head_rgb"][1].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose_m1": item["observations"]["fetch_hand_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_hand_pose": item["observations"]["fetch_hand_pose"][1].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose_m1": item["observations"]["fetch_head_pose"][0].squeeze(-1).unsqueeze(0),
-            "fetch_head_pose": item["observations"]["fetch_head_pose"][1].squeeze(-1).unsqueeze(0),
-        }
-
-        obs = {**state_obs, "pixels": pixel_obs}
-
-        act = item["actions"][1:]
-
-        subtask_uid = item["subtask_uid"]
-        traj_idx = item["traj_idx"]
-        
-        is_grasped = item["observations"]["fetch_is_grasped"][1]
-
-        return (obs, act, subtask_uid, traj_idx, is_grasped)
-
-def merge_t_m1(obs_m1: Dict[str, np.ndarray], obs_t: Dict[str, np.ndarray]):
-    agent_obs = {
-        "state": obs_t["state"],      # t
-        "state_m1": obs_m1["state"],    # t-1
-        "pixels": {
-            "fetch_hand_rgb": obs_t['pixels']["fetch_hand_rgb"],
-            "fetch_hand_rgb_m1": obs_m1['pixels']["fetch_hand_rgb"],
-            "fetch_hand_depth": obs_t['pixels']["fetch_hand_depth"],
-            "fetch_hand_depth_m1": obs_m1['pixels']["fetch_hand_depth"],
-            "fetch_hand_pose": obs_t['pixels']["fetch_hand_pose"],
-            "fetch_hand_pose_m1": obs_m1['pixels']["fetch_hand_pose"],
-
-            "fetch_head_rgb": obs_t['pixels']["fetch_head_rgb"],
-            "fetch_head_rgb_m1": obs_m1['pixels']["fetch_head_rgb"],
-            "fetch_head_depth": obs_t['pixels']["fetch_head_depth"],
-            "fetch_head_depth_m1": obs_m1['pixels']["fetch_head_depth"],
-            "fetch_head_pose": obs_t['pixels']["fetch_head_pose"],
-            "fetch_head_pose_m1": obs_m1['pixels']["fetch_head_pose"],
-        }
-    }
-    return agent_obs
 
 def build_uid_mapping(task_plan_path: str):
     """

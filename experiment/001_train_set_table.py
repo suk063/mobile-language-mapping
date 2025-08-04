@@ -169,15 +169,29 @@ def train(cfg: TrainConfig):
     eval_envs.action_space.seed(cfg.seed + 1_000_000)
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
-
     # We use fixed hyperparams for the static map and implicit decoder
-    static_maps = MultiVoxelHashTable.load_sparse(cfg.algo.static_map_path).to(device)
+    static_maps = MultiVoxelHashTable.load_sparse("pretrained/hash_voxel_sparse.pt").to(device)
+
+    # (NOTE) Hardcoded hyperparams for the implicit decoder
+    voxel_feature_dim = 128
+    hidden_dim =  240
 
     implicit_decoder = ImplicitDecoder(
-        voxel_feature_dim=128,
-        hidden_dim=240,
+        voxel_feature_dim=voxel_feature_dim,
+        hidden_dim=hidden_dim,
         output_dim=cfg.algo.clip_input_dim,
     ).to(device)
+
+    implicit_decoder.load_state_dict(
+        torch.load("pretrained/implicit_decoder.pt", map_location=device)["model"],
+        strict=True,
+    )
+
+    for param in static_maps.parameters():
+        param.requires_grad = False
+
+    for param in implicit_decoder.parameters():
+        param.requires_grad = False
 
     # Agent
     agent = Agent_map_bc(
@@ -192,20 +206,13 @@ def train(cfg: TrainConfig):
         text_input=cfg.algo.text_input,
         clip_input_dim=cfg.algo.clip_input_dim,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        static_map=None,
-        implicit_decoder=None,
+        static_map=static_maps,
+        implicit_decoder=implicit_decoder,
         num_heads=cfg.algo.num_heads,
         num_layers_transformer=cfg.algo.num_layers_transformer,
         num_action_layer=cfg.algo.num_action_layer,
         action_pred_horizon=cfg.algo.action_pred_horizon,
     ).to(device)
-
-    agent.implicit_decoder = implicit_decoder
-
-    implicit_decoder.load_state_dict(
-        torch.load(cfg.algo.implicit_decoder_path, map_location=device)["model"],
-        strict=True,
-    )
 
     logger = Logger(logger_cfg=cfg.logger, save_fn=None)
     writer = SummaryWriter(log_dir=cfg.logger.log_path)
@@ -236,12 +243,6 @@ def train(cfg: TrainConfig):
 
     timer = NonOverlappingTimeProfiler()
 
-    for param in static_maps.parameters():
-        param.requires_grad = False
-
-    for param in implicit_decoder.parameters():
-        param.requires_grad = False
-
     time_weights = exp_decay_weights(
         torch.arange(cfg.algo.action_pred_horizon, device=device),
         cfg.algo.action_temp_weights,
@@ -266,6 +267,7 @@ def train(cfg: TrainConfig):
             subtask_labels = get_object_labels_batch(
                 uid_to_label_map, subtask_uids
             ).to(device)
+
             epi_ids = torch.tensor(
                 [uid2episode_id[uid] for uid in subtask_uids],
                 device=device,
@@ -276,7 +278,7 @@ def train(cfg: TrainConfig):
                 act, device=device, dtype="float"
             )
 
-            pi = agent.forward(obs, subtask_labels, epi_ids)
+            pi = agent(obs, subtask_labels, epi_ids)
 
             total_bc_loss = F.smooth_l1_loss(pi, act, reduction="none")
             total_bc_loss = total_bc_loss * time_weights
