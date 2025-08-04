@@ -73,6 +73,14 @@ class Agent_map_bc(nn.Module):
         )
         
         self.state_mlp_action = StateProj(state_dim, transf_input_dim)
+
+        self.static_map = static_map
+        if "static_map" in self._modules:
+            del self._modules["static_map"]
+
+        self.implicit_decoder = implicit_decoder
+        if "implicit_decoder" in self._modules:
+            del self._modules["implicit_decoder"]
         
     def _process_sensor_data(self, rgb, depth, pose):   
         if rgb.shape[2] != 3:
