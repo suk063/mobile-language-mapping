@@ -2,294 +2,215 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# Local imports
-from ..module.transformer import ActionTransformerDecoder, TransformerEncoder
-from ..module.mlp import ImplicitDecoder, DimReducer, StateProj
-from ..module.global_module import HierarchicalSceneTransformer, LocalFeatureFusion
-
-from lang_mapping.grid_net import GridNet
-
-from ..utils import get_3d_coordinates, get_visual_features, transform, gate_with_text
 import open_clip
+# Local imports
+from lang_mapping.module.transformer import ActionTransformerDecoder, TransformerEncoder, LocalFeatureFusion
+from lang_mapping.module.mlp import StateProj, DimReducer
+from lang_mapping.utils.utils import get_3d_coordinates, get_visual_features_dino, transform
+from lang_mapping.mapper.mapper import MultiVoxelHashTable
+from lang_mapping.module.mlp import ImplicitDecoder
+from lang_mapping.module.scene_encoder import GlobalSceneEncoder
 
 class Agent_map_bc(nn.Module):
     def __init__(
         self,
         sample_obs,
         single_act_shape,
-        open_clip_model: tuple = ("EVA02-L-14", "merged2b_s4b_b131k"),
-        text_input: list = ["bowl", "apple"],
-        clip_input_dim: int = 768,
-        transf_input_dim: int = 768,
-        device: str = "cuda",
-        camera_intrinsics: tuple = (71.9144, 71.9144, 112, 112),
-        static_map: GridNet = None,
+        text_input: list,
+        transf_input_dim: int,
+        num_heads: int,
+        num_layers_transformer: int,
+        clip_input_dim: int,
+        num_action_layer: int,
+        action_pred_horizon: int,
+        camera_intrinsics: list[float],
+        static_maps: MultiVoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
-        num_heads: int = 8,
-        num_layers_transformer: int = 4,
-        num_action_layer: int = 6,
-        action_pred_horizon: int = 16,
     ):
         super().__init__()
 
-        self.device = device
+        # --- Feature and Action Dimensions ---
+        state_dim = sample_obs["state"].shape[1]
+        self.action_dim = np.prod(single_act_shape)
 
-        # Prepare state dimension
-        state_obs: torch.Tensor = sample_obs["state"]
-        pose_flat_dim      = int(np.prod(sample_obs["pixels"]["fetch_hand_pose"].shape[2:]))
-        raw_state_dim      = sample_obs["state"].shape[1]        # 42
-        
-        # state_dim = raw_state_dim + pose_flat_dim
-        state_dim = raw_state_dim
-        
-        # Load CLIP model
-        clip_model, _, _ = open_clip.create_model_and_transforms(
-            open_clip_model[0], pretrained=open_clip_model[1]
-        )
-        self.clip_model = clip_model.to(self.device)
-        self.tokenizer = open_clip.get_tokenizer(open_clip_model[0])
+        # --- Camera Intrinsics ---
+        self.fx, self.fy, self.cx, self.cy = camera_intrinsics
 
-        # Text embeddings and projection
+        # --- Vision and Language Pre-trained Models ---
+        # DINOv2 for visual features
+        self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+
+        # CLIP for text embeddings
+        clip_model, _, _ = open_clip.create_model_and_transforms("EVA02-L-14", "merged2b_s4b_b131k")
+        tokenizer = open_clip.get_tokenizer("EVA02-L-14")
+        
         if text_input:
-            # text_input += [""]
             text_input = ['pick up the' + s.replace('_', ' ') for s in text_input]
         
-        text_tokens = self.tokenizer(text_input).to(self.device)
-        self.text_proj = nn.Linear(clip_input_dim, transf_input_dim).to(self.device)
+        text_tokens = tokenizer(text_input)
         with torch.no_grad():
-            text_embeddings = self.clip_model.encode_text(text_tokens)
-            self.text_embeddings  = F.normalize(text_embeddings, dim=-1, p=2)
-            # text_embeddings, redundant_emb = text_embeddings[:-1, :], text_embeddings[-1:, :]
-            # self.text_embeddings = text_embeddings - redundant_emb
+            text_embeddings = clip_model.encode_text(text_tokens)
+            self.register_buffer("text_embeddings", F.normalize(text_embeddings, dim=-1, p=2))
+
+        del clip_model, tokenizer
+
+        # --- Agent Modules ---
+        self.text_proj = nn.Linear(clip_input_dim, transf_input_dim)
         
-        # Transformer for feature fusion
-        self.dim_reducer_hand = DimReducer(clip_input_dim, transf_input_dim, L=0)
-        self.dim_reducer_head = DimReducer(clip_input_dim, transf_input_dim, L=0)
-        
-        self.transformer = TransformerEncoder(
+        self.transformer_encoder = TransformerEncoder(
             input_dim=transf_input_dim,
             hidden_dim=transf_input_dim * 4,
             num_layers=num_layers_transformer,
             num_heads=num_heads,
         )
         
-        # Action MLP
-        self.action_dim = np.prod(single_act_shape)
-        
         self.action_transformer = ActionTransformerDecoder(
-            d_model=transf_input_dim,         
-            nhead=8,
-            num_decoder_layers=num_action_layer,   
+            d_model=transf_input_dim,
+            nhead=num_heads,
+            num_decoder_layers=num_action_layer,
             dim_feedforward=transf_input_dim * 4,
             dropout=0.1,
             action_dim=self.action_dim,
             action_pred_horizon=action_pred_horizon
         )
-
-        # Voxel hashing and implicit decoder
-        self.static_map = static_map
-        self.implicit_decoder = implicit_decoder
         
-        self.state_proj =  StateProj(state_dim, transf_input_dim)
-        self.voxel_proj = DimReducer(clip_input_dim, transf_input_dim, L=0)
-
-        # Camera intrinsics
-        self.fx, self.fy, self.cx, self.cy = camera_intrinsics
+        self.local_feature_fusion = LocalFeatureFusion(
+            dim=transf_input_dim,
+            n_heads=num_heads,
+            ff_mult=4,
+            radius=0.1,
+            k=2,
+        )
         
+        self.dim_reducer = DimReducer(clip_input_dim, transf_input_dim)
         self.state_mlp_action = StateProj(state_dim, transf_input_dim)
         
-        self.transf_input_dim   = transf_input_dim
-        
-        self.scene_encoder = HierarchicalSceneTransformer(
-            in_dim  = transf_input_dim,
-            out_dim = transf_input_dim,
+        self.scene_encoder = GlobalSceneEncoder(
+            out_dim=transf_input_dim,
+            heads=num_heads,
+            dropout=0.1
         )
+
+        if static_maps is not None:
+            object.__setattr__(self, "static_maps", static_maps)
+
+        if implicit_decoder is not None:
+            object.__setattr__(self, "implicit_decoder", implicit_decoder)
         
-        # self.bica = BiCrossAttnRoPE(dim=transf_input_dim, heads=8)
-        self.local_fuser = LocalFeatureFusion(
-            dim       = transf_input_dim,
-            n_heads   = num_heads,
-            ff_mult   = 4,
-            radius    = 0.2, 
-            k         = 8,
-            dropout   = 0.1
-        )
-    
-    @staticmethod
-    def _flatten_pose(p):            # p: [B, 1, 3, 4]
-        return p.squeeze(1).reshape(p.size(0), -1)      # → [B, 12]
+    def _process_sensor_data(self, rgb, depth, pose):   
+        if rgb.shape[2] != 3:
+            rgb = rgb.permute(0, 1, 4, 2, 3)
+            depth = depth.permute(0, 1, 4, 2, 3)
 
-    def _gather_scene_kv(
-            self,
-            batch_episode_ids: torch.Tensor,         # [B]
-            text_emb:          torch.Tensor,         # [B,768]
-            level_idx: int
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            """
-            Returns
-            -------
-            kv_coords     : (B,  L_max, 3)   padded with 0
-            kv_feats      : (B,  L_max, C)   padded with 0
-            kv_pad_mask   : (B,  L_max)      True ⟹ pad
-            """
-            B                              = batch_episode_ids.size(0)
-            scene_ids                       = batch_episode_ids.tolist()
-            per_scene_coords, per_scene_len = [], []
+        B, fs, d, H, W = rgb.shape
+        rgb = rgb.reshape(B * fs, d, H, W)
 
-            # ── 1) collect coordinates per scene ──────────────────────────────
-            for sid in scene_ids:
-                point = self.valid_coords[level_idx][int(sid)].to(self.device)     # (L_i,3)
-            
-                # point: (L_i, 3)  ── columns 0,1,2가 각각 x, y, z
-                mins, _ = point.min(dim=0)   # tensor([x_min, y_min, z_min])
-                maxs, _ = point.max(dim=0)   # tensor([x_max, y_max, z_max])
+        rgb = transform(rgb.float() / 255.0)
 
-                print(f"x range: [{mins[0].item():.3f}, {maxs[0].item():.3f}]")
-                print(f"y range: [{mins[1].item():.3f}, {maxs[1].item():.3f}]")
-                print(f"z range: [{mins[2].item():.3f}, {maxs[2].item():.3f}]")
-                
-                import pdb; pdb.set_trace()
-                
-                per_scene_coords.append(point)
-                per_scene_len.append(point.size(0))
+        visfeat = get_visual_features_dino(self.vision_model, rgb)
 
-            L_max = max(per_scene_len)
-
-            kv_coords   = torch.zeros(B, L_max, 3,                   device=self.device)
-            kv_feats    = torch.zeros(B, L_max, self.transf_input_dim, device=self.device)
-            kv_pad_mask = torch.ones( B, L_max, dtype=torch.bool,    device=self.device)
-
-            # ── 2) query voxel features scene-wise ────────────────────────────
-            for b, (sid, coords) in enumerate(zip(scene_ids, per_scene_coords)):
-                L                     = coords.size(0)
-                
-                kv_coords  [b, :L]    = coords
-                kv_pad_mask[b, :L]    = False                         # not pad
-
-                scene_ids_tensor      = torch.full((L, 1), sid, device=self.device)
-
-                vox_raw           = self.static_map.query_feature(coords, scene_ids_tensor)
-                vox_feat          = self.implicit_decoder(vox_raw)          # (L,F_dec)
-
-                # vox_feat              = gate_with_text(vox_feat.unsqueeze(0), text_emb[b:b+1]).squeeze(0)
-                kv_feats   [b, :L]    = self.voxel_proj(vox_feat)
-
-            return kv_coords, kv_feats, kv_pad_mask
-    
-    def forward_policy(self, observations, object_labels, batch_episode_ids):
-
-        hand_rgb   = observations["fetch_hand_rgb"]
-        head_rgb   = observations["fetch_head_rgb"]
-
-        hand_depth  = observations["fetch_hand_depth"]
-        head_depth  = observations["fetch_head_depth"]
-
-        hand_pose   = observations["fetch_hand_pose"]
-        head_pose   = observations["fetch_head_pose"]
-
-        state  = observations["state"].squeeze(1)
+        depth = depth / 1000.0
         
-        B = hand_rgb.shape[0]
-    
-        # If needed, permute hand_rgb so channel=3
-        if hand_rgb.shape[2] != 3:
-            hand_rgb = hand_rgb.permute(0, 1, 4, 2, 3)
-            head_rgb = head_rgb.permute(0, 1, 4, 2, 3)
-            
-            hand_depth = hand_depth.permute(0, 1, 4, 2, 3)
-            head_depth = head_depth.permute(0, 1, 4, 2, 3)
-        
-        # Flatten frames
-        _, fs, d, H, W = hand_rgb.shape
-        hand_rgb = hand_rgb.reshape(B * fs, d, H, W)
-        head_rgb = head_rgb.reshape(B * fs, d, H, W)
+        _, fs, d2, H, W = depth.shape
+        depth = depth.view(B * fs, d2, H, W)
+        depth = F.interpolate(depth, (16, 16), mode="nearest-exact")
 
-        # Transform to [0,1], apply normalization
-        hand_rgb = transform(hand_rgb.float() / 255.0)
-        head_rgb = transform(head_rgb.float() / 255.0)
-        
-        with torch.no_grad():
-            hand_visfeat = get_visual_features(self.clip_model, hand_rgb)
-            head_visfeat = get_visual_features(self.clip_model, head_rgb)
-    
-        # Handle depth (reshape, interpolate)
-        hand_depth = hand_depth / 1000.0
-        head_depth = head_depth / 1000.0
-           
-        _, fs, d2, H, W = hand_depth.shape
-    
-        hand_depth = hand_depth.view(B * fs, d2, H, W) # [4, 1, 16, 16]
-        head_depth = head_depth.view(B * fs, d2, H, W) # [4, 1, 16, 16]
-        hand_depth = F.interpolate(hand_depth, (16, 16), mode="nearest-exact")
-        head_depth = F.interpolate(head_depth, (16, 16), mode="nearest-exact")
-
-        # 3D world coords
-        hand_coords_world, _ = get_3d_coordinates(
-            hand_depth, hand_pose, 
+        coords_world, _ = get_3d_coordinates(
+            depth, pose, 
             self.fx, self.fy, self.cx, self.cy
         )
-        head_coords_world, _ = get_3d_coordinates(
-            head_depth, head_pose,
-            self.fx, self.fy, self.cx, self.cy
-        )
- 
-        # Reduce CLIP dimension for hand/head
-        _, C_, Hf, Wf = hand_coords_world.shape
+
+        _, _, Hf, Wf = coords_world.shape
         N = Hf * Wf
 
-        feats_hand = hand_visfeat.permute(0, 2, 3, 1).reshape(B, N, -1)
-        feats_head = head_visfeat.permute(0, 2, 3, 1).reshape(B, N, -1)
+        feats = visfeat.permute(0, 2, 3, 1).reshape(B, N, -1)
+        coords_world_flat = coords_world.permute(0, 2, 3, 1).reshape(B, N, 3)
+        
+        return feats, coords_world_flat
 
-        hand_coords_world_flat = hand_coords_world.permute(0, 2, 3, 1).reshape(B*N, 3)
-        head_coords_world_flat = head_coords_world.permute(0, 2, 3, 1).reshape(B*N, 3)        
-        
-        # --------------------------------------------------------------------- #
-        # 1)  text embeddings for this batch
-        # --------------------------------------------------------------------- #
-        text_emb = self.text_embeddings[object_labels]        # (B,768)
-        
-        # feats_hand  = gate_with_text(feats_hand,  text_emb)        # (B*N,768)
-        # feats_head  = gate_with_text(feats_head,  text_emb)
-        
-        feats_hand  = self.dim_reducer_hand(feats_hand.reshape(B*N, -1)).reshape(B, N, -1) 
-        feats_head  = self.dim_reducer_head(feats_head.reshape(B*N, -1)).reshape(B, N, -1)
+    def _gather_static_map_features(self, scene_ids, level_index):
+        """
+        Parameters
+        ----------
+        scene_ids : (B,) LongTensor
+            The scene-id for every sample in the batch.
+        level_index : int
+            Which pyramid level of the voxel hash table to query.
 
-        # state_proj = self.state_proj(state)
+        Returns
+        -------
+        kv_coords : Tensor (B, max_len, 3)
+            World coordinates of the queried voxels (zero padded).
+        kv_feats : Tensor (B, max_len, D)
+            Corresponding voxel features where D = num_levels * feature_dim.
+        kv_pad_mask : BoolTensor (B, max_len)
+            Padding mask where **True** indicates padded (invalid) positions.
+        """
+        device = scene_ids.device
+        B = scene_ids.shape[0]
+
+        # Collect per-scene coordinate tensors
+        per_scene_coords = [
+            self.static_maps.voxel_hash_tables[sid].levels[level_index].coords
+            for sid in scene_ids.tolist()
+        ]
+        max_len = max(coords.shape[0] for coords in per_scene_coords)
+
+        # Output dimensions
+        feat_dim = self.static_maps.num_levels * self.static_maps.feature_dim
+
+        kv_coords = torch.zeros(B, max_len, 3, device=device, dtype=per_scene_coords[0].dtype)
+        kv_feats = torch.zeros(B, max_len, feat_dim, device=device, dtype=torch.float32)
+        kv_pad_mask = torch.ones(B, max_len, device=device, dtype=torch.bool)
+
+        # Fill tensors scene-by-scene
+        for i, (sid, coords) in enumerate(zip(scene_ids.tolist(), per_scene_coords)):
+            n = coords.shape[0]
+            kv_coords[i, :n] = coords
+            kv_pad_mask[i, :n] = False
+            sid_tensor = torch.full((n,), sid, device=device, dtype=torch.long)
+            kv_feats[i, :n] = self.static_maps.query_feature(coords, sid_tensor)
+
+        kv_feats = self.dim_reducer(self.implicit_decoder(kv_feats.reshape(B * max_len, -1))).reshape(B, max_len, -1)
+
+        return kv_coords, kv_feats, kv_pad_mask
         
-        coords_hand = hand_coords_world_flat.view(B, N, 3)
-        coords_head = head_coords_world_flat.view(B, N, 3)
+    def forward(self, observations, object_labels, scene_ids):
+        
+        state  = observations["state"].squeeze(1)
+        
+        feats_hand, coords_hand = self._process_sensor_data(
+            observations["fetch_hand_rgb"],
+            observations["fetch_hand_depth"],
+            observations["fetch_hand_pose"],
+        )
+        
+        feats_head, coords_head = self._process_sensor_data(
+            observations["fetch_head_rgb"],
+            observations["fetch_head_depth"],
+            observations["fetch_head_pose"],
+        )
+        
+        feats = torch.cat([feats_hand, feats_head], dim=1)
+        coords = torch.cat([coords_hand, coords_head], dim=1)  # (B, N, 3)
+
+        kv_coords, kv_feats, kv_pad_mask = self._gather_static_map_features(scene_ids, 1)
+        
+        # Global scene encoding
+        pts_kv   = torch.cat([kv_coords, kv_feats], dim=-1)            # [B,L, 3+768]
+        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_mask)          
         
         # Local feature fusion
-        # kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1 = self._gather_scene_kv(batch_episode_ids, text_emb, 1)
+        feats = self.local_feature_fusion(coords, feats, kv_coords, kv_feats, kv_pad_mask)
         
-        # feats_hand  = self.local_fuser(
-        #     coords_hand, feats_hand,
-        #     kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
-        # )
-        # feats_head  = self.local_fuser(
-        #     coords_head, feats_head,
-        #     kv_coords_lvl1, kv_feats_lvl1, kv_pad_lvl1
-        # )
-        
-        # kv_coords_lvl0, kv_feats_lvl0, kv_pad_lvl0 = self._gather_scene_kv(batch_episode_ids, text_emb, 0)
-        
-        # pts_kv   = torch.cat([kv_coords_lvl1, kv_feats_lvl1], dim=-1)            # [B,L, 3+768]
-        # global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_lvl1)          
-        
-        visual_tok = self.transformer(
-            hand_token=feats_hand,
-            head_token=feats_head,
-            coords_hand=coords_hand,
-            coords_head=coords_head,
-            text_emb=text_emb.unsqueeze(1),
-            # state=state_proj.unsqueeze(1),
+        text_emb = self.text_proj(self.text_embeddings[object_labels]).unsqueeze(1)        # (B,768)
+        state_tok = self.state_mlp_action(state).unsqueeze(1) # [B,1,128]
+    
+        visual_tok = self.transformer_encoder(
+            visual_token=feats,
+            coords=coords,  
         ) 
-
-        state_tok  = self.state_mlp_action(state).unsqueeze(1) # [B,1,128]
         
-        # cond_tok   = torch.cat([visual_tok, global_tok], dim=1) 
-        
-        
-        action_out = self.action_transformer(visual_tok, state_tok)
+        action_out = self.action_transformer(visual_tok, global_tok, text_emb, state_tok)
         
         return action_out

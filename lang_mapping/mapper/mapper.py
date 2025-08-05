@@ -315,15 +315,15 @@ class VoxelHashTable(nn.Module):
     def __init__(
         self,
         one_to_one: bool = True,
-        resolution: float = 0.12,
+        resolution: float = 0.2,
         num_levels: int = 2,
         level_scale: float = 2.0,
-        feature_dim: int = 32,
+        feature_dim: int = 64,
         hash_table_size: int = 2**21,
-        scene_bound_min: tuple[float, ...] = (-2.6, -8.1, 0),
-        scene_bound_max: tuple[float, ...] = (4.6, 4.7, 3.1),
+        scene_bound_min: tuple[float, ...] = (-2.7, -8.2, -0.1),
+        scene_bound_max: tuple[float, ...] = (4.6, 4.7, 3.2),
         device: str = "cuda:0",
-        mode: str = "train",
+        mode: str = "infer",
         sparse_data: Optional[Dict] = None,
     ):
         super().__init__()
@@ -401,16 +401,16 @@ class VoxelHashTable(nn.Module):
 class MultiVoxelHashTable(nn.Module):
     def __init__(
         self,
-        n_scenes: int,
+        n_scenes: int = 941,
         one_to_one: bool = True,
-        resolution: float = 0.12,
+        resolution: float = 0.2,
         num_levels: int = 2,
         level_scale: float = 2.0,
         feature_dim: int = 64,
         hash_table_size: int = 2**21,
-        scene_bound_min: list[float] = [-2.6, -8.1, 0],
-        scene_bound_max: list[float] = [4.6, 4.7, 3.1],
-        mode: str = "train",
+        scene_bound_min: list[float] = [-2.7, -8.2, -0.1],
+        scene_bound_max: list[float] = [4.6, 4.7, 3.2],
+        mode: str = "infer",
         sparse_data: Optional[List[Dict]] = None,
     ):
         super(MultiVoxelHashTable, self).__init__()
@@ -426,6 +426,7 @@ class MultiVoxelHashTable(nn.Module):
         self.mode = mode
 
         self.voxel_hash_tables = nn.ModuleList()
+        
         for i in range(n_scenes):
             self.voxel_hash_tables.append(
                 VoxelHashTable(
@@ -517,7 +518,8 @@ class MultiVoxelHashTable(nn.Module):
     @staticmethod
     def load_sparse(path: str):
         sparse_data = torch.load(path, map_location="cpu")
-        n_scenes = len(sparse_data)
+        n_scenes = sparse_data["n_scenes"]
+        
         return MultiVoxelHashTable(
             n_scenes=n_scenes,
             resolution=sparse_data["resolution"],
@@ -528,7 +530,7 @@ class MultiVoxelHashTable(nn.Module):
             scene_bound_min=sparse_data["scene_bound_min"],
             scene_bound_max=sparse_data["scene_bound_max"],
             mode="infer",
-            sparse_data=[sparse_data[str(i)] for i in range(n_scenes)],
+            sparse_data=[sparse_data["state_dict"][str(i)] for i in range(n_scenes)],
         )
 
     @staticmethod

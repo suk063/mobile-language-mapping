@@ -178,10 +178,12 @@ bench_results/
 
 nohup*
 test*
+*copy.py
 
-ManiSkill/
 nautilus/
 vis/
 Notebook
 output.log
 my_debug_vis/
+pretrained/
+playground/

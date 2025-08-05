@@ -2,112 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from ..utils import positional_encoding
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    """
-    Initializes a layer's weights orthogonally.
-    """
-    nn.init.orthogonal_(layer.weight, std)
-    nn.init.constant_(layer.bias, bias_const)
-    return layer
+from lang_mapping.utils.utils import positional_encoding
 
 def init_weights_kaiming(m):
     if isinstance(m, nn.Linear):
         nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.constant_(m.bias, 0.0)
-    
-class ConcatMLPFusion(nn.Module):
-    """
-    (feat1, feat2, coords_3d) -> [concat + sinusoidal PE] -> MLP -> fused
-    """
-    def __init__(self, feat_dim=768, clip_embedding_dim=768, output_dim=384, L=10):
-        super().__init__()
-        self.feat_dim = feat_dim
-        self.L = L
-        
-        if L == 0:
-            self.pos_enc_dim = 0
-        else:
-            self.pos_enc_dim = 2 * self.L * 3
-
-        in_dim = feat_dim + clip_embedding_dim + self.pos_enc_dim
-        
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, feat_dim),
-            nn.LayerNorm(feat_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, feat_dim),
-            nn.LayerNorm(feat_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, feat_dim)
-        )
-        
-        self.output_proj = nn.Linear(feat_dim, output_dim)
-
-    def forward(self, feat1, feat2, coords_3d=None):
-        """
-        Args:
-            feat1: (B * N, feat_dim) 
-            feat2: (B * N, clip_embedding_dim)
-            coords_3d:    (B * N, 3)  
-        
-        Returns:
-            fused: (B * N, feat_dim) 
-        """
-
-        x = torch.cat([feat1, feat2], dim=-1)
-
-        if coords_3d is not None:
-            pe = positional_encoding(coords_3d, L=self.L)  # (B*N, 2*L*3)
-            x = torch.cat([x, pe], dim=-1)
-
-        # MLP 
-        fused = self.mlp(x) + feat1 # (B, N, feat_dim)
-        return self.output_proj(fused)
-    
-class ActionMLP(nn.Module):
-    """
-    A feed-forward MLP for producing action outputs from a latent state vector.
-    """
-    def __init__(
-        self,
-        input_dim: int,
-        action_dim: int,
-        hidden_dims: list = [2048, 1024, 512],
-        final_std: float = 0.01 * np.sqrt(2)
-    ):
-        """
-        Args:
-            input_dim (int): Dimension of the input (e.g., token + state embedding).
-            action_dim (int): Number of action outputs.
-            hidden_dims (list): Dimensions of the hidden layers.
-            final_std (float): Std for the final layer initialization.
-        """
-        super().__init__()
-
-        # Build layers
-        layers = []
-        prev_dim = input_dim
-        for hdim in hidden_dims:
-            layers.append(layer_init(nn.Linear(prev_dim, hdim)))
-            layers.append(nn.LayerNorm(hdim))
-            layers.append(nn.ReLU(inplace=True))
-            prev_dim = hdim
-
-        # Final layer
-        final_linear = layer_init(
-            nn.Linear(prev_dim, action_dim),
-            std=final_std
-        )
-        layers.append(final_linear)
-
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute the action outputs."""
-        return self.net(x)
 
 class ImplicitDecoder(nn.Module):
     """
@@ -201,40 +102,13 @@ class StateProj(nn.Module):
         out = self.mlp(state)
         return out
 
-class VoxelProj(nn.Module):
-    def __init__(self, voxel_feature_dim=768):
-        super().__init__()
-        
-        self.mlp = nn.Sequential(
-            nn.Linear(voxel_feature_dim, voxel_feature_dim),
-            nn.ReLU(),
-            nn.LayerNorm(voxel_feature_dim),
-            nn.Linear(voxel_feature_dim, voxel_feature_dim),
-        )
-        
-        self.apply(init_weights_kaiming)
-
-    def forward(self, voxel_feat):
-        """
-        Args:
-            voxel_feat: (N, voxel_feature_dim)
-        Returns:
-            projected:  (N, voxel_feature_dim)
-        """
-        out = self.mlp(voxel_feat)
-        return out
 
 class DimReducer(nn.Module):
-    def __init__(self, input_dim=768, output_dim=768, L=10):
+    def __init__(self, input_dim=768, output_dim=768):
         super().__init__()
-        self.L = L
-        self.pos_enc_dim = 2 * self.L * 3
 
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim + self.pos_enc_dim, output_dim),
-            nn.ReLU(),
-            nn.LayerNorm(output_dim),
-            nn.Linear(output_dim, output_dim),
+            nn.Linear(input_dim, output_dim),
             nn.ReLU(),
             nn.LayerNorm(output_dim),
             nn.Linear(output_dim, output_dim),
@@ -242,56 +116,6 @@ class DimReducer(nn.Module):
         
         self.apply(init_weights_kaiming)
 
-    def forward(self, x, coords_3d=None):
-        """
-        Args:
-            voxel_feat: (N, voxel_feature_dim)
-            coords_3d:  (N, 3)
-        Returns:
-            projected:  (N, voxel_feature_dim)
-        """
-        if coords_3d is not None:
-            pe = positional_encoding(coords_3d, L=self.L)  # (N, 2*L*3)
-            x = torch.cat([x, pe], dim=-1)
+    def forward(self, x):
         out = self.mlp(x)
         return out
-
-class LoRALinear(nn.Module):
-    def __init__(self, 
-                 linear_layer: nn.Linear,
-                 rank: int = 4,
-                 alpha: float = 1.0,
-                 dropout: float = 0.0):
-        super().__init__()
-
-        self.in_features = linear_layer.in_features
-        self.out_features = linear_layer.out_features
-        self.original_weight = linear_layer.weight
-        self.original_bias = linear_layer.bias
-        
-        self.rank = rank
-        self.alpha = alpha
-        self.scaling = alpha / rank
-
-        self.lora_A = nn.Parameter(torch.zeros((rank, self.in_features)))
-        self.lora_B = nn.Parameter(torch.zeros((self.out_features, rank)))
-        
-        self.dropout = nn.Dropout(p=dropout)
-
-        nn.init.normal_(self.lora_A, std=0.02)
-        nn.init.normal_(self.lora_B, std=0.02)
-
-        self.original_weight.requires_grad_(False)
-        if self.original_bias is not None:
-            self.original_bias.requires_grad_(False)
-
-    def forward(self, x: torch.Tensor):
-        result = torch.matmul(x, self.original_weight.T)
-        if self.original_bias is not None:
-            result = result + self.original_bias
-
-        lora_out = torch.matmul(self.dropout(x), self.lora_A.T)  # (batch, rank)
-        lora_out = torch.matmul(lora_out, self.lora_B.T)         # (batch, out_features)
-        result += self.scaling * lora_out
-
-        return result
