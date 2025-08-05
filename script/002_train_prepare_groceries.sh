@@ -28,8 +28,8 @@ MS_ASSET_DIR="$HOME/.maniskill/data"
 RESUME_LOGDIR="$WORKSPACE/$EXP_NAME"
 RESUME_CONFIG="$RESUME_LOGDIR/config.yml"
 
-MAX_CACHE_SIZE=0   # safe num for about 64 GiB system memory
-
+MAX_IMAGE_CACHE_SIZE=50_000   # safe num for about 64 GiB system memory
+NUM_DATALOAD_WORKERS=2
 data_dir_fp="$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset/$TASK/$SUBTASK/$OBJ.h5"
 
 args=(
@@ -42,7 +42,8 @@ args=(
     "eval_env.frame_stack=1"
     "algo.trajs_per_obj=$TRAJS_PER_OBJ"
     "algo.data_dir_fp=$data_dir_fp"
-    "algo.max_cache_size=$MAX_CACHE_SIZE"
+    "algo.max_image_cache_size=$MAX_IMAGE_CACHE_SIZE"
+    "algo.num_dataload_workers=$NUM_DATALOAD_WORKERS"
     "algo.eval_freq=1"
     "algo.log_freq=1"
     "algo.save_freq=1"

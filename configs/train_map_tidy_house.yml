@@ -12,7 +12,7 @@ eval_env:
   continuous_task: True
   cat_state: True
   cat_pixels: False
-  frame_stack: 1
+  frame_stack: 1  
   stationary_base: False
   stationary_torso: False
   stationary_head: True
@@ -36,10 +36,10 @@ algo:
   save_freq: 1
   trajs_per_obj: "all"
   data_dir_fp: null
-  max_cache_size: 0
+  max_image_cache_size: 50_000
   save_backup_ckpts: False
   torch_deterministic: True
-
+  num_dataload_workers: 0
   # Pretrained model paths
   static_map_path: "pretrained/hash_voxel_sparse.pt"
   implicit_decoder_path: "pretrained/implicit_decoder.pt"
