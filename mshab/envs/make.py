@@ -45,7 +45,6 @@ class EnvConfig:
     env_id: str
     num_envs: int
     max_episode_steps: int
-    all_plan_count: int
 
     make_env: bool = True
     obs_mode: str = "rgbd"

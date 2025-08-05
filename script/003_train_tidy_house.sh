@@ -5,7 +5,7 @@ SEED=1
 TRAJS_PER_OBJ=1000
 
 REPRESENTATION=map
-TASK=set_table
+TASK=tidy_house
 SUBTASK=pick
 SPLIT=train
 OBJ=all_13

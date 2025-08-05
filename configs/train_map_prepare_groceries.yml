@@ -1,11 +1,14 @@
 seed: 2
 
+TASK: prepare_groceries
+OBJ: all_13
+REPRESENTATION: map
+
 eval_env:
   make_env: True
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 50
+  num_envs: 10
   max_episode_steps: 200
-  all_plan_count: 244
   continuous_task: True
   cat_state: True
   cat_pixels: False
@@ -13,8 +16,8 @@ eval_env:
   stationary_base: False
   stationary_torso: False
   stationary_head: True
-  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all_13.json
-  spawn_data_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/${TASK}/pick/train/${OBJ}.json
+  spawn_data_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/${TASK}/pick/train/spawn_data.pt
   record_video: False
   info_on_video: True
   extra_stat_keys: []
@@ -43,24 +46,21 @@ algo:
 
   # CLIP / Agent Settings
   clip_input_dim: 768
-  text_input: ["bowl", "apple"]
+  text_input: ["tomato_soup_can", "cracker_box", "tuna_fish_can", "bowl", "sugar_box", "master_chef_can", "pudding_box", "potted_meat_can", "gelatin_box"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
-  cos_loss_weight: 0.1
   bc_loss_weight: 10.0
   action_temp_weights: 0.3
   
   # Transformer architecture
   num_heads: 8
-  hidden_dim: 512
   num_layers_transformer: 4
   num_action_layer: 6
   action_pred_horizon: 16
   transf_input_dim: 384
-  neighbor_k: 512
 
 logger:
   workspace: mshab_exps
-  exp_name: bc-pick
+  exp_name: bc-${REPRESENTATION}-${TASK}
   clear_out: True
   tensorboard: True
   wandb: False

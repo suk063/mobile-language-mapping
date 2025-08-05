@@ -59,14 +59,11 @@ class BCConfig:
     clip_input_dim: int
     text_input: List[str]
     camera_intrinsics: List[float]
-    cos_loss_weight: float
     bc_loss_weight: float
     num_heads: int
-    hidden_dim: int
     num_layers_transformer: int
     num_action_layer: int
     action_pred_horizon: int
-    neighbor_k: int
     action_temp_weights: float
     transf_input_dim: int
 
@@ -189,6 +186,7 @@ def setup_models_and_optimizer(
         sample_obs=sample_obs,
         single_act_shape=single_act_shape,
         transf_input_dim=cfg.algo.transf_input_dim,
+        clip_input_dim=cfg.algo.clip_input_dim,
         text_input=cfg.algo.text_input,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
         static_maps=static_maps,

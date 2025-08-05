@@ -20,6 +20,7 @@ class Agent_map_bc(nn.Module):
         transf_input_dim: int,
         num_heads: int,
         num_layers_transformer: int,
+        clip_input_dim: int,
         num_action_layer: int,
         action_pred_horizon: int,
         camera_intrinsics: list[float],
@@ -54,7 +55,7 @@ class Agent_map_bc(nn.Module):
         del clip_model, tokenizer
 
         # --- Agent Modules ---
-        self.text_proj = nn.Linear(768, transf_input_dim)
+        self.text_proj = nn.Linear(clip_input_dim, transf_input_dim)
         
         self.transformer_encoder = TransformerEncoder(
             input_dim=transf_input_dim,
@@ -81,12 +82,10 @@ class Agent_map_bc(nn.Module):
             k=2,
         )
         
-        self.dim_reducer = DimReducer(768, transf_input_dim)
+        self.dim_reducer = DimReducer(clip_input_dim, transf_input_dim)
         self.state_mlp_action = StateProj(state_dim, transf_input_dim)
         
         self.scene_encoder = GlobalSceneEncoder(
-            in_dim=transf_input_dim,
-            hid_dim=transf_input_dim,
             out_dim=transf_input_dim,
             heads=num_heads,
             dropout=0.1

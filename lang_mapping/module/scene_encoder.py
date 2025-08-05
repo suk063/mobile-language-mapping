@@ -117,8 +117,7 @@ class SATransformer(nn.Module):
 
 
 class GlobalSceneEncoder(nn.Module):
-    def __init__(self, in_dim=384, hid_dim=384, out_dim=384,
-                 heads=8, dropout=0.1):
+    def __init__(self, out_dim=384, heads=8, dropout=0.1):
         super().__init__()
         cfg = dict(
             sa1=(1.0,  16, 0.25),
@@ -133,7 +132,7 @@ class GlobalSceneEncoder(nn.Module):
         self.sa3 = SATransformer(out_dim, r3, k3, p3, heads, dropout)
         self.sa4 = SATransformer(out_dim, r4, k4, p4, heads, dropout)
 
-        self.proj = nn.Sequential(nn.Linear(hid_dim, out_dim),
+        self.proj = nn.Sequential(nn.Linear(out_dim, out_dim),
                                   nn.LayerNorm(out_dim))
 
     def forward(self, pts, pad=None):

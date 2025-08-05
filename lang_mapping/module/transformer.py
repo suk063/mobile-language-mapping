@@ -333,7 +333,7 @@ class LocalFeatureFusion(nn.Module):
         batch = torch.arange(B, device=q_feat.device).view(B, 1, 1)
         neigh_xyz  = kv_xyz[batch.expand_as(idx), idx]             # (B, N, k, 3)
         neigh_feat = kv_feat[batch.expand_as(idx), idx]            # (B, N, k, C)
-
+        
         # replace padding slots with the query point itself
         neigh_xyz [invalid] = q_xyz.unsqueeze(2).expand(-1, -1, self.k, -1)[invalid]
         neigh_feat[invalid] = q_feat.unsqueeze(2).expand(-1, -1, self.k, -1)[invalid]
