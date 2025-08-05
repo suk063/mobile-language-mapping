@@ -1,9 +1,9 @@
 # bring in the micromamba image so we can copy files from it
-FROM mambaorg/micromamba:1.4.1 as micromamba
+FROM mambaorg/micromamba:1.4.1 AS micromamba
 
 # the actual base image
 FROM nvidia/cudagl:11.3.1-devel-ubuntu20.04
-ENV NVIDIA_DRIVER_CAPABILITIES all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 # Install os-level packages
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -28,8 +28,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-COPY nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json
-COPY nvidia_layers.json /etc/vulkan/implicit_layer.d/nvidia_layers.json
+COPY docker/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json
+COPY docker/nvidia_layers.json /etc/vulkan/implicit_layer.d/nvidia_layers.json
 
 USER root
 
@@ -66,7 +66,7 @@ CMD ["/bin/bash"]
 
 # Optional: you can now populate a conda environment:
 RUN micromamba install --yes --name base --channel conda-forge \
-      jq python=3.9 setuptools= && \
+      jq python=3.10 setuptools= && \
     micromamba clean --all --yes
 
 ARG MAMBA_DOCKERFILE_ACTIVATE=1  # (otherwise python will not be found)
@@ -80,12 +80,24 @@ ARG CACHE_DATE=not_a_date
 
 # install dependencies
 RUN pip install --upgrade sapien==3.0.0.b1 && pip cache purge
-RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+RUN pip install xformers==0.0.27.post1 \
+  --extra-index-url https://download.pytorch.org/whl/cu118
+
+RUN micromamba install -y -n base \
+  -c pytorch3d -c pytorch -c nvidia -c conda-forge \
+  python=3.10 \
+  pytorch=2.4.1 torchvision=0.19.1 torchaudio=2.4.1 \
+  pytorch-cuda=11.8 \
+  pytorch3d=0.7.8 \
+  fvcore iopath && \
+  micromamba clean -afy
 
 # download physx GPU binary via sapien
 RUN python -c "exec('import sapien.physx as physx;\ntry:\n  physx.enable_gpu()\nexcept:\n  pass;')"
 
 RUN pip install \
+    open_clip_torch \
     dacite \
     shortuuid \
     huggingface_hub[cli] \
@@ -99,4 +111,6 @@ RUN pip install \
     jupyterlab \
     ipython \
     black \
-    isort
+    isort \
+    gymnasium \
+    h5py 
