@@ -1,14 +1,10 @@
-import json
-import os
 import random
 import sys
-from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import gymnasium as gym
-import h5py
 import numpy as np
 import torch
 import torch.nn as nn
@@ -19,13 +15,12 @@ from torch.optim import Optimizer
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-import mani_skill.envs
 from lang_mapping.agent.agent_map_bc import Agent_map_bc
 from lang_mapping.utils.dataset import (
     DPDataset,
     build_object_map,
     get_object_labels_batch,
-    build_episode_subtask_maps,
+    build_uid_episode_scene_maps,
 )
 from lang_mapping.mapper.mapper import MultiVoxelHashTable
 from lang_mapping.module import ImplicitDecoder
@@ -196,7 +191,7 @@ def setup_models_and_optimizer(
         transf_input_dim=cfg.algo.transf_input_dim,
         text_input=cfg.algo.text_input,
         camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        static_map=static_maps,
+        static_maps=static_maps,
         implicit_decoder=implicit_decoder,
         num_heads=cfg.algo.num_heads,
         num_layers_transformer=cfg.algo.num_layers_transformer,
@@ -217,7 +212,7 @@ def train_one_epoch(
     device: torch.device,
     cfg: BCConfig,
     uid_to_label_map: Dict,
-    uid2episode_id: Dict,
+    uid2scene_id: Dict,
     time_weights: torch.Tensor,
     writer: SummaryWriter,
     global_step: int,
@@ -233,8 +228,8 @@ def train_one_epoch(
         subtask_labels = get_object_labels_batch(uid_to_label_map, subtask_uids).to(
             device
         )
-        epi_ids = torch.tensor(
-            [uid2episode_id[uid] for uid in subtask_uids],
+        scene_ids = torch.tensor(
+            [uid2scene_id[uid] for uid in subtask_uids],
             device=device,
             dtype=torch.long,
         )
@@ -243,7 +238,7 @@ def train_one_epoch(
             act, device=device, dtype="float"
         )
 
-        pi = agent(obs, subtask_labels)
+        pi = agent(obs, subtask_labels, scene_ids)
 
         total_bc_loss = F.smooth_l1_loss(pi, act, reduction="none")
         total_bc_loss = total_bc_loss * time_weights
@@ -271,7 +266,7 @@ def evaluate_agent(
     eval_envs,
     fixed_plan_idxs,
     uid_to_label_map,
-    uid2episode_id,
+    uid2scene_id,
     logger,
     device,
     global_epoch,
@@ -281,7 +276,7 @@ def evaluate_agent(
 
     print("Run eval episode (single horizon)")
     stats_single = run_eval_episode(
-        eval_envs, eval_obs, agent, uid_to_label_map, uid2episode_id, device
+        eval_envs, eval_obs, agent, uid_to_label_map, uid2scene_id, device
     )
     _pretty_print_stats("[Eval-Single]", stats_single, logger, color="yellow")
 
@@ -296,10 +291,8 @@ def train(cfg: TrainConfig):
     torch.backends.cudnn.deterministic = cfg.algo.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    uid_to_label_map = build_object_map(
-        cfg.eval_env.task_plan_fp, cfg.algo.text_input
-    )
-    _, _, uid2episode_id = build_episode_subtask_maps(cfg.eval_env.task_plan_fp)
+    uid_to_label_map = build_object_map(cfg.eval_env.task_plan_fp, cfg.algo.text_input)
+    _, uid2scene_id = build_uid_episode_scene_maps(cfg.eval_env.task_plan_fp, 'pretrained/scene_ids.yaml')
 
     # Make eval env
     print("Making eval env...")
@@ -363,7 +356,7 @@ def train(cfg: TrainConfig):
             device,
             cfg.algo,
             uid_to_label_map,
-            uid2episode_id,
+            uid2scene_id,
             time_weights,
             writer,
             global_step,
@@ -383,7 +376,7 @@ def train(cfg: TrainConfig):
                 eval_envs,
                 fixed_plan_idxs,
                 uid_to_label_map,
-                uid2episode_id,
+                uid2scene_id,
                 logger,
                 device,
                 global_epoch,

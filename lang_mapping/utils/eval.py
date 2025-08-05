@@ -72,7 +72,7 @@ def run_eval_episode(eval_envs, eval_obs, agent, uid_to_label_map, uid2episode_i
         agent_obs = _flatten_obs(eval_obs, device)
 
         with torch.no_grad():
-            action = agent(agent_obs, subtask_labels)
+            action = agent(agent_obs, subtask_labels, epi_ids)
 
         # Environment step
         eval_obs, _, _, _, _ = eval_envs.step(action[:, 0, :])

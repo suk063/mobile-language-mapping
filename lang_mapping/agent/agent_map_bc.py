@@ -4,11 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import open_clip
 # Local imports
-from lang_mapping.module.transformer import ActionTransformerDecoder, TransformerEncoder
-from lang_mapping.module.mlp import DimReducer, StateProj
+from lang_mapping.module.transformer import ActionTransformerDecoder, TransformerEncoder, LocalFeatureFusion
+from lang_mapping.module.mlp import StateProj, DimReducer
 from lang_mapping.utils.utils import get_3d_coordinates, get_visual_features_dino, transform
 from lang_mapping.mapper.mapper import MultiVoxelHashTable
 from lang_mapping.module.mlp import ImplicitDecoder
+from lang_mapping.module.scene_encoder import GlobalSceneEncoder
 
 class Agent_map_bc(nn.Module):
     def __init__(
@@ -22,7 +23,7 @@ class Agent_map_bc(nn.Module):
         num_action_layer: int,
         action_pred_horizon: int,
         camera_intrinsics: list[float],
-        static_map: MultiVoxelHashTable = None,
+        static_maps: MultiVoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
     ):
         super().__init__()
@@ -55,7 +56,7 @@ class Agent_map_bc(nn.Module):
         # --- Agent Modules ---
         self.text_proj = nn.Linear(768, transf_input_dim)
         
-        self.transformer = TransformerEncoder(
+        self.transformer_encoder = TransformerEncoder(
             input_dim=transf_input_dim,
             hidden_dim=transf_input_dim * 4,
             num_layers=num_layers_transformer,
@@ -72,15 +73,30 @@ class Agent_map_bc(nn.Module):
             action_pred_horizon=action_pred_horizon
         )
         
+        self.local_feature_fusion = LocalFeatureFusion(
+            dim=transf_input_dim,
+            n_heads=num_heads,
+            ff_mult=4,
+            radius=0.1,
+            k=2,
+        )
+        
+        self.dim_reducer = DimReducer(768, transf_input_dim)
         self.state_mlp_action = StateProj(state_dim, transf_input_dim)
+        
+        self.scene_encoder = GlobalSceneEncoder(
+            in_dim=transf_input_dim,
+            hid_dim=transf_input_dim,
+            out_dim=transf_input_dim,
+            heads=num_heads,
+            dropout=0.1
+        )
 
-        self.static_map = static_map
-        if "static_map" in self._modules:
-            del self._modules["static_map"]
+        if static_maps is not None:
+            object.__setattr__(self, "static_maps", static_maps)
 
-        self.implicit_decoder = implicit_decoder
-        if "implicit_decoder" in self._modules:
-            del self._modules["implicit_decoder"]
+        if implicit_decoder is not None:
+            object.__setattr__(self, "implicit_decoder", implicit_decoder)
         
     def _process_sensor_data(self, rgb, depth, pose):   
         if rgb.shape[2] != 3:
@@ -113,7 +129,55 @@ class Agent_map_bc(nn.Module):
         
         return feats, coords_world_flat
 
-    def forward(self, observations, object_labels):
+    def _gather_static_map_features(self, scene_ids, level_index):
+        """
+        Parameters
+        ----------
+        scene_ids : (B,) LongTensor
+            The scene-id for every sample in the batch.
+        level_index : int
+            Which pyramid level of the voxel hash table to query.
+
+        Returns
+        -------
+        kv_coords : Tensor (B, max_len, 3)
+            World coordinates of the queried voxels (zero padded).
+        kv_feats : Tensor (B, max_len, D)
+            Corresponding voxel features where D = num_levels * feature_dim.
+        kv_pad_mask : BoolTensor (B, max_len)
+            Padding mask where **True** indicates padded (invalid) positions.
+        """
+        device = scene_ids.device
+        B = scene_ids.shape[0]
+
+        # Collect per-scene coordinate tensors
+        per_scene_coords = [
+            self.static_maps.voxel_hash_tables[sid].levels[level_index].coords
+            for sid in scene_ids.tolist()
+        ]
+        max_len = max(coords.shape[0] for coords in per_scene_coords)
+
+        # Output dimensions
+        feat_dim = self.static_maps.num_levels * self.static_maps.feature_dim
+
+        kv_coords = torch.zeros(B, max_len, 3, device=device, dtype=per_scene_coords[0].dtype)
+        kv_feats = torch.zeros(B, max_len, feat_dim, device=device, dtype=torch.float32)
+        kv_pad_mask = torch.ones(B, max_len, device=device, dtype=torch.bool)
+
+        # Fill tensors scene-by-scene
+        for i, (sid, coords) in enumerate(zip(scene_ids.tolist(), per_scene_coords)):
+            n = coords.shape[0]
+            kv_coords[i, :n] = coords
+            kv_pad_mask[i, :n] = False
+            sid_tensor = torch.full((n,), sid, device=device, dtype=torch.long)
+            kv_feats[i, :n] = self.static_maps.query_feature(coords, sid_tensor)
+
+        kv_feats = self.dim_reducer(self.implicit_decoder(kv_feats.reshape(B * max_len, -1))).reshape(B, max_len, -1)
+
+        return kv_coords, kv_feats, kv_pad_mask
+        
+    def forward(self, observations, object_labels, scene_ids):
+        
         state  = observations["state"].squeeze(1)
         
         feats_hand, coords_hand = self._process_sensor_data(
@@ -129,16 +193,25 @@ class Agent_map_bc(nn.Module):
         )
         
         feats = torch.cat([feats_hand, feats_head], dim=1)
-        coords = torch.cat([coords_hand, coords_head], dim=1)
+        coords = torch.cat([coords_hand, coords_head], dim=1)  # (B, N, 3)
 
+        kv_coords, kv_feats, kv_pad_mask = self._gather_static_map_features(scene_ids, 1)
+        
+        # Global scene encoding
+        pts_kv   = torch.cat([kv_coords, kv_feats], dim=-1)            # [B,L, 3+768]
+        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_mask)          
+        
+        # Local feature fusion
+        feats = self.local_feature_fusion(coords, feats, kv_coords, kv_feats, kv_pad_mask)
+        
         text_emb = self.text_proj(self.text_embeddings[object_labels]).unsqueeze(1)        # (B,768)
         state_tok = self.state_mlp_action(state).unsqueeze(1) # [B,1,128]
     
-        visual_tok = self.transformer(
+        visual_tok = self.transformer_encoder(
             visual_token=feats,
-            coords=coords,
+            coords=coords,  
         ) 
         
-        action_out = self.action_transformer(visual_tok, text_emb, state_tok)
+        action_out = self.action_transformer(visual_tok, global_tok, text_emb, state_tok)
         
         return action_out

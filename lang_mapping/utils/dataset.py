@@ -10,9 +10,10 @@ import numpy as np
 import torch
 import copy
 from collections import defaultdict
+import yaml
 
 from mshab.utils.array import to_tensor
-from mshab.utils.dataset import ClosableDataLoader, ClosableDataset
+from mshab.utils.dataset import ClosableDataset
 
 
 def recursive_h5py_to_numpy(h5py_obs, slice=None):
@@ -365,7 +366,7 @@ def build_episode_subtask_maps(
     """
     with open(task_plan_fp, "r", encoding="utf-8") as f:
         data = json.load(f)
-
+        
     episode2subtasks = defaultdict(list)
     for plan in data["plans"]:
         # `train/set_table/episode_1010.json`  ->  `episode_1010`
@@ -377,6 +378,8 @@ def build_episode_subtask_maps(
     ep_names      = list(episode2subtasks) if keep_dict_order else sorted(episode2subtasks)
     episode2id    = {ep: i for i, ep in enumerate(ep_names)}
 
+    
+
     # uid → episode int id
     uid2episode_id = {}
     for ep, uid_list in episode2subtasks.items():
@@ -385,3 +388,49 @@ def build_episode_subtask_maps(
             uid2episode_id[uid] = eid
 
     return dict(episode2subtasks), episode2id, uid2episode_id
+
+
+def build_uid_episode_scene_maps(
+    task_plan_fp: str,
+    scene_ids_fp: str,
+) -> Tuple[Dict[str, str], Dict[str, int]]:
+    """
+    Build mappings from subtask_uid to (episode_name, scene_id).
+
+    Parameters
+    ----------
+    task_plan_fp : str
+        Path to the task plan json file.
+    scene_ids_fp : str
+        Path to the scene_ids yaml file.
+
+    Returns
+    -------
+    uid2episode_name : Dict[str, str]
+    uid2scene_id     : Dict[str, int]
+    """
+    # Load scene id mapping (scene json path -> int id)
+    with open(scene_ids_fp, "r", encoding="utf-8") as f:
+        scene_id_map = yaml.safe_load(f)
+
+    # Load task plan data
+    with open(task_plan_fp, "r", encoding="utf-8") as f:
+        task_plan_data = json.load(f)
+
+    uid2episode_name: Dict[str, str] = {}
+    uid2scene_id: Dict[str, int] = {}
+
+    for plan in task_plan_data["plans"]:
+        init_config_name = plan["init_config_name"]  # e.g. train/set_table/episode_193.json
+        episode_name = os.path.splitext(os.path.basename(init_config_name))[0]
+
+        if init_config_name not in scene_id_map:
+            raise KeyError(f"{init_config_name} not found in scene_ids file: {scene_ids_fp}")
+        scene_id = scene_id_map[init_config_name]
+
+        for subtask in plan["subtasks"]:
+            for c_uid in subtask["composite_subtask_uids"]:
+                uid2episode_name[c_uid] = episode_name
+                uid2scene_id[c_uid] = scene_id
+
+    return uid2episode_name, uid2scene_id

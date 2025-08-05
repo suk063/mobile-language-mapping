@@ -426,6 +426,7 @@ class MultiVoxelHashTable(nn.Module):
         self.mode = mode
 
         self.voxel_hash_tables = nn.ModuleList()
+        
         for i in range(n_scenes):
             self.voxel_hash_tables.append(
                 VoxelHashTable(
@@ -517,8 +518,8 @@ class MultiVoxelHashTable(nn.Module):
     @staticmethod
     def load_sparse(path: str):
         sparse_data = torch.load(path, map_location="cpu")
-
-        n_scenes = len(sparse_data)
+        n_scenes = sparse_data["n_scenes"]
+        
         return MultiVoxelHashTable(
             n_scenes=n_scenes,
             resolution=sparse_data["resolution"],
