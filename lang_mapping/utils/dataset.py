@@ -39,7 +39,6 @@ class DPDataset(ClosableDataset):
         trajs_per_obj="all",
         max_image_cache_size=0,
         truncate_trajectories_at_success=True,
-        single_traj_idx: Optional[int] = None,
         allowed_uids: Optional[set[str]] = None,
     ):
         data_path = Path(data_path)

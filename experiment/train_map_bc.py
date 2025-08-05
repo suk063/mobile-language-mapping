@@ -47,7 +47,8 @@ class BCConfig:
     save_backup_ckpts: bool
 
     data_dir_fp: Optional[str]
-    max_cache_size: int
+    max_image_cache_size: int
+    num_dataload_workers: int
     trajs_per_obj: Union[str, int]
     torch_deterministic: bool
 
@@ -327,11 +328,17 @@ def train(cfg: TrainConfig):
         pred_horizon=cfg.algo.action_pred_horizon,
         control_mode=eval_envs.unwrapped.control_mode,
         trajs_per_obj=cfg.algo.trajs_per_obj,
-        max_image_cache_size=cfg.algo.max_cache_size,
+        max_image_cache_size=cfg.algo.max_image_cache_size,
         truncate_trajectories_at_success=True,
     )
     bc_dataloader = ClosableDataLoader(
-        bc_dataset, batch_size=cfg.algo.batch_size, shuffle=True, num_workers=0
+        bc_dataset, 
+        batch_size=cfg.algo.batch_size, 
+        shuffle=True, 
+        num_workers=cfg.algo.num_dataload_workers, 
+        pin_memory=True,
+        persistent_workers=(cfg.algo.num_dataload_workers > 0),
+        drop_last=True,
     )
 
     logger_start_log_step = logger.last_log_step + 1 if logger.last_log_step > 0 else 0
