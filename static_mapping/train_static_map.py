@@ -1,343 +1,39 @@
 import os.path
 import random
 import sys
-from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime
-from functools import reduce
-from typing import Optional, Union
 
-import h5py
 import numpy as np
 import open_clip
 import torch
 import torch.nn.functional as F
 from dacite import from_dict
+from dataset import StaticMappingDataset
 from omegaconf import OmegaConf
 from ruamel import yaml
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
+from train_config import TrainConfig
+from utils import get_3d_coordinates
 
 from lang_mapping.mapper.mapper import VoxelHashTable
-
 from lang_mapping.module import ImplicitDecoder
 from lang_mapping.utils import get_visual_features
 from mshab.utils.config import parse_cfg
 from mshab.utils.dataset import ClosableDataLoader
-from mshab.utils.dataset import ClosableDataset
-
-
-@dataclass
-class DataConfig:
-    files: list[str]
-    clip_cache_files: list[str]
-    load_clip_cache: bool
-    mask_out_classes: list[str]
-    valid_ratio: float
-    batch_size: int
-    num_workers: int
-    multiprocessing_context: str
-
-
-@dataclass
-class ClipModelConfig:
-    model_name: str = "EVA02-L-14"
-    model_pretrained: str = "merged2b_s4b_b131k"
-
-
-@dataclass
-class VoxelHashTableConfig:
-    resolution: float  # finest cell size (e.g. 0.12)
-    num_levels: int  # pyramid depth (e.g. 2)
-    level_scale: float  # ratio between levels (e.g. 2.0)
-    voxel_feature_dim: int  # per-level feature width (e.g. 32)
-    hash_table_size: int  # buckets per level (power of two)
-    scene_bound_min: tuple[float, float, float]  # xyz lower corner
-    scene_bound_max: tuple[float, float, float]  # xyz upper corner
-
-
-@dataclass
-class Config:
-    seed: int
-    torch_deterministic: bool
-    device: str
-    epochs: int
-    optimizer: str
-    optimizer_kwargs: dict
-    data: DataConfig
-    clip_model: ClipModelConfig
-    voxel_hash_table: VoxelHashTableConfig
-    depth_downsample_method: str  # "nearest-exact", "nearest", "avg2d", "avg3d"
-    decoder_hidden_dim: int
-    decoder_output_dim: int
-    output_dir: str
-    valid_interval: int
-    ckpt_interval: int
-    test_model_dir: Optional[str]
-
-    def as_dict(self):
-        out = vars(self)
-        out["data"] = vars(self.data)
-        out["clip_model"] = vars(self.clip_model)
-        out["voxel_hash_table"] = vars(self.voxel_hash_table)
-        return out
-
-
-class StaticMappingDataset(ClosableDataset):
-    def __init__(self, cfg: DataConfig, records=None):
-        super().__init__()
-        self.cfg = cfg
-        if self.cfg.load_clip_cache:
-            if len(self.cfg.clip_cache_files) < len(self.cfg.files):
-                tqdm.write("number of clip cache files is less than data files, " "loading clip cache will be disabled")
-                self.cfg.load_clip_cache = False
-
-        self.fps: list[Union[dict, h5py.File]] = []
-        self.clip_cache_fps: list[Union[dict, h5py.File]] = []
-        self.mask_out_ids: list[list[int]] = []
-        self.records = []
-        if records is not None:
-            self.records = records
-            self._open_fps()
-        else:
-            self.load()
-
-    def __del__(self):
-        self.close()
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        del state["fps"]
-        del state["clip_cache_fps"]
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self._open_fps()
-
-    def _open_fps(self):
-        self.fps = []
-        self.clip_cache_fps = []
-        for file in self.cfg.files:
-            self.fps.append(self._open_fp(file))
-
-        if self.cfg.mask_out_classes is not None:
-            mask_out_set = set(self.cfg.mask_out_classes)
-            self.mask_out_ids = []
-            for fp in self.fps:
-                mask_out_classes = defaultdict(list)
-                for seg_id, seg_class in fp["segmentation_id_map"].items():
-                    if seg_class not in mask_out_set:
-                        continue
-                    mask_out_classes[seg_class].append(int(seg_id))
-                mask_out_ids = reduce(lambda x, y: x + y, mask_out_classes.values(), [])
-                mask_out_ids = sorted(mask_out_ids)
-                self.mask_out_ids.append(mask_out_ids)
-        else:
-            self.mask_out_ids = [[]] * len(self.fps)
-
-        if self.cfg.load_clip_cache:
-            for file in self.cfg.clip_cache_files:
-                if os.path.exists(file):
-                    self.clip_cache_fps.append(self._open_fp(file))
-                else:
-                    tqdm.write(f"Clip cache file not found: {file}")
-                    self.cfg.load_clip_cache = False
-                    self.clip_cache_fps = []
-                    break
-
-            if self.cfg.load_clip_cache:
-                if len(self.clip_cache_fps) != len(self.fps):
-                    tqdm.write(
-                        f"Number of clip cache files ({len(self.clip_cache_fps)}) "
-                        f"does not match number of data files ({len(self.fps)}), "
-                        f"disabling clip cache loading"
-                    )
-                    self.cfg.load_clip_cache = False
-                    self.clip_cache_fps = []
-
-            if self.cfg.load_clip_cache and self.cfg.mask_out_classes is not None:
-                for mask_out_ids, cache_fp in zip(self.mask_out_ids, self.clip_cache_fps):
-                    mask_out_ids_cache = cache_fp.get("mask_out_ids", [])
-                    if mask_out_ids_cache != mask_out_ids:
-                        tqdm.write(
-                            "Mask out ids in clip cache file do not match those in "
-                            "data file, disabling clip cache loading"
-                        )
-                        self.cfg.load_clip_cache = False
-                        self.clip_cache_fps = []
-                        break
-
-    @staticmethod
-    def _open_fp(file: str) -> Union[dict, h5py.File]:
-        if file.endswith(".h5"):
-            return h5py.File(file, "r")
-        elif file.endswith(".pt"):
-            return torch.load(file, mmap=True)
-        else:
-            raise ValueError(f"Unsupported file format: {file}")
-
-    def load(self):
-        tqdm.write("Loading data from files...")
-        self._open_fps()
-
-        for fp_idx, fp in tqdm(list(enumerate(self.fps)), desc="Files", ncols=80):
-            for traj_name in fp.keys():
-                if not traj_name.startswith("traj"):
-                    continue
-                traj_data = fp[traj_name]
-                for sensor_name in traj_data.keys():
-                    sensor_data = traj_data[sensor_name]
-                    n = sensor_data["rgb"].shape[0]
-                    self.records += [(fp_idx, traj_name, sensor_name, i) for i in range(n)]
-        if len(self.records) == 0:
-            raise RuntimeError("No records found")
-        if len(self.fps) > 1:
-            intrinsic = np.asarray(self.fps[0]["intrinsic"][:])
-            for fp in self.fps[1:]:
-                if not np.array_equal(np.asarray(fp["intrinsic"][:]), intrinsic):
-                    raise RuntimeError("Intrinsic matrices do not match across multiple data files.")
-
-    def __len__(self):
-        return len(self.records)
-
-    def __getitem__(self, idx):
-        fp_idx, traj_name, sensor_name, i = self.records[idx]
-        fp = self.fps[fp_idx]
-        sensor_data = fp[traj_name][sensor_name]
-
-        out = dict(extrinsic=self.to_tensor(sensor_data["extrinsic"][i]))
-
-        depth = self.to_tensor(sensor_data["depth"][i])  # (h, w)
-        mask_out_ids = self.mask_out_ids[fp_idx]
-        if len(mask_out_ids) > 0:
-            segmentation = self.to_tensor(sensor_data["segmentation"][i])
-            for seg_id in mask_out_ids:
-                depth[segmentation == seg_id] = 0
-        out["depth"] = depth
-
-        if self.cfg.load_clip_cache:
-            out["clip"] = self.to_tensor(self.clip_cache_fps[fp_idx][traj_name][sensor_name][i])
-        else:
-            # (3, h, w)
-            out["rgb"] = self.to_tensor(sensor_data["rgb"][i]).permute(2, 0, 1)
-
-        return out
-
-    @staticmethod
-    def to_tensor(data):
-        if isinstance(data, torch.Tensor):
-            return data
-        if isinstance(data, np.ndarray):
-            return torch.from_numpy(data)
-        raise TypeError(f"Unsupported type for conversion to tensor: {type(data)}")
-
-    @property
-    def intrinsic(self):
-        assert len(self.fps) > 0, "No data files loaded."
-        return np.asarray(self.fps[0]["intrinsic"][:])
-
-    def close(self):
-        self.records = []
-        self.fps = []
-        self.clip_cache_fps = []
-
-    def split(self, valid_ratio: float):
-        n = len(self.records)
-        n_valid = int(n * valid_ratio)
-        indices = torch.randperm(n)
-        valid_indices = indices[:n_valid].tolist()
-        train_indices = indices[n_valid:].tolist()
-        train_dataset = StaticMappingDataset(
-            self.cfg,
-            [self.records[x] for x in train_indices],
-        )
-        valid_dataset = StaticMappingDataset(
-            self.cfg,
-            [self.records[x] for x in valid_indices],
-        )
-        return train_dataset, valid_dataset
-
-
-def get_3d_coordinates(
-    depth: torch.Tensor,
-    camera_extrinsic: torch.Tensor,
-    fx: float,
-    fy: float,
-    cx: float,
-    cy: float,
-    original_size: int = 224,
-):
-    """
-    Computes 3D coordinates from 2D feature maps and depth.
-    If camera_extrinsic is provided, returns (coords_world, coords_cam).
-    Otherwise, returns coords_cam.
-    Args:
-        depth: [B, H_feat, W_feat] or [B, 1, H_feat, W_feat].
-        camera_extrinsic: [B, 1, 3, 4], world->cam transform (None if absent).
-        fx, fy, cx, cy: Camera intrinsics for original_size x original_size.
-        original_size: Original image size (default=224).
-    Returns:
-        coords_world or coords_cam: [B, 3, H_feat, W_feat].
-    """
-    device = depth.device
-
-    # Adjust depth shape if needed
-    if depth.dim() == 4 and depth.shape[1] == 1:
-        depth = depth.squeeze(1)
-    B, H, W = depth.shape
-
-    # Scale intrinsics
-    scale_x = W / float(original_size)
-    scale_y = H / float(original_size)
-    fx_new = fx * scale_x
-    fy_new = fy * scale_y
-    cx_new = cx * scale_x
-    cy_new = cy * scale_y
-
-    # Create pixel coordinate grid
-    u = torch.arange(W, device=device).view(1, -1).expand(H, W) + 0.5
-    v = torch.arange(H, device=device).view(-1, 1).expand(H, W) + 0.5
-    u = u.unsqueeze(0).expand(B, -1, -1)
-    v = v.unsqueeze(0).expand(B, -1, -1)
-
-    # Camera coordinates
-    x_cam = (u - cx_new) * depth / fx_new
-    y_cam = (v - cy_new) * depth / fy_new
-    z_cam = depth
-    coords_cam = torch.stack([x_cam, y_cam, z_cam], dim=1)
-
-    # If extrinsic is given, convert cam->world
-    if camera_extrinsic is not None:
-        camera_extrinsic = camera_extrinsic.squeeze(1)  # [B, 3, 4]
-        ones_row = torch.tensor([0, 0, 0, 1], device=device, dtype=camera_extrinsic.dtype).view(1, 1, 4)
-        ones_row = ones_row.expand(B, 1, 4)  # [B, 1, 4]
-        extrinsic_4x4 = torch.cat([camera_extrinsic, ones_row], dim=1)  # [B, 4, 4]
-        extrinsic_inv = torch.inverse(extrinsic_4x4)  # [B, 4, 4]
-
-        _, _, Hf, Wf = coords_cam.shape
-        ones_map = torch.ones(B, 1, Hf, Wf, device=device)
-        coords_hom = torch.cat([coords_cam, ones_map], dim=1)  # [B, 4, Hf, Wf]
-        coords_hom_flat = coords_hom.view(B, 4, -1)  # [B, 4, Hf*Wf]
-
-        world_coords_hom = torch.bmm(extrinsic_inv, coords_hom_flat)  # [B, 4, Hf*Wf]
-        world_coords_hom = world_coords_hom.view(B, 4, Hf, Wf)
-        coords_world = world_coords_hom[:, :3, :, :]
-        return coords_world, coords_cam
-    else:
-        return coords_cam
 
 
 class Pipeline:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
 
         random.seed(cfg.seed)
         np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
         torch.backends.cudnn.deterministic = cfg.torch_deterministic
+        torch.backends.cudnn.benchmark = not cfg.torch_deterministic
 
-        device = torch.device(cfg.device)
+        device = cfg.device_decoder
 
         # Load datasets
         dataset = StaticMappingDataset(self.cfg.data)
@@ -376,16 +72,20 @@ class Pipeline:
                 self.cfg.clip_model.model_pretrained,
             )[0].to(device)
             self.clip_model.eval()
+        assert self.cfg.grid_cfg.name == "voxel_hash_table", "Only voxel_hash_table is supported in this pipeline"
+        assert self.cfg.grid_cfg.voxel_hash_table is not None, "voxel_hash_table config must be provided"
+        vht_cfg = self.cfg.grid_cfg.voxel_hash_table
         self.hash_voxel = VoxelHashTable(
-            resolution=self.cfg.voxel_hash_table.resolution,
-            hash_table_size=self.cfg.voxel_hash_table.hash_table_size,
-            feature_dim=self.cfg.voxel_hash_table.voxel_feature_dim,
-            scene_bound_min=self.cfg.voxel_hash_table.scene_bound_min,
-            scene_bound_max=self.cfg.voxel_hash_table.scene_bound_max,
+            one_to_one=vht_cfg.one_to_one,
+            resolution=vht_cfg.resolution,
+            hash_table_size=vht_cfg.hash_table_size,
+            feature_dim=vht_cfg.voxel_feature_dim,
+            scene_bound_min=vht_cfg.scene_bound_min,
+            scene_bound_max=vht_cfg.scene_bound_max,
             device=device,
         ).to(device)
         self.implicit_decoder = ImplicitDecoder(
-            voxel_feature_dim=self.cfg.voxel_hash_table.voxel_feature_dim,
+            voxel_feature_dim=vht_cfg.voxel_feature_dim * vht_cfg.num_levels,
             hidden_dim=self.cfg.decoder_hidden_dim,
             output_dim=self.cfg.decoder_output_dim,
         ).to(device)
@@ -454,15 +154,16 @@ class Pipeline:
         return valid_loss
 
     def test(self):
+        assert self.cfg.test_model_dir is not None
         state = torch.load(
             os.path.join(self.cfg.test_model_dir, "hash_voxel.pt"),
-            map_location=self.cfg.device,
+            map_location=self.cfg.device_decoder,
         )
         self.hash_voxel.load_state_dict(state["model"])
         self.hash_voxel.eval()
         state = torch.load(
             os.path.join(self.cfg.test_model_dir, "implicit_decoder.pt"),
-            map_location=self.cfg.device,
+            map_location=self.cfg.device_decoder,
         )
         self.implicit_decoder.load_state_dict(state["model"])
         self.implicit_decoder.eval()
@@ -476,14 +177,16 @@ class Pipeline:
         self.implicit_decoder.train(training)
 
     def forward_model(self, batch: dict):
-        depth = batch["depth"].to(self.cfg.device) / 1000.0
-        extrinsic = batch["extrinsic"].to(self.cfg.device)
+        device = self.cfg.device_decoder
+
+        depth = batch["depth"].to(device) / 1000.0
+        extrinsic = batch["extrinsic"].to(device)
 
         with torch.no_grad():
             if self.clip_model is None:
-                visual_features = batch["clip"].to(self.cfg.device)
+                visual_features = batch["clip"].to(device)
             else:
-                rgb = batch["rgb"].float().to(self.cfg.device) / 255.0
+                rgb = batch["rgb"].float().to(device) / 255.0
                 visual_features = get_visual_features(self.clip_model, rgb)
 
             coords_world = None
@@ -520,14 +223,12 @@ class Pipeline:
                     self.cy,
                     original_size,
                 )[0]
-        mask = depth > 0.0
-        visual_features = visual_features[..., mask]  # [bs, c, h, w] -> [bs, c, n]
-        coords_world = coords_world[..., mask]  # [bs, 3, h, w] -> [bs, 3, n]
-        # bs, c, n -> bs * n, c
-        c = visual_features.shape[1]  # feature dim, e.g. 768 for EVA02-L-14
-        visual_features = visual_features.permute(0, 2, 1).reshape(-1, c)
-        # bs, 3, n -> bs * n, 3
-        coords_world = coords_world.permute(0, 2, 1).reshape(-1, 3)
+
+            # bs, c, h, w -> n, c
+            mask = (depth > 0.0).flatten()  # [bs, h, w] -> [bs * h * w]
+            c = visual_features.shape[1]  # feature dim, e.g. 768 for EVA02-L-14
+            visual_features = visual_features.permute(0, 2, 3, 1).reshape(-1, c)[mask]
+            coords_world = coords_world.permute(0, 2, 3, 1).reshape(-1, 3)[mask]
 
         voxel_features = self.hash_voxel.query_voxel_feature(coords_world)
         decoded_features = self.implicit_decoder(voxel_features, coords_world)
@@ -559,12 +260,12 @@ class Pipeline:
 
 def main():
     cfg = parse_cfg(default_cfg_path=sys.argv[1])
-    cfg = from_dict(data_class=Config, data=OmegaConf.to_container(cfg))
+    cfg = from_dict(data_class=TrainConfig, data=OmegaConf.to_container(cfg))
     if cfg.test_model_dir is not None:
         # reload the config based on the test model directory
         test_model_dir = cfg.test_model_dir
         cfg = parse_cfg(default_cfg_path=os.path.join(test_model_dir, "../config.yaml"))
-        cfg = from_dict(data_class=Config, data=OmegaConf.to_container(cfg))
+        cfg = from_dict(data_class=TrainConfig, data=OmegaConf.to_container(cfg))
         cfg.test_model_dir = test_model_dir
     if cfg.torch_deterministic:
         torch.backends.cudnn.deterministic = True

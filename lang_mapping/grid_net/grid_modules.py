@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import logging
-from .utils import all_grid_positions, normalize_coordinates, denormalize_coordinates
+from lang_mapping.grid_net.utils import all_grid_positions, normalize_coordinates, denormalize_coordinates
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -58,7 +58,6 @@ class FeatureGrid(FeatureGridBase):
         dtype=torch.float32,
         initial_feature=None,
         init_stddev=0.0,
-        second_order_grid_sample=False,
     ):
         super().__init__(d=d, fdim=fdim, bound=bound, cell_size=cell_size, name=name, dtype=dtype)
         grid_len = (self.bound[:, 1] - self.bound[:, 0]).cpu().numpy()
@@ -72,16 +71,12 @@ class FeatureGrid(FeatureGridBase):
             feature_shape = (1, self.fdim, grid_size[1], grid_size[0])
         else:
             feature_shape = (1, self.fdim, grid_size[2], grid_size[1], grid_size[0])
-        init_avail = initial_feature is not None
         if initial_feature is None:
             initial_feature = torch.randn(feature_shape, dtype=self.dtype) * init_stddev
         assert initial_feature.shape == feature_shape
         self.feature = torch.nn.Parameter(initial_feature)
         # Use standard pytorch implementation
         self.grid_sample_func = F.grid_sample
-        logger.info(
-            f"Regular {self.name}: cell_size={self.cell_size:.2f}, feature shape={feature_shape}, init_avail={init_avail}, 2nd_order_sample={second_order_grid_sample}, init_norm={initial_feature.norm():.1e}."
-        )
 
     def interpolate(self, x):
         # Normalize query coordinates (required by F.grid_sample)

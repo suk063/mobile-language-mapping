@@ -1,0 +1,48 @@
+seed: 0
+torch_deterministic: false
+device_clip: cuda
+device_decoder: cuda
+epochs: 20
+optimizer: Adam
+optimizer_kwargs:
+    lr: 0.001
+data:
+    files:
+        - /home/daizhirui/Data/mobile_language_mapping_demo/prepare_groceries/pick/all_13_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping_demo/set_table/pick/all_13_static.pt
+        - /home/daizhirui/Data/mobile_language_mapping_demo/tidy_house/pick/all_13_static.pt
+    clip_cache_files:
+        - /home/daizhirui/Data/mobile_language_mapping_demo/prepare_groceries/pick/all_13_static_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping_demo/set_table/pick/all_13_static_clip.pt
+        - /home/daizhirui/Data/mobile_language_mapping_demo/tidy_house/pick/all_13_static_clip.pt
+    load_clip_cache: true
+    mask_out_classes: []
+    build_config_names: [v3_sc1_staging_13.scene_instance.json]
+    sensor_names: [fetch_hand, fetch_head]
+    valid_ratio: 0.1
+    batch_size: 256
+    num_workers: 16
+    multiprocessing_context: fork
+clip_model:
+    model_name: EVA02-L-14
+    model_pretrained: merged2b_s4b_b131k
+grid_cfg:
+    name: voxel_hash_table
+    n_scenes: 1
+    grid_net: ~
+    voxel_hash_table:
+        one_to_one: true
+        resolution: 0.2
+        num_levels: 2
+        level_scale: 2.0
+        hash_table_size: 2097152  # 2**21
+        voxel_feature_dim: 64
+        scene_bound_min: [-2.7, -8.2, -0.1]
+        scene_bound_max: [4.6, 4.7, 3.2]
+depth_downsample_method: nearest-exact
+decoder_hidden_dim: 240
+decoder_output_dim: 768
+output_dir: /home/daizhirui/results/mobile_language_mapping_demo/static_mapping/nearest-exact
+valid_interval: 500
+ckpt_interval: 1
+test_model_dir:

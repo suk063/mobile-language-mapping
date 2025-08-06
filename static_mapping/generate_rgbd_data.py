@@ -3,7 +3,7 @@ import os
 import pickle
 import sys
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Union
 
 import gymnasium as gym
 import h5py
@@ -717,8 +717,9 @@ class App:
         f = h5py.File(self.cfg.output_file, "w")
         num_envs = self.cfg.eval_env.num_envs
         num_traj = len(self.episode_configs)
+        print(f"Processing {num_traj} trajectories in batches of {num_envs} environments")
 
-        for traj_start_idx in get_tqdm_bar(range(0, num_traj, num_envs), "Traj"):
+        for traj_start_idx in get_tqdm_bar(range(0, num_traj, num_envs), "TrajBatch"):
             traj_end_idx = min(traj_start_idx + num_envs, num_traj)
             self.process_batch(traj_start_idx, traj_end_idx)
             self.save_to_h5(f, traj_start_idx, traj_end_idx)

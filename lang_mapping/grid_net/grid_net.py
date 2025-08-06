@@ -1,9 +1,11 @@
+import logging
+
 import numpy as np
 import torch
 import torch.nn as nn
+
 from lang_mapping.grid_net.base_net import BaseNet
 from lang_mapping.grid_net.grid_modules import *
-import logging
 from lang_mapping.grid_net.utils import grid_interp_regular, grid_interp_VM
 
 logger = logging.getLogger(__name__)
@@ -11,11 +13,11 @@ logger.setLevel(logging.INFO)
 
 
 class GridNet(BaseNet):
-    def __init__(self, cfg: dict, dtype=torch.float32, initial_features=dict()):
+    def __init__(self, n_scenes: int, cfg: dict, dtype=torch.float32, initial_features=dict()):
         super(GridNet, self).__init__(cfg, "cpu", dtype)
         self.devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
         self.initial_features = initial_features  # Allow to use initial guesses for features
-        self.n_scenes = cfg["n_scenes"]
+        self.n_scenes = n_scenes
         self.init_grid(cfg)
 
     def distribute_to_devices(self):

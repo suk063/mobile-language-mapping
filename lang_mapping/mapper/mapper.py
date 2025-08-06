@@ -1,6 +1,8 @@
-import torch, torch.nn as nn
-from typing import Dict, Optional, List
 import logging
+from typing import Dict, List, Optional
+
+import torch
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -516,19 +518,19 @@ class MultiVoxelHashTable(nn.Module):
 
     @staticmethod
     def load_sparse(path: str):
-        sparse_data = torch.load(path, map_location="cpu")
-        n_scenes = len(sparse_data)
+        state = torch.load(path, map_location="cpu")
+        n_scenes = state["n_scenes"]
         return MultiVoxelHashTable(
             n_scenes=n_scenes,
-            resolution=sparse_data["resolution"],
-            num_levels=sparse_data["num_levels"],
-            level_scale=sparse_data["level_scale"],
-            feature_dim=sparse_data["feature_dim"],
-            hash_table_size=sparse_data["hash_table_size"],
-            scene_bound_min=sparse_data["scene_bound_min"],
-            scene_bound_max=sparse_data["scene_bound_max"],
+            resolution=state["resolution"],
+            num_levels=state["num_levels"],
+            level_scale=state["level_scale"],
+            feature_dim=state["feature_dim"],
+            hash_table_size=state["hash_table_size"],
+            scene_bound_min=state["scene_bound_min"],
+            scene_bound_max=state["scene_bound_max"],
             mode="infer",
-            sparse_data=[sparse_data[str(i)] for i in range(n_scenes)],
+            sparse_data=[state["state_dict"][str(i)] for i in range(n_scenes)],
         )
 
     @staticmethod

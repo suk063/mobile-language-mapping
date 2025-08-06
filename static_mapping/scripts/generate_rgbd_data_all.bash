@@ -1,0 +1,21 @@
+#!/usr/bin/bash
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+PYTHONPATH="${SCRIPT_DIR}/.."
+
+# TASK=set_table SUBTASK=pick ./generate_rgbd_data.bash
+# TASK=set_table SUBTASK=place ./generate_rgbd_data.bash
+# TASK=tidy_house SUBTASK=pick ./generate_rgbd_data.bash
+# TASK=tidy_house SUBTASK=place ./generate_rgbd_data.bash
+# TASK=prepare_groceries SUBTASK=pick ./generate_rgbd_data.bash
+# TASK=prepare_groceries SUBTASK=place ./generate_rgbd_data.bash
+
+TASK=set_table OBJ=all_10 ./generate_rgbd_data.bash
+TASK=set_table OBJ=all_13 ./generate_rgbd_data.bash
+TASK=tidy_house OBJ=all_10 ./generate_rgbd_data.bash
+TASK=tidy_house OBJ=all_13 ./generate_rgbd_data.bash
+TASK=prepare_groceries OBJ=all_10 ./generate_rgbd_data.bash
+TASK=prepare_groceries OBJ=all_13 ./generate_rgbd_data.bash
