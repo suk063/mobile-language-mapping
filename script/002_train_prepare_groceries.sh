@@ -29,7 +29,7 @@ WANDB_API_KEY=fc63e5ca2650308d2e46419334ce29b6d9cfe4b4
 RESUME_LOGDIR="$WORKSPACE/$EXP_NAME"
 RESUME_CONFIG="$RESUME_LOGDIR/config.yml"
 
-MAX_IMAGE_CACHE_SIZE=50_000   # safe num for about 64 GiB system memory
+MAX_IMAGE_CACHE_SIZE=0   # safe num for about 64 GiB system memory
 NUM_DATALOAD_WORKERS=2
 data_dir_fp="$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset/$TASK/$SUBTASK/$OBJ.h5"
 
