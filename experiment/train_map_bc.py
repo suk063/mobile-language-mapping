@@ -362,7 +362,7 @@ def train(cfg: TrainConfig):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     uid_to_label_map = build_object_map(cfg.eval_env.task_plan_fp, cfg.algo.text_input)
-    _, uid2scene_id = build_uid_episode_scene_maps(cfg.eval_env.task_plan_fp, 'pretrained/scene_ids.yaml')
+    _, uid2scene_id = build_uid_episode_scene_maps(cfg.eval_env.task_plan_fp, '/work/mobile_lang_mapping/pretrained/scene_ids.yaml')
 
     # Make eval env
     print("Making eval env...")
