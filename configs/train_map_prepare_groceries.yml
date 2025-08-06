@@ -65,4 +65,4 @@ logger:
   exp_name: bc-${REPRESENTATION}-${TASK}
   clear_out: True
   tensorboard: True
-  wandb: False
+  wandb: True
