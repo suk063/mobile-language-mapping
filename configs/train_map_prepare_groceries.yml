@@ -3,6 +3,7 @@ seed: 2
 TASK: prepare_groceries
 OBJ: all_13
 REPRESENTATION: map
+MS_ASSET_DIR: /sh-vol/mobile_language_mapping/maniskill_data/data
 
 eval_env:
   make_env: True
@@ -16,8 +17,8 @@ eval_env:
   stationary_base: False
   stationary_torso: False
   stationary_head: True
-  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/${TASK}/pick/train/${OBJ}.json
-  spawn_data_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/${TASK}/pick/train/spawn_data.pt
+  task_plan_fp: ${MS_ASSET_DIR}/scene_datasets/replica_cad_dataset/rearrange/task_plans/${TASK}/pick/train/${OBJ}.json
+  spawn_data_fp: ${MS_ASSET_DIR}/scene_datasets/replica_cad_dataset/rearrange/spawn_data/${TASK}/pick/train/spawn_data.pt
   record_video: False
   info_on_video: True
   extra_stat_keys: []
@@ -39,10 +40,11 @@ algo:
   max_image_cache_size: 50_000
   save_backup_ckpts: False
   torch_deterministic: True
+  num_dataload_workers: 0
 
   # Pretrained model paths
-  static_map_path: "pretrained/hash_voxel_sparse.pt"
-  implicit_decoder_path: "pretrained/implicit_decoder.pt"
+  static_map_path: "/sh-vol/mobile_language_mapping/pretrained/hash_voxel_sparse.pt"
+  implicit_decoder_path: "/sh-vol/mobile_language_mapping/pretrained/implicit_decoder.pt"
 
   # CLIP / Agent Settings
   clip_input_dim: 768
@@ -59,7 +61,7 @@ algo:
   transf_input_dim: 384
 
 logger:
-  workspace: mshab_exps
+  workspace: /sh-vol/mobile_language_mapping/mshab_exps
   exp_name: bc-${REPRESENTATION}-${TASK}
   clear_out: True
   tensorboard: True
