@@ -23,7 +23,7 @@ PROJECT_NAME="$TASK-$SUBTASK-map"
 
 WANDB=True
 TENSORBOARD=True
-MS_ASSET_DIR="/work/mobile_language_mapping/.maniskill"
+MS_ASSET_DIR="/work/mobile_language_mapping/.maniskill/data"
 
 RESUME_LOGDIR="$WORKSPACE/$EXP_NAME"
 RESUME_CONFIG="$RESUME_LOGDIR/config.yml"
