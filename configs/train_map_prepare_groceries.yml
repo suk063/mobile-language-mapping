@@ -3,7 +3,7 @@ seed: 2
 TASK: prepare_groceries
 OBJ: all_13
 REPRESENTATION: map
-MS_ASSET_DIR: /sh-vol/mobile_language_mapping/maniskill_data/data
+MS_ASSET_DIR: /work/mobile_language_mapping/.maniskill/data
 
 eval_env:
   make_env: True
@@ -43,8 +43,8 @@ algo:
   num_dataload_workers: 0
 
   # Pretrained model paths
-  static_map_path: "/sh-vol/mobile_language_mapping/pretrained/hash_voxel_sparse.pt"
-  implicit_decoder_path: "/sh-vol/mobile_language_mapping/pretrained/implicit_decoder.pt"
+  static_map_path: "/work/mobile_language_mapping/pretrained/hash_voxel_sparse.pt"
+  implicit_decoder_path: "/work/mobile_language_mapping/pretrained/implicit_decoder.pt"
 
   # CLIP / Agent Settings
   clip_input_dim: 768
@@ -61,7 +61,7 @@ algo:
   transf_input_dim: 384
 
 logger:
-  workspace: /sh-vol/mobile_language_mapping/mshab_exps
+  workspace: /sh-vol/mshab_exps
   exp_name: bc-${REPRESENTATION}-${TASK}
   clear_out: True
   tensorboard: True

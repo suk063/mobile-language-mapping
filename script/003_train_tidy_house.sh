@@ -15,7 +15,7 @@ NUM_ENVS=10
 
 # shellcheck disable=SC2001 
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
-WORKSPACE="/sh-vol/mobile_language_mapping/mshab_exps"
+WORKSPACE="/sh-vol/mshab_exps"
 GROUP=$TASK-$SUBTASK
 EXP_NAME="$ENV_ID/$GROUP/$TASK-$SUBTASK-map"
 # shellcheck disable=SC2001
@@ -23,7 +23,7 @@ PROJECT_NAME="$TASK-$SUBTASK-map"
 
 WANDB=True
 TENSORBOARD=True
-MS_ASSET_DIR="/sh-vol/mobile_language_mapping/maniskill_data/data"
+MS_ASSET_DIR="/work/mobile_language_mapping/.maniskill/data"
 
 RESUME_LOGDIR="$WORKSPACE/$EXP_NAME"
 RESUME_CONFIG="$RESUME_LOGDIR/config.yml"
