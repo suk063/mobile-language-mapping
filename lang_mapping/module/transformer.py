@@ -328,15 +328,17 @@ class LocalFeatureFusion(nn.Module):
         # Debug        
         # num_valid = (~invalid).sum()
         # print(f"Number of valid neighbors: {num_valid.item()}")
-
+        
         # gather neighbor coordinates / features
         batch = torch.arange(B, device=q_feat.device).view(B, 1, 1)
         neigh_xyz  = kv_xyz[batch.expand_as(idx), idx]             # (B, N, k, 3)
         neigh_feat = kv_feat[batch.expand_as(idx), idx]            # (B, N, k, C)
         
         # replace padding slots with the query point itself
-        neigh_xyz [invalid] = q_xyz.unsqueeze(2).expand(-1, -1, self.k, -1)[invalid]
-        neigh_feat[invalid] = q_feat.unsqueeze(2).expand(-1, -1, self.k, -1)[invalid]
+        q_xyz_expanded = q_xyz.unsqueeze(2).expand(-1, -1, self.k, -1)  # (B, N, k, 3)
+        q_feat_expanded = q_feat.unsqueeze(2).expand(-1, -1, self.k, -1)  # (B, N, k, C)
+        neigh_xyz[invalid] = q_xyz_expanded[invalid]
+        neigh_feat[invalid] = q_feat_expanded[invalid]
 
         # concatenate query token with neighbor tokens
         tokens = torch.cat([q_feat.unsqueeze(2), neigh_feat], dim=2)  # (B, N, k+1, C)
@@ -355,7 +357,6 @@ class LocalFeatureFusion(nn.Module):
         )  # (BM, k+1, C)
 
         # return only the query position (index 0 within each group)
-        fused_q = fused[:, 0, :].view(B, N, C) + q_feat
-        # fused_q = fused[:, 0, :].view(B, N, C) 
+        fused_q = fused[:, 0, :].view(B, N, C)
         
         return fused_q

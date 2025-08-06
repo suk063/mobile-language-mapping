@@ -10,7 +10,7 @@ class SATransformer(nn.Module):
     • Ball-query to gather K neighbours
     • Local self-attention → max-pool → output features
     """
-    def __init__(self, out_dim,
+    def __init__(self, in_dim, out_dim,
                  radius, nsample, sampling_ratio=0.25,
                  heads=8, dropout=0.1):
         super().__init__()
@@ -22,6 +22,11 @@ class SATransformer(nn.Module):
         #     nn.ReLU(inplace=True),
         # )
         #  CHG: TransformerLayer uses 'key_padding_mask'
+        self.in_proj = nn.Sequential(
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.ReLU(inplace=True),
+        )
         self.local_attn = TransformerLayer(out_dim, heads, out_dim * 4, dropout, use_xformers=True)
         self.out_norm   = nn.LayerNorm(out_dim)
 
@@ -65,7 +70,7 @@ class SATransformer(nn.Module):
                 pad_mask: torch.Tensor|None = None  # (B, N) bool – True=PAD
                 ):
         B, N, _ = xyz.shape
-
+        feats = self.in_proj(feats)
         # 1) choose centroids ------------------------------------------------
         ctr_idx, keep_mask = self._sample(xyz, pad_mask)            # (B,M)
         ctr_xyz   = xyz  [torch.arange(B)[:, None], ctr_idx]        # (B,M,3)
@@ -85,14 +90,11 @@ class SATransformer(nn.Module):
         neigh_xyz   = xyz  [batch_idx, neigh_idx]                   # (B,M,K,3)
         neigh_feats = feats[batch_idx, neigh_idx]                   # (B,M,K,Cin)
 
-        # 3) feature projection --------------------------------------------
-        # neigh_feats = self.in_proj(neigh_feats)                    # (B,M,K,Cout)
-
-        # 4) build padding mask for neighbours -----------------------------  # NEW
+        # 3) build padding mask for neighbours -----------------------------  # NEW
         neigh_invalid = neigh.idx < 0                               # (B,M,K)
         pad_neigh     = neigh_invalid.view(-1, self.nsample)        # (B*M,K)
 
-        # 5) local self-attention ------------------------------------------
+        # 4) local self-attention ------------------------------------------
         BM, K, C = neigh_feats.size(0) * neigh_feats.size(1), \
                    neigh_feats.size(2), neigh_feats.size(3)
 
@@ -102,11 +104,11 @@ class SATransformer(nn.Module):
             key_padding_mask     = pad_neigh                       # NEW
         )                                                           # (BM,K,C)
 
-        # 6) pooling & post-norm -------------------------------------------
+            # 5) pooling & post-norm -------------------------------------------
         pooled = feats_out.max(dim=1).values.view(B, ctr_idx.shape[1], C)
         pooled = self.out_norm(pooled)
 
-        # 7) propagate centroid-level padding mask -------------------------
+        # 6) propagate centroid-level padding mask -------------------------
         centroid_pad = None
         if keep_mask is not None:
             centroid_pad = ~keep_mask                               # (B,M)
@@ -117,7 +119,7 @@ class SATransformer(nn.Module):
 
 
 class GlobalSceneEncoder(nn.Module):
-    def __init__(self, out_dim=384, heads=8, dropout=0.1):
+    def __init__(self, in_dim=384, out_dim=384, heads=8, dropout=0.1):
         super().__init__()
         cfg = dict(
             sa1=(1.0,  16, 0.25),
@@ -127,10 +129,10 @@ class GlobalSceneEncoder(nn.Module):
         )
         (r1,k1,p1), (r2,k2,p2), (r3,k3,p3), (r4,k4,p4) = cfg.values()
 
-        self.sa1 = SATransformer(out_dim, r1, k1, p1, heads, dropout)
-        self.sa2 = SATransformer(out_dim, r2, k2, p2, heads, dropout)
-        self.sa3 = SATransformer(out_dim, r3, k3, p3, heads, dropout)
-        self.sa4 = SATransformer(out_dim, r4, k4, p4, heads, dropout)
+        self.sa1 = SATransformer(in_dim, out_dim, r1, k1, p1, heads, dropout)
+        self.sa2 = SATransformer(out_dim, out_dim, r2, k2, p2, heads, dropout)
+        self.sa3 = SATransformer(out_dim, out_dim, r3, k3, p3, heads, dropout)
+        self.sa4 = SATransformer(out_dim, out_dim, r4, k4, p4, heads, dropout)
 
         self.proj = nn.Sequential(nn.Linear(out_dim, out_dim),
                                   nn.LayerNorm(out_dim))
