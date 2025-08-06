@@ -13,8 +13,7 @@ PACKAGE_ASSET_DIR = PACKAGE_DIR / "assets"
 # Non-package data
 ASSET_DIR = Path(
     os.path.join(
-        os.getenv("MS_ASSET_DIR", os.path.join(os.path.expanduser("~"), ".maniskill")),
-        "data",
+        os.getenv("MS_ASSET_DIR", os.path.join(os.path.expanduser("~"), ".maniskill"))
     )
 )
 DEMO_DIR = Path(
