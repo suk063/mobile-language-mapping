@@ -32,13 +32,12 @@ def get_visual_features_dino(model, x):
 
     x = model.prepare_tokens_with_masks(x)
 
-    for idx, blk in enumerate(model.blocks):
+    for blk in model.blocks:                      # transformer encoder
         x = blk(x)
-
-    x = x[:, 1:, :].permute(0, 2, 1).reshape(B, 384, H // 14, W // 14).contiguous()
+    x = model.norm(x)
+    x = x[:, 1:, :].permute(0, 2, 1).reshape(B, x.size(1), H // 14, W // 14).contiguous()
     
     return x
-
 
 def positional_encoding(x: torch.Tensor, L: int = 10) -> torch.Tensor:
     """
