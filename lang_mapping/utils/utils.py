@@ -35,7 +35,7 @@ def get_visual_features_dino(model, x):
     for blk in model.blocks:                      # transformer encoder
         x = blk(x)
     x = model.norm(x)
-    x = x[:, 1:, :].permute(0, 2, 1).reshape(B, x.size(1), H // 14, W // 14).contiguous()
+    x = x[:, 1:, :].permute(0, 2, 1).reshape(B, C, H // 14, W // 14).contiguous()
     
     return x
 
