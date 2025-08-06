@@ -47,6 +47,7 @@ args=(
     "algo.eval_freq=1"
     "algo.log_freq=1"
     "algo.save_freq=1"
+    "algo.save_backup_ckpts=True"
     "eval_env.make_env=True"
     "eval_env.num_envs=$NUM_ENVS"
     "eval_env.max_episode_steps=200"
@@ -61,6 +62,5 @@ args=(
 
 echo "STARTING"
 SAPIEN_NO_DISPLAY=1 python -m experiment.train_${REPRESENTATION}_bc configs/train_${REPRESENTATION}_${TASK}.yml \
-logger.clear_out="True" \
 logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
 "${args[@]}"

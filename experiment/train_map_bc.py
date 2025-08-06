@@ -1,4 +1,5 @@
 import random
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -91,27 +92,95 @@ class TrainConfig:
     model_ckpt: Optional[Union[Path, int, str]] = None
 
     def __post_init__(self):
+        # -------------------------------------------------------------
+        # Handle resuming logic
+        # -------------------------------------------------------------
         if self.resume_logdir is not None:
+            # Explicit resume directory provided by the user
             self.resume_logdir = Path(self.resume_logdir)
             old_config_path = self.resume_logdir / "config.yml"
             # The user might pass the same config file for resuming, which is fine
             if not old_config_path.exists():
                  raise FileNotFoundError(f"No old config at {old_config_path}")
 
+            # Load the old config so that we can reuse logging paths, wandb id, etc.
             old_config = get_mshab_train_cfg(
                 parse_cfg(default_cfg_path=old_config_path)
             )
+            # Reuse the exact same experiment directories so that checkpoints/logs
+            # are preserved. Most importantly, disable `clear_out` so that the
+            # logger does NOT delete the existing directory when it is
+            # re-initialised.
             self.logger.workspace = old_config.logger.workspace
             self.logger.exp_path = old_config.logger.exp_path
             self.logger.log_path = old_config.logger.log_path
             self.logger.model_path = old_config.logger.model_path
             self.logger.train_video_path = old_config.logger.train_video_path
             self.logger.eval_video_path = old_config.logger.eval_video_path
+            # Make sure we never wipe previous outputs when resuming.
+            self.logger.clear_out = False
 
+            # Reuse W&B information so that the run is properly resumed.
+            if self.wandb_id is None and old_config.wandb_id is not None:
+                self.wandb_id = old_config.wandb_id
+            # If the previous run was using W&B, ensure it is enabled now as well.
+            if old_config.logger.wandb:
+                self.logger.wandb = True
+
+            # By default, resume from the latest checkpoint if the caller did not
+            # specify an explicit checkpoint path.
             if self.model_ckpt is None:
-                # Point to the latest checkpoint for resuming
                 self.model_ckpt = self.logger.model_path / "ckpt_latest.pt"
 
+        # ------------------------------------------------------------------
+        # Automatic resume even when `resume_logdir` is not provided.
+        # ------------------------------------------------------------------
+        if self.model_ckpt is None:
+            # ------------------------------------------------------------------
+            # Scan the model directory for available checkpoints and pick the one
+            # with the largest epoch number. Preference order:
+            #   1. Highest `ckpt_epoch_*.pt`
+            #   2. Fallback to `ckpt_latest.pt`
+            # ------------------------------------------------------------------
+            backup_ckpts = list(self.logger.model_path.glob("ckpt_epoch_*.pt"))
+            latest_backup_ckpt = None
+            if backup_ckpts:
+                # Extract epoch numbers using regex and find the max
+                def _epoch_num(path):
+                    m = re.search(r"ckpt_epoch_(\d+)\.", path.name)
+                    return int(m.group(1)) if m else -1
+                latest_backup_ckpt = max(backup_ckpts, key=_epoch_num)
+
+            latest_ckpt = self.logger.model_path / "ckpt_latest.pt"
+
+            # Decide which checkpoint to use
+            candidate_ckpts = []
+            if latest_backup_ckpt is not None:
+                candidate_ckpts.append(latest_backup_ckpt)
+            if latest_ckpt.exists():
+                candidate_ckpts.append(latest_ckpt)
+
+            if candidate_ckpts:
+                # Choose the checkpoint whose stored epoch is the largest.
+                best_ckpt = None
+                best_epoch = -1
+                for ckpt_path in candidate_ckpts:
+                    try:
+                        epoch_val = torch.load(ckpt_path, map_location="cpu")["epoch"]
+                        if epoch_val > best_epoch:
+                            best_epoch = epoch_val
+                            best_ckpt = ckpt_path
+                    except Exception as e:
+                        print(f"[Warn] Failed to read epoch from {ckpt_path}: {e}")
+                # Fallback if epoch field missing or unreadable
+                if best_ckpt is None:
+                    best_ckpt = max(candidate_ckpts, key=lambda p: p.stat().st_mtime)
+
+                self.model_ckpt = best_ckpt
+                # Make sure we do not delete previous results.
+                self.logger.clear_out = False
+
+        # Validate the checkpoint path if we have decided to resume.
         if self.model_ckpt is not None:
             self.model_ckpt = Path(self.model_ckpt)
             assert self.model_ckpt.exists(), f"Could not find {self.model_ckpt}"
@@ -279,6 +348,8 @@ def evaluate_agent(
     )
     _pretty_print_stats("[Eval-Single]", stats_single, logger, color="yellow")
 
+    logger.store(tag="eval", success_once=stats_single["success_once"])
+    logger.store(tag="eval", return_per_step=stats_single["return_per_step"])
     logger.log(global_epoch)
 
 
@@ -341,7 +412,9 @@ def train(cfg: TrainConfig):
         drop_last=True,
     )
 
-    logger_start_log_step = logger.last_log_step + 1 if logger.last_log_step > 0 else 0
+    # Determine the step offset so that logging resumes seamlessly
+    log_step_offset = logger.last_log_step + 1 if logger.last_log_step >= 0 else 0
+
     print("Start training...")
     timer = NonOverlappingTimeProfiler()
 
@@ -351,8 +424,7 @@ def train(cfg: TrainConfig):
     ).view(1, -1, 1)
 
     for epoch in range(start_epoch, cfg.algo.epochs):
-        global_epoch = logger_start_log_step + epoch
-        logger.print(f"Epoch: {global_epoch}")
+        logger.print(f"Epoch: {epoch}")
 
         avg_loss, global_step = train_one_epoch(
             agent,
@@ -369,10 +441,10 @@ def train(cfg: TrainConfig):
         timer.end(key="train")
 
         if (epoch % cfg.algo.log_freq) == 0:
-            logger.store(tag="losses", loss=avg_loss)
+            logger.store(tag="train", training_loss=avg_loss)
             if epoch > 0:
                 logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(global_epoch)
+            logger.log(log_step_offset + epoch)
             timer.end(key="log")
 
         if cfg.algo.eval_freq and (epoch % cfg.algo.eval_freq) == 0:
@@ -384,7 +456,7 @@ def train(cfg: TrainConfig):
                 uid2scene_id,
                 logger,
                 device,
-                global_epoch,
+                log_step_offset + epoch,
             )
             timer.end(key="eval")
 
