@@ -1,3 +1,4 @@
+import argparse
 import os
 
 import numpy as np
@@ -8,20 +9,48 @@ from utils import depth_to_positions
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--pt-folder",
+        type=str,
+        default="/home/daizhirui/Data/mobile_language_mapping_demo",
+    )
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        nargs="+",
+        default=["set_table", "tidy_house", "prepare_groceries"],
+    )
+    parser.add_argument(
+        "--sub-tasks",
+        type=str,
+        nargs="+",
+        default=["pick"],
+    )
+    parser.add_argument(
+        "--scene-ids",
+        type=int,
+        nargs="+",
+        default=[10],
+    )
+    parser.add_argument(
+        "--output-ply",
+        type=str,
+        default="point_cloud.ply",
+    )
+    args = parser.parse_args()
     vertices = []
     colors = []
     n_traj = 30
     s1 = 10  # trajectory sampling step
     s2 = 10  # image down sampling
+
     device = "cuda"
-    tasks = ["set_table", "tidy_house", "prepare_groceries"]
-    # tasks = ["set_table"]
-    # sub_tasks = ["pick", "place"]
-    sub_tasks = ["pick"]
-    # scene_ids = [10, 13]
-    scene_ids = [10]
-    # pt_folder = "/home/daizhirui/Data/mobile_language_mapping"
-    pt_folder = "/home/daizhirui/Data/mobile_language_mapping_demo"
+    tasks = args.tasks
+    sub_tasks = args.sub_tasks
+    scene_ids = args.scene_ids
+    pt_folder = args.pt_folder
+
     for task in tqdm(tasks, desc="Task", ncols=80, position=0):
         for sub_task in tqdm(sub_tasks, desc="SubTask", ncols=80, position=1, leave=False):
             for scene_id in tqdm(scene_ids, desc="Scene", ncols=80, position=2, leave=False):
@@ -55,7 +84,7 @@ def main():
     point_cloud = o3d.geometry.PointCloud()
     point_cloud.points = o3d.utility.Vector3dVector(np.concatenate(vertices, axis=0).astype(np.float64))
     point_cloud.colors = o3d.utility.Vector3dVector(np.concatenate(colors, axis=0).astype(np.float64) / 255.0)
-    o3d.io.write_point_cloud("point_cloud.ply", point_cloud)
+    o3d.io.write_point_cloud(args.output_ply, point_cloud)
     o3d.visualization.draw_geometries([point_cloud])
 
 

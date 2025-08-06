@@ -33,6 +33,10 @@ static_mapping
     - VoxelHashTable (One map per scene)
     ```shell
     # scene 10
+    PYTHONPATH=$(pwd)/.. python visualize_data.py \
+        --pt-folder /home/daizhirui/Data/mobile_language_mapping_demo \
+        --scene-ids 10 \
+        --output-ply vertices_10.ply
     PYTHONPATH=$(pwd)/.. python visualize_static_map.py \
         config/visualize_static_map.yaml \
         cfg.test_model_dir=/home/daizhirui/results/mobile_language_mapping_demo/static_mapping/nearest-exact/20250805-123749/best \
@@ -40,6 +44,10 @@ static_mapping
         pcd_downsample_factor=10 \
         vertices_fp=vertices_10.ply
     # scene 13
+    PYTHONPATH=$(pwd)/.. python visualize_data.py \
+        --pt-folder /home/daizhirui/Data/mobile_language_mapping_demo \
+        --scene-ids 13 \
+        --output-ply vertices_13.ply
     PYTHONPATH=$(pwd)/.. python visualize_static_map.py \
         config/visualize_static_map.yaml \
         cfg.test_model_dir=/home/daizhirui/results/mobile_language_mapping_demo/static_mapping/nearest-exact/20250805-161838/best \
