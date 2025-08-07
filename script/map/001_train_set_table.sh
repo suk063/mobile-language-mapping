@@ -73,7 +73,7 @@ if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
         "${args[@]}"
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m experiment.train_bc configs/train_${REPRESENTATION}_${TASK}.yml \
+    SAPIEN_NO_DISPLAY=1 python -m experiment.train_bc configs/map/train_${REPRESENTATION}_${TASK}.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
