@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from dacite import from_dict
 from omegaconf import OmegaConf
 from torch.optim import Optimizer
@@ -284,6 +285,7 @@ def train_one_epoch(
     time_weights: torch.Tensor,
     writer: SummaryWriter,
     global_step: int,
+    logger: Logger,
     logger: Logger,
 ) -> Tuple[float, int]:
     tot_loss, n_samples = 0.0, 0
