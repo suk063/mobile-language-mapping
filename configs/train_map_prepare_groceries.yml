@@ -42,6 +42,8 @@ algo:
   torch_deterministic: True
   num_dataload_workers: 0
 
+  vis_representation: "map"
+
   # Pretrained model paths
   static_map_path: "/work/mobile_language_mapping/pretrained/hash_voxel_sparse.pt"
   implicit_decoder_path: "/work/mobile_language_mapping/pretrained/implicit_decoder.pt"

@@ -26,8 +26,10 @@ TENSORBOARD=True
 MS_ASSET_DIR="/work/mobile_language_mapping/.maniskill/data"
 WANDB_API_KEY=fc63e5ca2650308d2e46419334ce29b6d9cfe4b4
 
-RESUME_LOGDIR="$WORKSPACE/$EXP_NAME"
+RESUME_LOGDIR="/sh-vol/mobile-language-mapping/$WORKSPACE/$EXP_NAME"
 RESUME_CONFIG="$RESUME_LOGDIR/config.yml"
+
+
 
 MAX_IMAGE_CACHE_SIZE=0   # safe num for about 64 GiB system memory
 NUM_DATALOAD_WORKERS=2
@@ -62,7 +64,17 @@ args=(
     "logger.workspace=$WORKSPACE"
 )
 
-echo "STARTING"
-SAPIEN_NO_DISPLAY=1 python -m experiment.train_${REPRESENTATION}_bc configs/train_${REPRESENTATION}_${TASK}.yml \
-logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
-"${args[@]}"
+if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
+    echo "RESUMING"
+    SAPIEN_NO_DISPLAY=1 python -m experiment.train_bc "$RESUME_CONFIG" \
+        resume_logdir="$RESUME_LOGDIR" \
+        logger.clear_out="False" \
+        logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
+        "${args[@]}"
+else
+    echo "STARTING"
+    SAPIEN_NO_DISPLAY=1 python -m experiment.train_bc configs/train_bc.yml \
+        logger.clear_out="True" \
+        logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
+        "${args[@]}"
+fi

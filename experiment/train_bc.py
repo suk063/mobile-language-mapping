@@ -14,7 +14,6 @@ import wandb
 from dacite import from_dict
 from omegaconf import OmegaConf
 from torch.optim import Optimizer
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from lang_mapping.agent.agent_map_bc import Agent_map_bc
@@ -100,9 +99,14 @@ class TrainConfig:
             # Explicit resume directory provided by the user
             self.resume_logdir = Path(self.resume_logdir)
             old_config_path = self.resume_logdir / "config.yml"
-            # The user might pass the same config file for resuming, which is fine
-            if not old_config_path.exists():
-                 raise FileNotFoundError(f"No old config at {old_config_path}")
+            if old_config_path.absolute() == Path(PASSED_CONFIG_PATH).absolute():
+                assert (
+                    self.resume_logdir == self.logger.exp_path
+                ), "if setting resume_logdir, must set logger workspace and exp_name accordingly"
+            else:
+                assert (
+                    old_config_path.exists()
+                ), f"Couldn't find old config at path {old_config_path}"
 
             # Load the old config so that we can reuse logging paths, wandb id, etc.
             old_config = get_mshab_train_cfg(
@@ -199,74 +203,54 @@ def get_mshab_train_cfg(cfg: dict) -> TrainConfig:
     return from_dict(data_class=TrainConfig, data=OmegaConf.to_container(cfg))
 
 
-def save_checkpoint(
-    agent: nn.Module,
-    optimizer: Optimizer,
-    epoch: int,
-    global_step: int,
-    logger: Logger,
-    cfg: BCConfig,
-):
-    """
-    Save the agent, optimizer, and training progress.
-    """
-    checkpoint_data = {
-        "agent_state_dict": agent.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "epoch": epoch,
-        "global_step": global_step,
-    }
 
-    # Save a checkpoint for the current epoch as a backup
-    if cfg.save_backup_ckpts:
-        ckpt_path = logger.model_path / f"ckpt_epoch_{epoch}.pt"
-        torch.save(checkpoint_data, ckpt_path)
-
-    # Always save a "latest" checkpoint for easy resuming
-    latest_ckpt_path = logger.model_path / "ckpt_latest.pt"
-    torch.save(checkpoint_data, latest_ckpt_path)
 
 
 def setup_models_and_optimizer(
-    cfg: TrainConfig, device: torch.device, sample_obs, single_act_shape
+    cfg: TrainConfig, device: torch.device, sample_obs, single_act_shape, vis_representation
 ) -> Tuple[Agent_map_bc, Optimizer]:
-    # We use fixed hyperparams for the static map and implicit decoder
-    static_maps = MultiVoxelHashTable.load_sparse(cfg.algo.static_map_path).to(device)
 
-    # (NOTE) Hardcoded hyperparams for the implicit decoder
-    voxel_feature_dim = 128
-    hidden_dim = 240
+    if vis_representation == "map":
+        # We use fixed hyperparams for the static map and implicit decoder
+        static_maps = MultiVoxelHashTable.load_sparse(cfg.algo.static_map_path).to(device)
 
-    implicit_decoder = ImplicitDecoder(
-        voxel_feature_dim=voxel_feature_dim,
-        hidden_dim=hidden_dim,
-        output_dim=cfg.algo.clip_input_dim,
-    ).to(device)
+        # (NOTE) Hardcoded hyperparams for the implicit decoder
+        voxel_feature_dim = 128
+        hidden_dim = 240
 
-    implicit_decoder.load_state_dict(
-        torch.load(cfg.algo.implicit_decoder_path, map_location=device)["model"],
-        strict=True,
-    )
+        implicit_decoder = ImplicitDecoder(
+            voxel_feature_dim=voxel_feature_dim,
+            hidden_dim=hidden_dim,
+            output_dim=cfg.algo.clip_input_dim,
+        ).to(device)
 
-    for param in static_maps.parameters():
-        param.requires_grad = False
-    for param in implicit_decoder.parameters():
-        param.requires_grad = False
+        implicit_decoder.load_state_dict(
+            torch.load(cfg.algo.implicit_decoder_path, map_location=device)["model"],
+            strict=True,
+        )
 
-    agent = Agent_map_bc(
-        sample_obs=sample_obs,
-        single_act_shape=single_act_shape,
-        transf_input_dim=cfg.algo.transf_input_dim,
-        clip_input_dim=cfg.algo.clip_input_dim,
-        text_input=cfg.algo.text_input,
-        camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
-        static_maps=static_maps,
-        implicit_decoder=implicit_decoder,
-        num_heads=cfg.algo.num_heads,
-        num_layers_transformer=cfg.algo.num_layers_transformer,
-        num_action_layer=cfg.algo.num_action_layer,
-        action_pred_horizon=cfg.algo.action_pred_horizon,
-    ).to(device)
+        for param in static_maps.parameters():
+            param.requires_grad = False
+        for param in implicit_decoder.parameters():
+            param.requires_grad = False
+
+        agent = Agent_map_bc(
+            sample_obs=sample_obs,
+            single_act_shape=single_act_shape,
+            transf_input_dim=cfg.algo.transf_input_dim,
+            clip_input_dim=cfg.algo.clip_input_dim,
+            text_input=cfg.algo.text_input,
+            camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
+            static_maps=static_maps,
+            implicit_decoder=implicit_decoder,
+            num_heads=cfg.algo.num_heads,
+            num_layers_transformer=cfg.algo.num_layers_transformer,
+            num_action_layer=cfg.algo.num_action_layer,
+            action_pred_horizon=cfg.algo.action_pred_horizon,
+        ).to(device)
+
+    else:
+        raise ValueError(f"Invalid vis_representation: {vis_representation}")
 
     params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.AdamW(params_to_optimize, lr=cfg.algo.lr)
@@ -283,7 +267,6 @@ def train_one_epoch(
     uid_to_label_map: Dict,
     uid2scene_id: Dict,
     time_weights: torch.Tensor,
-    writer: SummaryWriter,
     global_step: int,
     logger: Logger,
 ) -> Tuple[float, int]:
@@ -325,12 +308,9 @@ def train_one_epoch(
         tot_loss += loss.item() * batch_size
         n_samples += batch_size
         global_step += 1
-
-        writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
         
-        # Log to wandb if available
-        if logger.wandb and logger.wb_run:
-            logger.wb_run.log({"train_iter/bc_loss": bc_loss.item()}, step=global_step)
+        logger.store(tag="train_iter", bc_loss=bc_loss.item())
+        logger.log(global_step)
 
     return tot_loss / n_samples if n_samples > 0 else 0.0, global_step
 
@@ -381,22 +361,39 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     agent, optimizer = setup_models_and_optimizer(
-        cfg, device, eval_obs, eval_envs.unwrapped.single_action_space.shape
+        cfg, device, eval_obs, eval_envs.unwrapped.single_action_space.shape, cfg.algo.vis_representation
     )
 
-    logger = Logger(logger_cfg=cfg.logger, save_fn=None)
-    writer = SummaryWriter(log_dir=cfg.logger.log_path)
+    def save(save_path):
+        torch.save(
+            dict(
+                agent=agent.state_dict(),
+                optimizer=optimizer.state_dict(),
+                epoch=epoch,
+                global_step=global_step,
+            ),
+            save_path,
+        )
+
+    def load(load_path):
+        checkpoint = torch.load(str(load_path), map_location=device)
+        agent.load_state_dict(checkpoint["agent"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        return checkpoint.get("epoch", 0), checkpoint.get("global_step", 0)
+
+    logger = Logger(
+        logger_cfg=cfg.logger,
+        save_fn=save,
+    )
 
     start_epoch = 0
     global_step = 0
     if cfg.model_ckpt and cfg.model_ckpt.exists():
         print(f"Resuming from checkpoint: {cfg.model_ckpt}")
-        checkpoint = torch.load(cfg.model_ckpt, map_location=device)
-        agent.load_state_dict(checkpoint["agent_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_epoch = checkpoint["epoch"] + 1
-        global_step = checkpoint["global_step"]
-        print(f"Resumed from epoch {checkpoint['epoch']}. Starting at epoch {start_epoch}.")
+        resumed_epoch, resumed_global_step = load(cfg.model_ckpt)
+        start_epoch = resumed_epoch + 1
+        global_step = resumed_global_step
+        print(f"Resumed from epoch {resumed_epoch}. Starting at epoch {start_epoch}.")
 
     assert eval_envs.unwrapped.control_mode == "pd_joint_delta_pos"
     bc_dataset = DPDataset(
@@ -419,7 +416,22 @@ def train(cfg: TrainConfig):
     )
 
     # Determine the step offset so that logging resumes seamlessly
-    log_step_offset = logger.last_log_step + 1 if logger.last_log_step >= 0 else 0
+    logger_start_log_step = logger.last_log_step + 1 if logger.last_log_step > 0 else 0
+
+    def check_freq(freq):
+        return epoch % freq == 0
+
+    def store_env_stats(key):
+        assert key == "eval", "Only eval env for BC"
+        log_env = eval_envs
+        logger.store(
+            key,
+            return_per_step=torch.tensor(log_env.return_queue, device=device).float().mean() / log_env.max_episode_steps,
+            success_once=torch.tensor(log_env.success_once_queue, device=device).float().mean(),
+            success_at_end=torch.tensor(log_env.success_at_end_queue, device=device).float().mean(),
+            len=torch.tensor(log_env.length_queue, device=device).float().mean(),
+        )
+        log_env.reset_queues()
 
     print("Start training...")
     timer = NonOverlappingTimeProfiler()
@@ -430,7 +442,12 @@ def train(cfg: TrainConfig):
     ).view(1, -1, 1)
 
     for epoch in range(start_epoch, cfg.algo.epochs):
-        logger.print(f"Epoch: {epoch}")
+
+        if epoch + logger_start_log_step > cfg.algo.epochs:
+            break
+        logger.print(
+            f"Overall epoch: {epoch + logger_start_log_step}; Curr process epoch: {epoch}"
+        )
 
         avg_loss, global_step = train_one_epoch(
             agent,
@@ -441,48 +458,50 @@ def train(cfg: TrainConfig):
             uid_to_label_map,
             uid2scene_id,
             time_weights,
-            writer,
             global_step,
             logger,
         )
         timer.end(key="train")
 
-        if (epoch % cfg.algo.log_freq) == 0:
-            logger.store(tag="train", training_loss=avg_loss)
+        # Log
+        if check_freq(cfg.algo.log_freq):
+            logger.store(tag="losses", loss=avg_loss)
             if epoch > 0:
                 logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(log_step_offset + epoch)
+            logger.log(logger_start_log_step + epoch)
             timer.end(key="log")
 
-        if cfg.algo.eval_freq and (epoch % cfg.algo.eval_freq) == 0:
-            evaluate_agent(
-                agent,
-                eval_envs,
-                fixed_plan_idxs,
-                uid_to_label_map,
-                uid2scene_id,
-                logger,
-                device,
-                log_step_offset + epoch,
-            )
-            timer.end(key="eval")
+        # Evaluation
+        if cfg.algo.eval_freq:
+            if check_freq(cfg.algo.eval_freq):
+                evaluate_agent(
+                    agent,
+                    eval_envs,
+                    fixed_plan_idxs,
+                    uid_to_label_map,
+                    uid2scene_id,
+                    logger,
+                    device,
+                    logger_start_log_step + epoch,
+                )
+                timer.end(key="eval")
 
-        if (epoch % cfg.algo.save_freq) == 0:
-            save_checkpoint(
-                agent, optimizer, epoch, global_step, logger, cfg.algo
-            )
+        # Checkpoint
+        if check_freq(cfg.algo.save_freq):
+            if cfg.algo.save_backup_ckpts:
+                save(logger.model_path / f"{epoch}_ckpt.pt")
+            save(logger.model_path / "latest.pt")
             timer.end(key="checkpoint")
+
+    save(logger.model_path / "final_ckpt.pt")
+    save(logger.model_path / "latest.pt")
 
     bc_dataloader.close()
     eval_envs.close()
     logger.close()
-    writer.close()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python your_script.py <path_to_config_file>")
-        sys.exit(1)
-    config_path = sys.argv[1]
-    cfg = get_mshab_train_cfg(parse_cfg(default_cfg_path=config_path))
+    PASSED_CONFIG_PATH = sys.argv[1]
+    cfg = get_mshab_train_cfg(parse_cfg(default_cfg_path=PASSED_CONFIG_PATH))
     train(cfg)
