@@ -2,7 +2,7 @@ seed: 2
 
 TASK: tidy_house
 OBJ: all_13
-REPRESENTATION: map
+REPRESENTATION: point
 
 eval_env:
   make_env: True
@@ -39,13 +39,6 @@ algo:
   max_image_cache_size: 50_000
   save_backup_ckpts: False
   torch_deterministic: True
-  num_dataload_workers: 0
-
-  representation: "map"
-
-  # Pretrained model paths
-  static_map_path: "pretrained/hash_voxel_sparse.pt"
-  implicit_decoder_path: "pretrained/implicit_decoder.pt"
 
   # CLIP / Agent Settings
   clip_input_dim: 768

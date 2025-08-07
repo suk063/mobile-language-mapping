@@ -16,7 +16,12 @@ from omegaconf import OmegaConf
 from torch.optim import Optimizer
 from tqdm import tqdm
 
-from lang_mapping.agent.agent_map_bc import Agent_map_bc
+from lang_mapping.agent.agent_map_bc import Agent_map_bc 
+from lang_mapping.agent.agent_uplifted_bc import Agent_uplifted_bc
+from lang_mapping.agent.agent_image_bc import Agent_image_bc
+from lang_mapping.agent.agent_point_bc import Agent_point_bc
+
+
 from lang_mapping.utils.dataset import (
     DPDataset,
     build_object_map,
@@ -52,6 +57,8 @@ class BCConfig:
     num_dataload_workers: int
     trajs_per_obj: Union[str, int]
     torch_deterministic: bool
+
+    representation: str
 
     # Pretrained model paths
     static_map_path: str
@@ -207,10 +214,10 @@ def get_mshab_train_cfg(cfg: dict) -> TrainConfig:
 
 
 def setup_models_and_optimizer(
-    cfg: TrainConfig, device: torch.device, sample_obs, single_act_shape, vis_representation
+    cfg: TrainConfig, device: torch.device, sample_obs, single_act_shape
 ) -> Tuple[Agent_map_bc, Optimizer]:
 
-    if vis_representation == "map":
+    if cfg.algo.representation == "map":
         # We use fixed hyperparams for the static map and implicit decoder
         static_maps = MultiVoxelHashTable.load_sparse(cfg.algo.static_map_path).to(device)
 
@@ -249,8 +256,47 @@ def setup_models_and_optimizer(
             action_pred_horizon=cfg.algo.action_pred_horizon,
         ).to(device)
 
+    elif cfg.algo.representation == "uplifted":
+        agent = Agent_uplifted_bc(
+            sample_obs=sample_obs,
+            single_act_shape=single_act_shape,
+            transf_input_dim=cfg.algo.transf_input_dim,
+            clip_input_dim=cfg.algo.clip_input_dim,
+            text_input=cfg.algo.text_input,
+            camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
+            num_heads=cfg.algo.num_heads,
+            num_layers_transformer=cfg.algo.num_layers_transformer,
+            num_action_layer=cfg.algo.num_action_layer,
+            action_pred_horizon=cfg.algo.action_pred_horizon,
+        ).to(device)
+    elif cfg.algo.representation == "image":
+        agent = Agent_image_bc(
+            sample_obs=sample_obs,
+            single_act_shape=single_act_shape,
+            transf_input_dim=cfg.algo.transf_input_dim,
+            clip_input_dim=cfg.algo.clip_input_dim,
+            text_input=cfg.algo.text_input,
+            camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
+            num_heads=cfg.algo.num_heads,
+            num_layers_transformer=cfg.algo.num_layers_transformer,
+            num_action_layer=cfg.algo.num_action_layer,
+            action_pred_horizon=cfg.algo.action_pred_horizon,
+        ).to(device)
+    elif cfg.algo.representation == "point":
+        agent = Agent_point_bc(
+            sample_obs=sample_obs,
+            single_act_shape=single_act_shape,
+            transf_input_dim=cfg.algo.transf_input_dim,
+            clip_input_dim=cfg.algo.clip_input_dim,
+            text_input=cfg.algo.text_input,
+            camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
+            num_heads=cfg.algo.num_heads,
+            num_layers_transformer=cfg.algo.num_layers_transformer,
+            num_action_layer=cfg.algo.num_action_layer,
+            action_pred_horizon=cfg.algo.action_pred_horizon,
+        ).to(device)
     else:
-        raise ValueError(f"Invalid vis_representation: {vis_representation}")
+        raise ValueError(f"Invalid representation: {cfg.algo.representation}")
 
     params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.AdamW(params_to_optimize, lr=cfg.algo.lr)
@@ -308,9 +354,10 @@ def train_one_epoch(
         tot_loss += loss.item() * batch_size
         n_samples += batch_size
         global_step += 1
-        
-        logger.store(tag="train_iter", bc_loss=bc_loss.item())
-        logger.log(global_step)
+        if logger.wandb:
+            logger.wb_run.log({"train_iter/bc_loss": bc_loss.item()}, step=global_step)
+        if logger.tensorboard:
+            logger.tb_writer.add_scalar("train_iter/bc_loss", bc_loss.item(), global_step)
 
     return tot_loss / n_samples if n_samples > 0 else 0.0, global_step
 
@@ -323,7 +370,8 @@ def evaluate_agent(
     uid2scene_id,
     logger,
     device,
-    global_epoch,
+    global_step,
+    epoch,
 ):
     agent.eval()
     eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
@@ -336,7 +384,8 @@ def evaluate_agent(
 
     logger.store(tag="eval", success_once=stats_single["success_once"])
     logger.store(tag="eval", return_per_step=stats_single["return_per_step"])
-    logger.log(global_epoch)
+    logger.store(tag="eval", epoch=epoch)  # epoch 정보도 함께 로깅
+    logger.log(epoch)
 
 
 def train(cfg: TrainConfig):
@@ -361,7 +410,7 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     agent, optimizer = setup_models_and_optimizer(
-        cfg, device, eval_obs, eval_envs.unwrapped.single_action_space.shape, cfg.algo.vis_representation
+        cfg, device, eval_obs, eval_envs.unwrapped.single_action_space.shape
     )
 
     def save(save_path):
@@ -415,8 +464,7 @@ def train(cfg: TrainConfig):
         drop_last=True,
     )
 
-    # Determine the step offset so that logging resumes seamlessly
-    logger_start_log_step = logger.last_log_step + 1 if logger.last_log_step > 0 else 0
+    # Note: global_step will be used directly for consistent logging
 
     def check_freq(freq):
         return epoch % freq == 0
@@ -443,10 +491,10 @@ def train(cfg: TrainConfig):
 
     for epoch in range(start_epoch, cfg.algo.epochs):
 
-        if epoch + logger_start_log_step > cfg.algo.epochs:
+        if epoch >= cfg.algo.epochs:
             break
         logger.print(
-            f"Overall epoch: {epoch + logger_start_log_step}; Curr process epoch: {epoch}"
+            f"Epoch: {epoch}; Global step: {global_step}"
         )
 
         avg_loss, global_step = train_one_epoch(
@@ -468,7 +516,7 @@ def train(cfg: TrainConfig):
             logger.store(tag="losses", loss=avg_loss)
             if epoch > 0:
                 logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(logger_start_log_step + epoch)
+            logger.log(epoch)
             timer.end(key="log")
 
         # Evaluation
@@ -482,7 +530,8 @@ def train(cfg: TrainConfig):
                     uid2scene_id,
                     logger,
                     device,
-                    logger_start_log_step + epoch,
+                    global_step,
+                    epoch,
                 )
                 timer.end(key="eval")
 

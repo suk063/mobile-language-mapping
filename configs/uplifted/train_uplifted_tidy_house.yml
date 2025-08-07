@@ -1,0 +1,62 @@
+seed: 2
+
+TASK: tidy_house
+OBJ: all_13
+REPRESENTATION: uplifted
+
+eval_env:
+  make_env: True
+  env_id: "PickSubtaskTrain-v0"
+  num_envs: 10
+  max_episode_steps: 200
+  continuous_task: True
+  cat_state: True
+  cat_pixels: False
+  frame_stack: 1  
+  stationary_base: False
+  stationary_torso: False
+  stationary_head: True
+  task_plan_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/${TASK}/pick/train/${OBJ}.json
+  spawn_data_fp: ~/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/${TASK}/pick/train/spawn_data.pt
+  record_video: False
+  info_on_video: True
+  extra_stat_keys: []
+  env_kwargs:
+    robot_force_mult: 0.001
+    robot_force_penalty_min: 0.2
+    target_randomization: False
+
+algo:
+  name: "bc"
+  lr: 1e-5
+  batch_size: 4
+  epochs: 20
+  eval_freq: 1
+  log_freq: 1
+  save_freq: 1
+  trajs_per_obj: "all"
+  data_dir_fp: null
+  max_image_cache_size: 50_000
+  save_backup_ckpts: False
+  torch_deterministic: True
+
+  # CLIP / Agent Settings
+  clip_input_dim: 768
+  text_input: ["potted_meat_can", "master_chef_can", "bowl", "tomato_soup_can", "cracker_box", "sugar_box", "gelatin_box", "pudding_box", "tuna_fish_can"]
+  camera_intrinsics: [71.9144, 71.9144, 112, 112]
+  bc_loss_weight: 10.0
+  action_temp_weights: 0.3
+  
+  # Transformer architecture
+  num_heads: 8
+  num_layers_transformer: 4
+  num_action_layer: 6
+  action_pred_horizon: 16
+  transf_input_dim: 384
+
+logger:
+  workspace: mshab_exps
+  exp_name: bc-${REPRESENTATION}-${TASK}
+  clear_out: True
+  tensorboard: True
+  wandb: False

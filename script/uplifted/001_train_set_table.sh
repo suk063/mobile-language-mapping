@@ -1,11 +1,11 @@
 #!/usr/bin/bash
 
-SEED=1
+SEED=0
 
 TRAJS_PER_OBJ=1000
 
-REPRESENTATION=map
-TASK=prepare_groceries
+REPRESENTATION=uplifted
+TASK=set_table
 SUBTASK=pick
 SPLIT=train
 OBJ=all_13
@@ -17,9 +17,9 @@ NUM_ENVS=10
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
 WORKSPACE="mshab_exps"
 GROUP=$TASK-$SUBTASK
-EXP_NAME="$ENV_ID/$GROUP/$TASK-$SUBTASK-map"
+EXP_NAME="$ENV_ID/$GROUP/$TASK-$SUBTASK-uplifted-$SEED"
 # shellcheck disable=SC2001
-PROJECT_NAME="$TASK-$SUBTASK-map"
+PROJECT_NAME="$TASK-$SUBTASK-uplifted"
 
 WANDB=True
 TENSORBOARD=True
@@ -29,8 +29,10 @@ RESUME_LOGDIR="/sh-vol/mobile-language-mapping/$WORKSPACE/$EXP_NAME"
 RESUME_CONFIG="$RESUME_LOGDIR/config.yml"
 
 
+
 MAX_IMAGE_CACHE_SIZE=0   # safe num for about 64 GiB system memory
 NUM_DATALOAD_WORKERS=2
+
 data_dir_fp="$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange-dataset/$TASK/$SUBTASK/$OBJ.h5"
 
 args=(
@@ -41,6 +43,7 @@ args=(
     "eval_env.task_plan_fp=$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange/task_plans/$TASK/$SUBTASK/$SPLIT/$OBJ.json"
     "eval_env.spawn_data_fp=$MS_ASSET_DIR/scene_datasets/replica_cad_dataset/rearrange/spawn_data/$TASK/$SUBTASK/$SPLIT/spawn_data.pt"
     "eval_env.frame_stack=1"
+    "algo.representation=$REPRESENTATION"
     "algo.trajs_per_obj=$TRAJS_PER_OBJ"
     "algo.data_dir_fp=$data_dir_fp"
     "algo.max_image_cache_size=$MAX_IMAGE_CACHE_SIZE"
@@ -70,7 +73,7 @@ if [ -f "$RESUME_CONFIG" ] && [ -f "$RESUME_LOGDIR/models/latest.pt" ]; then
         "${args[@]}"
 else
     echo "STARTING"
-    SAPIEN_NO_DISPLAY=1 python -m experiment.train_bc configs/train_bc.yml \
+    SAPIEN_NO_DISPLAY=1 python -m experiment.train_bc configs/uplifted/train_${REPRESENTATION}_${TASK}.yml \
         logger.clear_out="True" \
         logger.best_stats_cfg="{eval/success_once: 1, eval/return_per_step: 1}" \
         "${args[@]}"
