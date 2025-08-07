@@ -284,6 +284,7 @@ def train_one_epoch(
     time_weights: torch.Tensor,
     writer: SummaryWriter,
     global_step: int,
+    logger: Logger,
 ) -> Tuple[float, int]:
     tot_loss, n_samples = 0.0, 0
     agent.train()
@@ -438,6 +439,7 @@ def train(cfg: TrainConfig):
             time_weights,
             writer,
             global_step,
+            logger,
         )
         timer.end(key="train")
 
