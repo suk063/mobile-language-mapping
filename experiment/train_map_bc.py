@@ -286,7 +286,6 @@ def train_one_epoch(
     writer: SummaryWriter,
     global_step: int,
     logger: Logger,
-    logger: Logger,
 ) -> Tuple[float, int]:
     tot_loss, n_samples = 0.0, 0
     agent.train()
