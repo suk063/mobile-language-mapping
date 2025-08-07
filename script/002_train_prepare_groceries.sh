@@ -11,7 +11,7 @@ SPLIT=train
 OBJ=all_13
 
 # Change according to the task
-NUM_ENVS=10
+NUM_ENVS=5
 
 # shellcheck disable=SC2001 
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
