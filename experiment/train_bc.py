@@ -16,7 +16,7 @@ from omegaconf import OmegaConf
 from torch.optim import Optimizer
 from tqdm import tqdm
 
-from lang_mapping.agent.agent_map_bc import Agent_map_bc
+from lang_mapping.agent.agent_map_bc import Agent_map_bc, Agent_image_bc
 from lang_mapping.utils.dataset import (
     DPDataset,
     build_object_map,
@@ -417,8 +417,7 @@ def train(cfg: TrainConfig):
         drop_last=True,
     )
 
-    # Determine the step offset so that logging resumes seamlessly
-    logger_start_log_step = logger.last_log_step + 1 if logger.last_log_step > 0 else 0
+    # Note: global_step will be used directly for consistent logging
 
     def check_freq(freq):
         return epoch % freq == 0
@@ -445,10 +444,10 @@ def train(cfg: TrainConfig):
 
     for epoch in range(start_epoch, cfg.algo.epochs):
 
-        if epoch + logger_start_log_step > cfg.algo.epochs:
+        if epoch >= cfg.algo.epochs:
             break
         logger.print(
-            f"Overall epoch: {epoch + logger_start_log_step}; Curr process epoch: {epoch}"
+            f"Epoch: {epoch}; Global step: {global_step}"
         )
 
         avg_loss, global_step = train_one_epoch(
@@ -470,7 +469,7 @@ def train(cfg: TrainConfig):
             logger.store(tag="losses", loss=avg_loss)
             if epoch > 0:
                 logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(logger_start_log_step + epoch)
+            logger.log(global_step)
             timer.end(key="log")
 
         # Evaluation
@@ -484,7 +483,7 @@ def train(cfg: TrainConfig):
                     uid2scene_id,
                     logger,
                     device,
-                    logger_start_log_step + epoch,
+                    global_step,
                 )
                 timer.end(key="eval")
 
