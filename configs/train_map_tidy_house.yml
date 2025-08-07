@@ -40,9 +40,6 @@ algo:
   max_image_cache_size: 0
   save_backup_ckpts: False
   torch_deterministic: True
-  num_dataload_workers: 0
-
-  representation: "map"
 
   # Pretrained model paths
   static_map_path: "/work/mobile_language_mapping/pretrained/hash_voxel_sparse.pt"
