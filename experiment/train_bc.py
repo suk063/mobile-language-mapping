@@ -354,9 +354,10 @@ def train_one_epoch(
         tot_loss += loss.item() * batch_size
         n_samples += batch_size
         global_step += 1
-        
-        logger.store(tag="train_iter", bc_loss=bc_loss.item())
-        logger.log(global_step)
+        if logger.wandb:
+            logger.wb_run.log({"train_iter/bc_loss": bc_loss.item()}, step=global_step)
+        if logger.tensorboard:
+            logger.tb_writer.add_scalar("train_iter/bc_loss", bc_loss.item(), global_step)
 
     return tot_loss / n_samples if n_samples > 0 else 0.0, global_step
 
@@ -384,7 +385,7 @@ def evaluate_agent(
     logger.store(tag="eval", success_once=stats_single["success_once"])
     logger.store(tag="eval", return_per_step=stats_single["return_per_step"])
     logger.store(tag="eval", epoch=epoch)  # epoch 정보도 함께 로깅
-    logger.log(global_step)
+    logger.log(epoch)
 
 
 def train(cfg: TrainConfig):
@@ -515,7 +516,7 @@ def train(cfg: TrainConfig):
             logger.store(tag="losses", loss=avg_loss)
             if epoch > 0:
                 logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(global_step)
+            logger.log(epoch)
             timer.end(key="log")
 
         # Evaluation

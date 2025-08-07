@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 
-SEED=1
+SEED=0
 
 TRAJS_PER_OBJ=1000
 
@@ -17,7 +17,7 @@ NUM_ENVS=10
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
 WORKSPACE="mshab_exps"
 GROUP=$TASK-$SUBTASK
-EXP_NAME="$ENV_ID/$GROUP/$TASK-$SUBTASK-uplifted"
+EXP_NAME="$ENV_ID/$GROUP/$TASK-$SUBTASK-uplifted-$SEED"
 # shellcheck disable=SC2001
 PROJECT_NAME="$TASK-$SUBTASK-uplifted"
 
