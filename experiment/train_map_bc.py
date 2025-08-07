@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from dacite import from_dict
 from omegaconf import OmegaConf
 from torch.optim import Optimizer
@@ -284,6 +285,7 @@ def train_one_epoch(
     time_weights: torch.Tensor,
     writer: SummaryWriter,
     global_step: int,
+    logger: Logger,
 ) -> Tuple[float, int]:
     tot_loss, n_samples = 0.0, 0
     agent.train()
@@ -325,6 +327,10 @@ def train_one_epoch(
         global_step += 1
 
         writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
+        
+        # Log to wandb if available
+        if logger.wandb and logger.wb_run:
+            logger.wb_run.log({"train_iter/bc_loss": bc_loss.item()}, step=global_step)
 
     return tot_loss / n_samples if n_samples > 0 else 0.0, global_step
 
@@ -437,6 +443,7 @@ def train(cfg: TrainConfig):
             time_weights,
             writer,
             global_step,
+            logger,
         )
         timer.end(key="train")
 
