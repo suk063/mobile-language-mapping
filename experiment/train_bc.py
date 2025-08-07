@@ -16,7 +16,12 @@ from omegaconf import OmegaConf
 from torch.optim import Optimizer
 from tqdm import tqdm
 
-from lang_mapping.agent.agent_map_bc import Agent_map_bc, Agent_uplifted_bc
+from lang_mapping.agent.agent_map_bc import Agent_map_bc 
+from lang_mapping.agent.agent_uplifted_bc import Agent_uplifted_bc
+from lang_mapping.agent.agent_image_bc import Agent_image_bc
+from lang_mapping.agent.agent_point_bc import Agent_point_bc
+
+
 from lang_mapping.utils.dataset import (
     DPDataset,
     build_object_map,
@@ -253,6 +258,32 @@ def setup_models_and_optimizer(
 
     elif cfg.algo.representation == "uplifted":
         agent = Agent_uplifted_bc(
+            sample_obs=sample_obs,
+            single_act_shape=single_act_shape,
+            transf_input_dim=cfg.algo.transf_input_dim,
+            clip_input_dim=cfg.algo.clip_input_dim,
+            text_input=cfg.algo.text_input,
+            camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
+            num_heads=cfg.algo.num_heads,
+            num_layers_transformer=cfg.algo.num_layers_transformer,
+            num_action_layer=cfg.algo.num_action_layer,
+            action_pred_horizon=cfg.algo.action_pred_horizon,
+        ).to(device)
+    elif cfg.algo.representation == "image":
+        agent = Agent_image_bc(
+            sample_obs=sample_obs,
+            single_act_shape=single_act_shape,
+            transf_input_dim=cfg.algo.transf_input_dim,
+            clip_input_dim=cfg.algo.clip_input_dim,
+            text_input=cfg.algo.text_input,
+            camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
+            num_heads=cfg.algo.num_heads,
+            num_layers_transformer=cfg.algo.num_layers_transformer,
+            num_action_layer=cfg.algo.num_action_layer,
+            action_pred_horizon=cfg.algo.action_pred_horizon,
+        ).to(device)
+    elif cfg.algo.representation == "point":
+        agent = Agent_point_bc(
             sample_obs=sample_obs,
             single_act_shape=single_act_shape,
             transf_input_dim=cfg.algo.transf_input_dim,
