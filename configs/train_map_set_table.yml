@@ -8,7 +8,7 @@ MS_ASSET_DIR: /work/mobile_language_mapping/.maniskill/data
 eval_env:
   make_env: True
   env_id: "PickSubtaskTrain-v0"
-  num_envs: 2
+  num_envs: 10
   max_episode_steps: 200
   continuous_task: True
   cat_state: True
@@ -30,14 +30,14 @@ eval_env:
 algo:
   name: "bc"
   lr: 1e-5
-  batch_size: 4
+  batch_size: 2
   epochs: 20
   eval_freq: 1
   log_freq: 1
   save_freq: 1
   trajs_per_obj: "all"
   data_dir_fp: null
-  max_image_cache_size: 50_000
+  max_image_cache_size: 0
   save_backup_ckpts: False
   torch_deterministic: True
   num_dataload_workers: 0

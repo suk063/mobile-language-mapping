@@ -2,7 +2,7 @@
 
 SEED=1
 
-TRAJS_PER_OBJ=1000
+TRAJS_PER_OBJ=1
 
 REPRESENTATION=map
 TASK=prepare_groceries
