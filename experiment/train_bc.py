@@ -53,6 +53,8 @@ class BCConfig:
     trajs_per_obj: Union[str, int]
     torch_deterministic: bool
 
+    vis_representation: str
+
     # Pretrained model paths
     static_map_path: str
     implicit_decoder_path: str
