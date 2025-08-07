@@ -16,7 +16,8 @@ from omegaconf import OmegaConf
 from torch.optim import Optimizer
 from tqdm import tqdm
 
-from lang_mapping.agent.agent_map_bc import Agent_map_bc, Agent_uplifted_bc
+from lang_mapping.agent.agent_map_bc import Agent_map_bc 
+from lang_mapping.agent.agent_uplifted_bc import Agent_uplifted_bc
 from lang_mapping.utils.dataset import (
     DPDataset,
     build_object_map,
