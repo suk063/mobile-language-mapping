@@ -15,7 +15,7 @@ NUM_ENVS=10
 
 # shellcheck disable=SC2001 
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
-WORKSPACE="/sh-vol/mshab_exps"
+WORKSPACE="mshab_exps"
 GROUP=$TASK-$SUBTASK
 EXP_NAME="$ENV_ID/$GROUP/$TASK-$SUBTASK-map"
 # shellcheck disable=SC2001
