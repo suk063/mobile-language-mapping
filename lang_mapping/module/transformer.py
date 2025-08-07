@@ -236,18 +236,21 @@ class ActionTransformerDecoder(nn.Module):
         self.action_pred_horizon = action_pred_horizon
         self.causal_attn_bias = xops.LowerTriangularMask()
         
-    def forward(self, memory, global_tok, text_emb, state) -> torch.Tensor:
-        B, _, d_model = memory.shape
-  
-        memory = torch.cat([state, text_emb, global_tok, memory], dim=1)
-        
+    def forward(self, visual_token, state, text_emb=None, global_tok=None) -> torch.Tensor:
+        B, _, d_model = visual_token.shape
+        tokens = torch.cat([visual_token, state], dim=1)
+        if text_emb is not None:
+            tokens = torch.cat([tokens, text_emb], dim=1)
+        if global_tok is not None:
+            tokens = torch.cat([tokens, global_tok], dim=1)
+       
         query_pos = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
 
         decoder_out = query_pos
         for layer in self.layers:
             decoder_out = layer(
                 tgt=decoder_out,
-                memory=memory,
+                memory=tokens,
                 tgt_mask_bias=self.causal_attn_bias
             )
         

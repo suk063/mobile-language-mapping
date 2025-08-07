@@ -16,7 +16,7 @@ from omegaconf import OmegaConf
 from torch.optim import Optimizer
 from tqdm import tqdm
 
-from lang_mapping.agent.agent_map_bc import Agent_map_bc, Agent_image_bc
+from lang_mapping.agent.agent_map_bc import Agent_map_bc, Agent_uplifted_bc
 from lang_mapping.utils.dataset import (
     DPDataset,
     build_object_map,
@@ -53,7 +53,7 @@ class BCConfig:
     trajs_per_obj: Union[str, int]
     torch_deterministic: bool
 
-    vis_representation: str
+    representation: str
 
     # Pretrained model paths
     static_map_path: str
@@ -209,10 +209,10 @@ def get_mshab_train_cfg(cfg: dict) -> TrainConfig:
 
 
 def setup_models_and_optimizer(
-    cfg: TrainConfig, device: torch.device, sample_obs, single_act_shape, vis_representation
+    cfg: TrainConfig, device: torch.device, sample_obs, single_act_shape
 ) -> Tuple[Agent_map_bc, Optimizer]:
 
-    if vis_representation == "map":
+    if cfg.algo.representation == "map":
         # We use fixed hyperparams for the static map and implicit decoder
         static_maps = MultiVoxelHashTable.load_sparse(cfg.algo.static_map_path).to(device)
 
@@ -251,8 +251,21 @@ def setup_models_and_optimizer(
             action_pred_horizon=cfg.algo.action_pred_horizon,
         ).to(device)
 
+    elif cfg.algo.representation == "uplifted":
+        agent = Agent_uplifted_bc(
+            sample_obs=sample_obs,
+            single_act_shape=single_act_shape,
+            transf_input_dim=cfg.algo.transf_input_dim,
+            clip_input_dim=cfg.algo.clip_input_dim,
+            text_input=cfg.algo.text_input,
+            camera_intrinsics=tuple(cfg.algo.camera_intrinsics),
+            num_heads=cfg.algo.num_heads,
+            num_layers_transformer=cfg.algo.num_layers_transformer,
+            num_action_layer=cfg.algo.num_action_layer,
+            action_pred_horizon=cfg.algo.action_pred_horizon,
+        ).to(device)
     else:
-        raise ValueError(f"Invalid vis_representation: {vis_representation}")
+        raise ValueError(f"Invalid representation: {cfg.algo.representation}")
 
     params_to_optimize = filter(lambda p: p.requires_grad, agent.parameters())
     optimizer = torch.optim.AdamW(params_to_optimize, lr=cfg.algo.lr)
@@ -325,7 +338,8 @@ def evaluate_agent(
     uid2scene_id,
     logger,
     device,
-    global_epoch,
+    global_step,
+    epoch,
 ):
     agent.eval()
     eval_obs, _ = eval_envs.reset(options={"task_plan_idxs": fixed_plan_idxs})
@@ -338,7 +352,8 @@ def evaluate_agent(
 
     logger.store(tag="eval", success_once=stats_single["success_once"])
     logger.store(tag="eval", return_per_step=stats_single["return_per_step"])
-    logger.log(global_epoch)
+    logger.store(tag="eval", epoch=epoch)  # epoch 정보도 함께 로깅
+    logger.log(global_step)
 
 
 def train(cfg: TrainConfig):
@@ -363,7 +378,7 @@ def train(cfg: TrainConfig):
     assert isinstance(eval_envs.single_action_space, gym.spaces.Box)
 
     agent, optimizer = setup_models_and_optimizer(
-        cfg, device, eval_obs, eval_envs.unwrapped.single_action_space.shape, cfg.algo.vis_representation
+        cfg, device, eval_obs, eval_envs.unwrapped.single_action_space.shape
     )
 
     def save(save_path):
@@ -484,6 +499,7 @@ def train(cfg: TrainConfig):
                     logger,
                     device,
                     global_step,
+                    epoch,
                 )
                 timer.end(key="eval")
 

@@ -39,8 +39,7 @@ algo:
   max_image_cache_size: 50_000
   save_backup_ckpts: False
   torch_deterministic: True
-
-  Representation: "map"
+  num_dataload_workers: 0
 
   # Pretrained model paths
   static_map_path: "pretrained/hash_voxel_sparse.pt"
