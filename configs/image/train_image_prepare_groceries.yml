@@ -2,7 +2,7 @@ seed: 2
 
 TASK: prepare_groceries
 OBJ: all_13
-REPRESENTATION: map
+REPRESENTATION: image
 MS_ASSET_DIR: /work/mobile_language_mapping/.maniskill/data
 
 eval_env:
@@ -30,7 +30,7 @@ eval_env:
 algo:
   name: "bc"
   lr: 1e-5
-  batch_size: 2
+  batch_size: 4
   epochs: 20
   eval_freq: 1
   log_freq: 1
@@ -60,7 +60,7 @@ algo:
   transf_input_dim: 384
 
 logger:
-  workspace: /sh-vol/mshab_exps
+  workspace: mshab_exps
   exp_name: bc-${REPRESENTATION}-${TASK}
   clear_out: True
   tensorboard: True

@@ -1,8 +1,8 @@
 seed: 2
 
-TASK: set_table
+TASK: tidy_house
 OBJ: all_13
-REPRESENTATION: map
+REPRESENTATION: point
 MS_ASSET_DIR: /work/mobile_language_mapping/.maniskill/data
 
 eval_env:
@@ -13,7 +13,7 @@ eval_env:
   continuous_task: True
   cat_state: True
   cat_pixels: False
-  frame_stack: 1
+  frame_stack: 1  
   stationary_base: False
   stationary_torso: False
   stationary_head: True
@@ -30,7 +30,7 @@ eval_env:
 algo:
   name: "bc"
   lr: 1e-5
-  batch_size: 2
+  batch_size: 4
   epochs: 20
   eval_freq: 1
   log_freq: 1
@@ -40,7 +40,6 @@ algo:
   max_image_cache_size: 0
   save_backup_ckpts: False
   torch_deterministic: True
-  num_dataload_workers: 0
 
   # Pretrained model paths
   static_map_path: "/work/mobile_language_mapping/pretrained/hash_voxel_sparse.pt"
@@ -48,7 +47,7 @@ algo:
 
   # CLIP / Agent Settings
   clip_input_dim: 768
-  text_input: ["bowl", "apple"]
+  text_input: ["potted_meat_can", "master_chef_can", "bowl", "tomato_soup_can", "cracker_box", "sugar_box", "gelatin_box", "pudding_box", "tuna_fish_can"]
   camera_intrinsics: [71.9144, 71.9144, 112, 112]
   bc_loss_weight: 10.0
   action_temp_weights: 0.3
@@ -61,7 +60,7 @@ algo:
   transf_input_dim: 384
 
 logger:
-  workspace: /sh-vol/mshab_exps
+  workspace: mshab_exps
   exp_name: bc-${REPRESENTATION}-${TASK}
   clear_out: True
   tensorboard: True
