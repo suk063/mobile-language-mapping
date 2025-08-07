@@ -324,8 +324,9 @@ def train_one_epoch(
         n_samples += batch_size
         global_step += 1
 
-        writer.add_scalar("BC Loss/Iteration", bc_loss.item(), global_step)
-
+        logger.store(tag="train_iter", bc_loss=bc_loss.item())
+        logger.log(global_step)
+        
     return tot_loss / n_samples if n_samples > 0 else 0.0, global_step
 
 
