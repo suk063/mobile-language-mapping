@@ -2,7 +2,7 @@ seed: 0
 torch_deterministic: false
 device_clip: cuda:1
 device_decoder: cuda:0
-epochs: 20
+epochs: 30
 optimizer: Adam
 optimizer_kwargs:
     lr: 0.001
