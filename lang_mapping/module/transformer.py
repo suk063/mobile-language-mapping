@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from lang_mapping.utils.utils import rotary_pe_3d
 import xformers.ops as xops
-
+from pytorch3d.ops import knn_points
 from typing import Optional
 
 def init_weights_kaiming(m):
@@ -264,8 +264,8 @@ class LocalFeatureFusion(nn.Module):
         dim: int,
         n_heads: int = 8,
         ff_mult: int = 4,
-        radius: float = 0.1,
-        k: int = 2,
+        radius: float = 0.4,
+        k: int = 8,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -293,26 +293,25 @@ class LocalFeatureFusion(nn.Module):
         idx     : (B, N, k) long  – neighbor indices (query-padded)
         invalid : (B, N, k) bool  – True → padding slot
         """
-        dist = torch.cdist(q_xyz, kv_xyz)                      # (B, N, L)
-        if kv_pad is not None:
-            dist = dist.masked_fill(kv_pad[:, None, :], float("inf"))
-
-        # keep only points ≤ radius
-        dist = torch.where(dist <= self.radius, dist, float("inf"))
+        B, N, _ = q_xyz.shape
         k = self.k
+        radius = self.radius
 
-        # 1) take top-k closest (up to k). If fewer, remaining are arbitrary for now.
-        _, idx_topk = dist.topk(k, largest=False, dim=-1)      # (B, N, k)
+        if kv_pad is not None:
+            kv_xyz_masked = kv_xyz.clone()
+            far_val = 1e9
+            kv_xyz_masked[kv_pad] = far_val
+        else:
+            kv_xyz_masked = kv_xyz
 
-        # 2) mark invalid (padding) slots
-        gather_dist = dist.gather(-1, idx_topk)                # (B, N, k)
-        invalid = gather_dist.isinf()                          # True → padding slot
-
-        # 3) overwrite padding slots with dummy index 0 (will be replaced by query itself)
-        query_idx = torch.zeros_like(idx_topk)                 # value 0 is arbitrary
-        idx = torch.where(invalid, query_idx, idx_topk)        # (B, N, k)
+        # KNN
+        knn = knn_points(q_xyz, kv_xyz_masked, K=k, return_nn=False)
+        dists, idx_topk = knn.dists, knn.idx     # (B, N, k), (B, N, k)
+        invalid = dists > (radius * radius)
+        idx = torch.where(invalid, torch.zeros_like(idx_topk), idx_topk)
 
         return idx, invalid
+
 
     # ----------------------------------------------------------
     # Forward pass
