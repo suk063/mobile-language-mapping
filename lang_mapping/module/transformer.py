@@ -3,8 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from lang_mapping.utils.utils import rotary_pe_3d
 import xformers.ops as xops
-from pytorch3d.ops import knn_points
+
 from typing import Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import xformers.ops as xops
+from torch_geometric.nn import MLP, PointTransformerConv
+from torch_geometric.nn.pool import radius
+from torch_geometric.utils import to_dense_batch
+
 
 def init_weights_kaiming(m):
     if isinstance(m, nn.Linear):
@@ -171,7 +180,7 @@ class XformerDecoderLayer(nn.Module):
 
         self.activation = F.gelu
 
-    def forward(self, tgt, memory, tgt_mask_bias=None):
+    def forward(self, tgt, memory, tgt_mask_bias=None, memory_key_padding_mask=None):
         B, T, D = tgt.shape
         
         # Masked Self-Attention
@@ -195,7 +204,13 @@ class XformerDecoderLayer(nn.Module):
         k = k.view(B, S, self.nhead, D // self.nhead)
         v = v.view(B, S, self.nhead, D // self.nhead)
 
-        cross_attn_out = xops.memory_efficient_attention(q, k, v)
+        cross_attn_bias = None
+        if memory_key_padding_mask is not None:
+            # Build dense bias tensor for xformers
+            mask = memory_key_padding_mask[:, None, None, :].to(q.dtype)
+            cross_attn_bias = mask.expand(-1, self.nhead, T, -1) * (-1e9)
+
+        cross_attn_out = xops.memory_efficient_attention(q, k, v, attn_bias=cross_attn_bias)
         cross_attn_out = cross_attn_out.view(B, T, D)
         
         tgt2 = self.norm2(tgt + self.dropout_attn2(self.cross_attn_out(cross_attn_out)))
@@ -211,6 +226,7 @@ class ActionTransformerDecoder(nn.Module):
     def __init__(
         self,
         d_model: int,
+        transf_input_dim: int,
         nhead: int,
         num_decoder_layers: int,
         dim_feedforward: int,
@@ -234,16 +250,45 @@ class ActionTransformerDecoder(nn.Module):
         
         self.action_head = nn.Linear(d_model, action_dim)
         self.action_pred_horizon = action_pred_horizon
+
+        self.memory_proj = nn.Linear(transf_input_dim, d_model)
+        self.apply(init_weights_kaiming)
+
         self.causal_attn_bias = xops.LowerTriangularMask()
         
-    def forward(self, visual_token, state, text_emb=None, global_tok=None) -> torch.Tensor:
+    def forward(self, visual_token, state_tok, text_emb, global_tok=None, global_tok_pad_mask=None) -> torch.Tensor:
         B, _, d_model = visual_token.shape
-        tokens = torch.cat([visual_token, state], dim=1)
+        
+        # Build memory and padding mask
+        memory_parts = [visual_token, state_tok]
+        padding_masks = [torch.zeros((B, visual_token.shape[1]), device=visual_token.device, dtype=torch.bool),
+                         torch.zeros((B, 1), device=state_tok.device, dtype=torch.bool)]
+
         if text_emb is not None:
-            tokens = torch.cat([tokens, text_emb], dim=1)
+            memory_parts.append(text_emb)
+            padding_masks.append(torch.zeros((B, 1), device=text_emb.device, dtype=torch.bool))
+        
         if global_tok is not None:
-            tokens = torch.cat([tokens, global_tok], dim=1)
-       
+            memory_parts.append(global_tok)
+            if global_tok_pad_mask is not None:
+                padding_masks.append(global_tok_pad_mask)
+            else:
+                padding_masks.append(torch.zeros((B, global_tok.shape[1]), device=global_tok.device, dtype=torch.bool))
+
+        tokens = torch.cat(memory_parts, dim=1)
+        tokens = self.memory_proj(tokens)
+        memory_key_padding_mask = torch.cat(padding_masks, dim=1)
+
+        # Pad memory to a multiple of 8 for xformers efficiency, as required by some kernels (e.g. cutlass)
+        S = tokens.shape[1]
+        pad_to = (S + 7) & (-8)
+        if S < pad_to:
+            pad_len = pad_to - S
+            tokens = F.pad(tokens, (0, 0, 0, pad_len), 'constant', 0)
+            mask_pad = torch.ones(B, pad_len, device=tokens.device, dtype=torch.bool)
+            memory_key_padding_mask = torch.cat([memory_key_padding_mask, mask_pad], dim=1)
+
+
         query_pos = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
 
         decoder_out = query_pos
@@ -251,7 +296,8 @@ class ActionTransformerDecoder(nn.Module):
             decoder_out = layer(
                 tgt=decoder_out,
                 memory=tokens,
-                tgt_mask_bias=self.causal_attn_bias
+                tgt_mask_bias=self.causal_attn_bias,
+                memory_key_padding_mask=memory_key_padding_mask,
             )
         
         action_out = self.action_head(decoder_out)
@@ -264,58 +310,38 @@ class LocalFeatureFusion(nn.Module):
         dim: int,
         n_heads: int = 8,
         ff_mult: int = 4,
-        radius: float = 0.1,
-        k: int = 2,
+        radius: float = 0.4,
+        k: int = 8,
         dropout: float = 0.1,
     ):
         super().__init__()
         self.radius, self.k = radius, k
-        self.attn = TransformerLayer(
-            d_model=dim,
-            n_heads=n_heads,
-            dim_feedforward=dim * ff_mult,
-            dropout=dropout,
-            use_xformers=False
+
+        # PointTransformerConv for local feature aggregation.
+        # It will update q_feat based on nearby kv_feat.
+        pos_nn = MLP([3, dim, dim], plain_last=False, batch_norm=False)
+        attn_nn = MLP([dim, dim], plain_last=False, batch_norm=False) # Maps q - k + pos_emb
+
+        self.conv = PointTransformerConv(
+            in_channels=dim,
+            out_channels=dim,
+            pos_nn=pos_nn,
+            attn_nn=attn_nn,
+            add_self_loops=False  # This is a bipartite graph
         )
+        self.norm1 = nn.LayerNorm(dim)
 
-    # ----------------------------------------------------------
-    # Find neighbor indices within <radius>; pad with query itself
-    # ----------------------------------------------------------
-    def _neigh_indices(
-        self,
-        q_xyz: torch.Tensor,           # (B, N, 3)  – query coordinates
-        kv_xyz: torch.Tensor,          # (B, L, 3)  – scene coordinates
-        kv_pad: Optional[torch.Tensor] # (B, L) bool – True → padding
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns
-        -------
-        idx     : (B, N, k) long  – neighbor indices (query-padded)
-        invalid : (B, N, k) bool  – True → padding slot
-        """
-        B, N, _ = q_xyz.shape
-        k = self.k
-        r2 = self.radius * self.radius
+        # Feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * ff_mult),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * ff_mult, dim),
+            nn.Dropout(dropout)
+        )
+        self.norm2 = nn.LayerNorm(dim)
 
-        lengths2 = None
-        if kv_pad is not None:
-            lengths2 = (~kv_pad).sum(dim=1).to(torch.long)
 
-        d2, idx, _ = knn_points(q_xyz, kv_xyz, K=k, lengths2=lengths2, return_nn=False)  # d2: (B,N,k)
-
-        invalid = d2 > r2
-
-        if lengths2 is not None:
-            no_pts = (lengths2 == 0).view(B, 1, 1)
-            invalid = torch.where(no_pts, torch.ones_like(invalid, dtype=torch.bool), invalid)
-
-        idx = torch.where(invalid, torch.zeros_like(idx), idx)  # (B,N,k)
-
-        return idx, invalid
-
-    # ----------------------------------------------------------
-    # Forward pass
-    # ----------------------------------------------------------
     def forward(
         self,
         q_xyz:   torch.Tensor,                # (B, N, 3)
@@ -325,40 +351,46 @@ class LocalFeatureFusion(nn.Module):
         kv_pad:  Optional[torch.Tensor] = None  # (B, L) bool
     ) -> torch.Tensor:
         B, N, C = q_feat.shape
-        idx, invalid = self._neigh_indices(q_xyz, kv_xyz, kv_pad)  # (B, N, k)
+        L = kv_xyz.shape[1]
 
-        # Debug        
-        # num_valid = (~invalid).sum()
-        # print(f"Number of valid neighbors: {num_valid.item()}")
-        
-        # gather neighbor coordinates / features
-        batch = torch.arange(B, device=q_feat.device).view(B, 1, 1)
-        neigh_xyz  = kv_xyz[batch.expand_as(idx), idx]             # (B, N, k, 3)
-        neigh_feat = kv_feat[batch.expand_as(idx), idx]            # (B, N, k, C)
-        
-        # replace padding slots with the query point itself
-        q_xyz_expanded = q_xyz.unsqueeze(2).expand(-1, -1, self.k, -1)  # (B, N, k, 3)
-        q_feat_expanded = q_feat.unsqueeze(2).expand(-1, -1, self.k, -1)  # (B, N, k, C)
-        neigh_xyz[invalid] = q_xyz_expanded[invalid]
-        neigh_feat[invalid] = q_feat_expanded[invalid]
+        # 1. Convert dense tensors to PyG format (flat vectors + batch indices)
+        q_xyz_flat = q_xyz.view(-1, 3)
+        q_feat_flat = q_feat.view(-1, C)
+        q_batch = torch.arange(B, device=q_xyz.device).repeat_interleave(N)
 
-        # concatenate query token with neighbor tokens
-        tokens = torch.cat([q_feat.unsqueeze(2), neigh_feat], dim=2)  # (B, N, k+1, C)
-        # token_xyz = torch.cat([q_xyz.unsqueeze(2), neigh_xyz], dim=2)  # (B, N, k+1, 3)
-        
-        # key-padding mask for attention (True → ignore)
-        key_padding_mask = torch.cat(
-            [torch.zeros_like(invalid[..., :1]), invalid], dim=-1
-        ).view(B * N, self.k + 1)
+        if kv_pad is not None:
+            kv_mask = ~kv_pad
+            kv_xyz_flat = kv_xyz[kv_mask]
+            kv_feat_flat = kv_feat[kv_mask]
+            kv_batch_full = torch.arange(B, device=kv_xyz.device).unsqueeze(1).expand(B, L)
+            kv_batch = kv_batch_full[kv_mask]
+        else:
+            kv_xyz_flat = kv_xyz.view(-1, 3)
+            kv_feat_flat = kv_feat.view(-1, C)
+            kv_batch = torch.arange(B, device=kv_xyz.device).repeat_interleave(L)
 
-        # reshape to (B*N, S, C) for the transformer layer
-        BM = B * N
-        fused = self.attn(
-            tokens.view(BM, self.k + 1, C).contiguous(),
-            key_padding_mask=key_padding_mask,
-        )  # (BM, k+1, C)
+        # 2. Find neighbors from kv for each q point
+        # row: source (kv), col: target (q)
+        row, col = radius(x=kv_xyz_flat, y=q_xyz_flat, r=self.radius,
+                          batch_x=kv_batch, batch_y=q_batch, max_num_neighbors=self.k)
+        # Assuming radius implementation in this PyG version has swapped outputs.
+        # We expect row=src(kv), col=dst(q), but error indicates col holds src indices.
+        # Therefore, we stack as [col, row] to get [src, dst].
+        edge_index = torch.stack([col, row], dim=0)
 
-        # return only the query position (index 0 within each group)
-        fused_q = fused[:, 0, :].view(B, N, C)
-        
-        return fused_q
+        # 3. Apply PointTransformerConv for bipartite cross-attention
+        updated_q_feat = self.conv(
+            x=(kv_feat_flat, q_feat_flat),
+            pos=(kv_xyz_flat, q_xyz_flat),
+            edge_index=edge_index
+        )
+
+        # 4. Residual connection, FFN, and normalization
+        out = self.norm1(q_feat_flat + updated_q_feat)
+        out2 = self.ffn(out)
+        out = self.norm2(out + out2)
+
+        # 5. Convert back to dense tensor (B, N, C)
+        final_feat, _ = to_dense_batch(out, q_batch, batch_size=B, max_num_nodes=N)
+
+        return final_feat

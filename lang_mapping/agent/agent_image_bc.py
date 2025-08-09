@@ -40,7 +40,7 @@ class Agent_image_bc(nn.Module):
         tokenizer = open_clip.get_tokenizer("EVA02-L-14")
         
         if text_input:
-            text_input = ['pick up the' + s.replace('_', ' ') for s in text_input]
+            text_input = ['pick up the ' + s.replace('_', ' ') for s in text_input]
         
         text_tokens = tokenizer(text_input)
         with torch.no_grad():
@@ -60,10 +60,11 @@ class Agent_image_bc(nn.Module):
         )
         
         self.action_transformer = ActionTransformerDecoder(
-            d_model=transf_input_dim,
+            d_model=512,
+            transf_input_dim=transf_input_dim,
             nhead=num_heads,
             num_decoder_layers=num_action_layer,
-            dim_feedforward=transf_input_dim * 4,
+            dim_feedforward=512 * 4,
             dropout=0.1,
             action_dim=self.action_dim,
             action_pred_horizon=action_pred_horizon

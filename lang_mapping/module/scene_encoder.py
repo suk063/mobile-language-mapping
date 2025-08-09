@@ -1,138 +1,79 @@
 import torch
 import torch.nn as nn
-from pytorch3d.ops import ball_query, sample_farthest_points
+from torch_geometric.nn.pool import fps, radius
+from torch_geometric.nn import MLP, PointTransformerConv
+from torch_geometric.utils import to_dense_batch
+
+
 from lang_mapping.module.transformer import TransformerLayer
 
-class SATransformer(nn.Module):
+
+class PointTransformerBlock(nn.Module):
     """
-    Set-abstraction block with point-wise self-attention.
-    • FPS (or mask-aware FPS) to choose centroids
-    • Ball-query to gather K neighbours
-    • Local self-attention → max-pool → output features
+    Point Transformer block with Set Abstraction (FPS, radius grouping, and PointTransformerConv).
     """
-    def __init__(self, in_dim, out_dim,
-                 radius, nsample, sampling_ratio=0.25,
-                 heads=8, dropout=0.1):
+
+    def __init__(self, in_dim, out_dim, ratio, radius_val, nsample, heads=8, dropout=0.1):
         super().__init__()
-        self.radius, self.nsample, self.sampling_ratio = radius, nsample, sampling_ratio
+        self.ratio = ratio
+        self.r = radius_val
+        self.k = nsample
 
-        # self.in_proj = nn.Sequential(
-        #     nn.Linear(in_dim, out_dim),
-        #     nn.LayerNorm(out_dim),
-        #     nn.ReLU(inplace=True),
-        # )
-        #  CHG: TransformerLayer uses 'key_padding_mask'
-        self.in_proj = nn.Sequential(
-            nn.Linear(in_dim, out_dim),
-            nn.LayerNorm(out_dim),
-            nn.ReLU(inplace=True),
+        # For bipartite PointTransformerConv, in_channels should be a tuple if dims differ.
+        # Here, they are the same after the initial projection.
+        self.in_proj = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
+
+        pos_nn = MLP([3, out_dim, out_dim], plain_last=False, batch_norm=False)
+        attn_nn = MLP([out_dim, out_dim], plain_last=False, batch_norm=False)
+
+        self.conv = PointTransformerConv(
+            in_channels=out_dim, out_channels=out_dim,
+            pos_nn=pos_nn, attn_nn=attn_nn
         )
-        self.local_attn = TransformerLayer(out_dim, heads, out_dim * 4, dropout, use_xformers=True)
-        self.out_norm   = nn.LayerNorm(out_dim)
+        self.out_norm = nn.LayerNorm(out_dim)
 
-    # ------------------------- FPS ------------------------------ #
-    @torch.no_grad()
-    def _sample(self, xyz, pad_mask):
+    def forward(self, x, pos, batch):
         """
-        Mask-aware farthest-point sampling
-        Returns
-        -------
-        idx        : (B, M)   sampled centroid indices
-        keep_mask  : (B, M)   True → valid centroid, False → padded centroid
+        Forward pass.
+        :param x: (N, C_in) features
+        :param pos: (N, 3) coordinates
+        :param batch: (N,) batch indices
+        :return: (M, C_out) features, (M, 3) coordinates, (M,) batch indices of downsampled points
         """
-        B, N, _ = xyz.shape
-        if pad_mask is None:                     # no padding in input
-            M = max(1, int(round(N * self.sampling_ratio)))
-            _, idx = sample_farthest_points(xyz, K=M)
-            return idx, None
+        x = self.in_proj(x)
+        
+        # Furthest Point Sampling
+        if self.ratio < 1.0:
+            idx = fps(pos, batch, ratio=self.ratio)
+        else: # No downsampling
+            idx = torch.arange(pos.shape[0], device=pos.device)
 
-        # move valid points to the front so FPS sees a packed list
-        perm      = torch.argsort(pad_mask.int(), dim=1)
-        xyz_front = xyz.gather(1, perm.unsqueeze(-1).expand(-1, -1, 3))
-        lengths   = (~pad_mask).sum(dim=1)                           # valid counts
-        K_each    = torch.clamp((lengths.float() * self.sampling_ratio)
-                                .round().long(), min=1)
-        K_max     = int(K_each.max())
+        # Radius grouping
+        row, col = radius(x=pos, y=pos[idx], r=self.r, batch_x=batch, batch_y=batch[idx], max_num_neighbors=self.k)
+        edge_index = torch.stack([col, row], dim=0)
 
-        _, idx_all = sample_farthest_points(xyz_front,
-                                            lengths=lengths, K=K_max)
-        arange_mat = torch.arange(K_max, device=xyz.device).expand(B, K_max)
-        keep_mask  = arange_mat < K_each.unsqueeze(1)
-        idx_local  = torch.where(keep_mask, idx_all,
-                                 idx_all[:, :1].expand(-1, K_max))
-        idx_global = perm.gather(1, idx_local)                      # back-map
-        return idx_global, keep_mask                               # (B,M), (B,M)
+        # Bipartite convolution
+        x_out = self.conv(x=(x, x[idx]), pos=(pos, pos[idx]), edge_index=edge_index)
+        x_out = self.out_norm(x_out)
 
-    # ------------------------------ forward -------------------------------- #
-    def forward(self,
-                xyz:   torch.Tensor,         # (B, N, 3)
-                feats: torch.Tensor,         # (B, N, Cin)
-                pad_mask: torch.Tensor|None = None  # (B, N) bool – True=PAD
-                ):
-        B, N, _ = xyz.shape
-        feats = self.in_proj(feats)
-        # 1) choose centroids ------------------------------------------------
-        ctr_idx, keep_mask = self._sample(xyz, pad_mask)            # (B,M)
-        ctr_xyz   = xyz  [torch.arange(B)[:, None], ctr_idx]        # (B,M,3)
-
-        # 2) ball-query neighbours -----------------------------------------
-        neigh = ball_query(ctr_xyz, xyz, K=self.nsample,
-                           radius=self.radius, return_nn=False)
-        # neigh.idx = -1 where invalid
-        neigh_idx = torch.where(
-            neigh.idx < 0,
-            ctr_idx.unsqueeze(-1).expand(-1, -1, self.nsample),
-            neigh.idx,
-        )                                                           # (B,M,K)
-
-        batch_idx   = torch.arange(B, device=xyz.device
-                           ).view(B, 1, 1).expand_as(neigh_idx)
-        neigh_xyz   = xyz  [batch_idx, neigh_idx]                   # (B,M,K,3)
-        neigh_feats = feats[batch_idx, neigh_idx]                   # (B,M,K,Cin)
-
-        # 3) build padding mask for neighbours -----------------------------  # NEW
-        neigh_invalid = neigh.idx < 0                               # (B,M,K)
-        pad_neigh     = neigh_invalid.view(-1, self.nsample)        # (B*M,K)
-
-        # 4) local self-attention ------------------------------------------
-        BM, K, C = neigh_feats.size(0) * neigh_feats.size(1), \
-                   neigh_feats.size(2), neigh_feats.size(3)
-
-        feats_out = self.local_attn(
-            neigh_feats.view(BM, K, C),
-            coords_src           = neigh_xyz.view(BM, K, 3),
-            key_padding_mask     = pad_neigh                       # NEW
-        )                                                           # (BM,K,C)
-
-            # 5) pooling & post-norm -------------------------------------------
-        pooled = feats_out.max(dim=1).values.view(B, ctr_idx.shape[1], C)
-        pooled = self.out_norm(pooled)
-
-        # 6) propagate centroid-level padding mask -------------------------
-        centroid_pad = None
-        if keep_mask is not None:
-            centroid_pad = ~keep_mask                               # (B,M)
-            pooled  = pooled .masked_fill(centroid_pad.unsqueeze(-1), 0.0)
-            ctr_xyz = ctr_xyz.masked_fill(centroid_pad.unsqueeze(-1), 1e6)
-
-        return ctr_xyz, pooled, centroid_pad
+        return x_out, pos[idx], batch[idx]
 
 
 class GlobalSceneEncoder(nn.Module):
     def __init__(self, in_dim=384, out_dim=384, heads=8, dropout=0.1):
         super().__init__()
         cfg = dict(
-            sa1=(1.0,  16, 0.25),
-            sa2=(2.0,  16, 0.25),
-            sa3=(4.0,  16, 0.25),
-            sa4=(8.0, 16, 0.0)
+            sa1=(in_dim, out_dim, 1.0, 16, 0.25),
+            sa2=(out_dim, out_dim, 2.0, 16, 0.25),
+            sa3=(out_dim, out_dim, 4.0, 16, 0.25),
+            sa4=(out_dim, out_dim, 8.0, 16, 0.25)
         )
-        (r1,k1,p1), (r2,k2,p2), (r3,k3,p3), (r4,k4,p4) = cfg.values()
+        (id1,od1,r1,k1,p1), (id2,od2,r2,k2,p2), (id3,od3,r3,k3,p3), (id4,od4,r4,k4,p4) = cfg.values()
 
-        self.sa1 = SATransformer(in_dim, out_dim, r1, k1, p1, heads, dropout)
-        self.sa2 = SATransformer(out_dim, out_dim, r2, k2, p2, heads, dropout)
-        self.sa3 = SATransformer(out_dim, out_dim, r3, k3, p3, heads, dropout)
-        self.sa4 = SATransformer(out_dim, out_dim, r4, k4, p4, heads, dropout)
+        self.sa1 = PointTransformerBlock(id1, od1, p1, r1, k1, heads, dropout)
+        self.sa2 = PointTransformerBlock(id2, od2, p2, r2, k2, heads, dropout)
+        self.sa3 = PointTransformerBlock(id3, od3, p3, r3, k3, heads, dropout)
+        self.sa4 = PointTransformerBlock(id4, od4, p4, r4, k4, heads, dropout)
 
         self.proj = nn.Sequential(nn.Linear(out_dim, out_dim),
                                   nn.LayerNorm(out_dim))
@@ -142,14 +83,29 @@ class GlobalSceneEncoder(nn.Module):
         pts : (B, N, 3 + in_dim)
         pad : (B, N) bool – True = PAD
         """
+        B, N, _ = pts.shape
+        xyz, feat = pts[..., :3].contiguous(), pts[..., 3:].contiguous()
+
+        # Convert to PyG batch format
+        if pad is not None:
+            mask = ~pad
+            batch_vec_full = torch.arange(B, device=pts.device).unsqueeze(1).expand(B, N)
+            pos, x = xyz[mask], feat[mask]
+            batch = batch_vec_full[mask]
+        else:
+            pos, x = xyz.view(-1, 3), feat.view(-1, feat.shape[-1])
+            batch = torch.arange(B, device=pts.device).repeat_interleave(N)
+
+        x, pos, batch = self.sa1(x, pos, batch)
+        x, pos, batch = self.sa2(x, pos, batch)
+        x, pos, batch = self.sa3(x, pos, batch)
+        x, pos, batch = self.sa4(x, pos, batch)
+
+        feat = self.proj(x)
         
-        xyz, feat = pts[..., :3], pts[..., 3:]
+        # Convert back to dense tensor format (with padding)
+        xyz_out, _ = to_dense_batch(pos, batch, fill_value=1e6) # Pad with large value
+        feat_out, pad_mask = to_dense_batch(feat, batch, fill_value=0.0)
 
-        xyz, feat, pad = self.sa1(xyz, feat, pad)
-        xyz, feat, pad = self.sa2(xyz, feat, pad)
-        xyz, feat, pad = self.sa3(xyz, feat, pad)
-        xyz, feat, pad = self.sa4(xyz, feat, pad)
-
-        feat = self.proj(feat)                     # (B, ≤100, out_dim)
-        return xyz, feat
+        return xyz_out, feat_out, ~pad_mask
     
