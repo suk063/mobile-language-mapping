@@ -301,7 +301,7 @@ class LocalFeatureFusion(nn.Module):
         if kv_pad is not None:
             lengths2 = (~kv_pad).sum(dim=1).to(torch.long)
 
-        d2, idx = knn_points(q_xyz, kv_xyz, K=k, lengths2=lengths2, return_nn=False)  # d2: (B,N,k)
+        d2, idx, _ = knn_points(q_xyz, kv_xyz, K=k, lengths2=lengths2, return_nn=False)  # d2: (B,N,k)
 
         invalid = d2 > r2
 
