@@ -79,7 +79,7 @@ class Agent_map_bc(nn.Module):
             n_heads=num_heads,
             ff_mult=4,
             radius=0.4,
-            k=1,
+            k=8,
         )
         
         self.dim_reducer = DimReducer(clip_input_dim, transf_input_dim)
@@ -198,10 +198,10 @@ class Agent_map_bc(nn.Module):
         
         # Global scene encoding
         pts_kv   = torch.cat([kv_coords, kv_feats], dim=-1)            # [B,L, 3+768]
-        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_mask)          
-        
+        global_coords, global_tok, global_pad_mask = self.scene_encoder(pts_kv, kv_pad_mask)          
+
         # Local feature fusion
-        feats = self.local_feature_fusion(coords, feats, kv_coords, kv_feats, kv_pad_mask)
+        # feats = self.local_feature_fusion(coords, feats, kv_coords, kv_feats, kv_pad_mask)
         
         text_emb = self.text_proj(self.text_embeddings[object_labels]).unsqueeze(1)        # (B,768)
         state_tok = self.state_mlp_action(state).unsqueeze(1) # [B,1,128]
