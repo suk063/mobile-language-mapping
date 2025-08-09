@@ -45,7 +45,7 @@ class Agent_map_bc(nn.Module):
         tokenizer = open_clip.get_tokenizer("EVA02-L-14")
         
         if text_input:
-            text_input = ['pick up the' + s.replace('_', ' ') for s in text_input]
+            text_input = ['pick up the ' + s.replace('_', ' ') for s in text_input]
         
         text_tokens = tokenizer(text_input)
         with torch.no_grad():
@@ -65,10 +65,11 @@ class Agent_map_bc(nn.Module):
         )
         
         self.action_transformer = ActionTransformerDecoder(
-            d_model=transf_input_dim,
+            d_model=512,
+            transf_input_dim=transf_input_dim,
             nhead=num_heads,
             num_decoder_layers=num_action_layer,
-            dim_feedforward=transf_input_dim * 4,
+            dim_feedforward=512 * 4,
             dropout=0.1,
             action_dim=self.action_dim,
             action_pred_horizon=action_pred_horizon
@@ -78,8 +79,8 @@ class Agent_map_bc(nn.Module):
             dim=transf_input_dim,
             n_heads=num_heads,
             ff_mult=4,
-            radius=0.1,
-            k=2,
+            radius=0.4,
+            k=8,
         )
         
         self.dim_reducer = DimReducer(clip_input_dim, transf_input_dim)
@@ -198,8 +199,8 @@ class Agent_map_bc(nn.Module):
         
         # Global scene encoding
         pts_kv   = torch.cat([kv_coords, kv_feats], dim=-1)            # [B,L, 3+768]
-        global_coords, global_tok = self.scene_encoder(pts_kv, kv_pad_mask)          
-        
+        global_coords, global_tok, global_pad_mask = self.scene_encoder(pts_kv, kv_pad_mask)          
+
         # Local feature fusion
         feats = self.local_feature_fusion(coords, feats, kv_coords, kv_feats, kv_pad_mask)
         
@@ -211,6 +212,6 @@ class Agent_map_bc(nn.Module):
             coords=coords,  
         ) 
         
-        action_out = self.action_transformer(visual_tok, global_tok, text_emb, state_tok)
+        action_out = self.action_transformer(visual_tok, state_tok, text_emb, global_tok, global_pad_mask)
         
         return action_out
