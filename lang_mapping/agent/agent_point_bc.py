@@ -73,7 +73,7 @@ class Agent_point_bc(nn.Module):
         tokenizer = open_clip.get_tokenizer("EVA02-L-14")
         
         if text_input:
-            text_input = ['pick up the' + s.replace('_', ' ') for s in text_input]
+            text_input = ['pick up the ' + s.replace('_', ' ') for s in text_input]
         
         text_tokens = tokenizer(text_input)
         with torch.no_grad():
