@@ -264,8 +264,8 @@ class LocalFeatureFusion(nn.Module):
         dim: int,
         n_heads: int = 8,
         ff_mult: int = 4,
-        radius: float = 0.1,
-        k: int = 2,
+        radius: float = 0.4,
+        k: int = 8,
         dropout: float = 0.1,
     ):
         super().__init__()
