@@ -264,8 +264,8 @@ class LocalFeatureFusion(nn.Module):
         dim: int,
         n_heads: int = 8,
         ff_mult: int = 4,
-        radius: float = 0.4,
-        k: int = 8,
+        radius: float = 0.1,
+        k: int = 2,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -295,23 +295,23 @@ class LocalFeatureFusion(nn.Module):
         """
         B, N, _ = q_xyz.shape
         k = self.k
-        radius = self.radius
+        r2 = self.radius * self.radius
 
+        lengths2 = None
         if kv_pad is not None:
-            kv_xyz_masked = kv_xyz.clone()
-            far_val = 1e9
-            kv_xyz_masked[kv_pad] = far_val
-        else:
-            kv_xyz_masked = kv_xyz
+            lengths2 = (~kv_pad).sum(dim=1).to(torch.long)
 
-        # KNN
-        knn = knn_points(q_xyz, kv_xyz_masked, K=k, return_nn=False)
-        dists, idx_topk = knn.dists, knn.idx     # (B, N, k), (B, N, k)
-        invalid = dists > (radius * radius)
-        idx = torch.where(invalid, torch.zeros_like(idx_topk), idx_topk)
+        d2, idx = knn_points(q_xyz, kv_xyz, K=k, lengths2=lengths2, return_nn=False)  # d2: (B,N,k)
+
+        invalid = d2 > r2
+
+        if lengths2 is not None:
+            no_pts = (lengths2 == 0).view(B, 1, 1)
+            invalid = torch.where(no_pts, torch.ones_like(invalid, dtype=torch.bool), invalid)
+
+        idx = torch.where(invalid, torch.zeros_like(idx), idx)  # (B,N,k)
 
         return idx, invalid
-
 
     # ----------------------------------------------------------
     # Forward pass
