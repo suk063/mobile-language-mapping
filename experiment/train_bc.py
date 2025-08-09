@@ -385,7 +385,7 @@ def evaluate_agent(
     logger.store(tag="eval", success_once=stats_single["success_once"])
     logger.store(tag="eval", return_per_step=stats_single["return_per_step"])
     logger.store(tag="eval", epoch=epoch)  # epoch 정보도 함께 로깅
-    logger.log(epoch)
+    logger.log(global_step)
 
 
 def train(cfg: TrainConfig):
@@ -516,7 +516,7 @@ def train(cfg: TrainConfig):
             logger.store(tag="losses", loss=avg_loss)
             if epoch > 0:
                 logger.store("time", **timer.get_time_logs(epoch))
-            logger.log(epoch)
+            logger.log(global_step)
             timer.end(key="log")
 
         # Evaluation
