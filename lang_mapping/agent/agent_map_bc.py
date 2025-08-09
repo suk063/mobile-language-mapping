@@ -65,10 +65,11 @@ class Agent_map_bc(nn.Module):
         )
         
         self.action_transformer = ActionTransformerDecoder(
-            d_model=transf_input_dim,
+            d_model=512,
+            transf_input_dim=transf_input_dim,
             nhead=num_heads,
             num_decoder_layers=num_action_layer,
-            dim_feedforward=transf_input_dim * 4,
+            dim_feedforward=512 * 4,
             dropout=0.1,
             action_dim=self.action_dim,
             action_pred_horizon=action_pred_horizon
@@ -201,7 +202,7 @@ class Agent_map_bc(nn.Module):
         global_coords, global_tok, global_pad_mask = self.scene_encoder(pts_kv, kv_pad_mask)          
 
         # Local feature fusion
-        # feats = self.local_feature_fusion(coords, feats, kv_coords, kv_feats, kv_pad_mask)
+        feats = self.local_feature_fusion(coords, feats, kv_coords, kv_feats, kv_pad_mask)
         
         text_emb = self.text_proj(self.text_embeddings[object_labels]).unsqueeze(1)        # (B,768)
         state_tok = self.state_mlp_action(state).unsqueeze(1) # [B,1,128]
@@ -211,6 +212,6 @@ class Agent_map_bc(nn.Module):
             coords=coords,  
         ) 
         
-        action_out = self.action_transformer(visual_tok, global_tok, text_emb, state_tok)
+        action_out = self.action_transformer(visual_tok, state_tok, text_emb, global_tok, global_pad_mask)
         
         return action_out

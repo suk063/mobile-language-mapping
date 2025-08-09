@@ -61,8 +61,8 @@ class BCConfig:
     representation: str
 
     # Pretrained model paths
-    static_map_path: str
-    implicit_decoder_path: str
+    static_map_path: Optional[str]
+    implicit_decoder_path: Optional[str]
 
     # CLIP / Agent Settings
     clip_input_dim: int
