@@ -354,8 +354,8 @@ class LocalFeatureFusion(nn.Module):
         L = kv_xyz.shape[1]
 
         # 1. Convert dense tensors to PyG format (flat vectors + batch indices)
-        q_xyz_flat = q_xyz.view(-1, 3)
-        q_feat_flat = q_feat.view(-1, C)
+        q_xyz_flat = q_xyz.reshape(-1, 3)
+        q_feat_flat = q_feat.reshape(-1, C)
         q_batch = torch.arange(B, device=q_xyz.device).repeat_interleave(N)
 
         if kv_pad is not None:
@@ -365,18 +365,15 @@ class LocalFeatureFusion(nn.Module):
             kv_batch_full = torch.arange(B, device=kv_xyz.device).unsqueeze(1).expand(B, L)
             kv_batch = kv_batch_full[kv_mask]
         else:
-            kv_xyz_flat = kv_xyz.view(-1, 3)
-            kv_feat_flat = kv_feat.view(-1, C)
+            kv_xyz_flat = kv_xyz.reshape(-1, 3)
+            kv_feat_flat = kv_feat.reshape(-1, C)
             kv_batch = torch.arange(B, device=kv_xyz.device).repeat_interleave(L)
 
         # 2. Find neighbors from kv for each q point
-        # row: source (kv), col: target (q)
-        row, col = radius(x=kv_xyz_flat, y=q_xyz_flat, r=self.radius,
+        target_idx, source_idx = radius(x=kv_xyz_flat, y=q_xyz_flat, r=self.radius,
                           batch_x=kv_batch, batch_y=q_batch, max_num_neighbors=self.k)
-        # Assuming radius implementation in this PyG version has swapped outputs.
-        # We expect row=src(kv), col=dst(q), but error indicates col holds src indices.
-        # Therefore, we stack as [col, row] to get [src, dst].
-        edge_index = torch.stack([col, row], dim=0)
+
+        edge_index = torch.stack([source_idx, target_idx], dim=0)
 
         # 3. Apply PointTransformerConv for bipartite cross-attention
         updated_q_feat = self.conv(
