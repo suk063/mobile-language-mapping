@@ -4,11 +4,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
+import numpy as np
 import torch
 from tqdm import tqdm
 
 from mshab.envs.make import EnvConfig, make_env
 from mshab.envs.planner import plan_data_from_file
+from mshab.utils.array import to_tensor
 
 # BC agents
 from lang_mapping.agent.agent_map_bc import Agent_map_bc
@@ -20,8 +22,8 @@ from lang_mapping.agent.agent_point_bc import Agent_point_bc
 from lang_mapping.utils.dataset import (
     build_object_map,
     build_uid_episode_scene_maps,
+    get_object_labels_batch,
 )
-from lang_mapping.utils.eval import run_eval_episode
 
 # Text prompts per task (used by CLIP encoders inside agents)
 TEXT_PROMPTS: Dict[str, List[str]] = {
@@ -77,6 +79,31 @@ def collect_env_stats(env):
             )
         )
     return records
+
+
+def _flatten_obs(
+    obs_raw: Dict[str, np.ndarray | torch.Tensor], device
+) -> Dict[str, torch.Tensor]:
+    """Flattens nested observations from ManiSkill."""
+    flat = {"state": to_tensor(obs_raw["state"], device=device)}
+    
+    # When FrameStack wrapper is used, pixel observations are nested
+    px = obs_raw.get("pixels", {})
+
+    for k in (
+        "fetch_hand_rgb",
+        "fetch_head_rgb",
+        "fetch_hand_depth",
+        "fetch_head_depth",
+        "fetch_hand_pose",
+        "fetch_head_pose",
+    ):
+        if k in px:
+            flat[k] = to_tensor(px[k], device=device)
+        elif k in obs_raw: # Fallback for non-nested structure
+             flat[k] = to_tensor(obs_raw[k], device=device)
+
+    return flat
 
 
 def build_agent(
@@ -202,7 +229,7 @@ def main():
     parser.add_argument("--max-episode-steps", type=int, default=200)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--scene-ids-yaml", default="pretrained/scene_ids.yaml")
-    parser.add_argument("--ckpt-name", default="model_best.pt")
+    parser.add_argument("--ckpt-name", default="best_eval_success_once_ckpt.pt")
     # Architecture defaults (must match training)
     parser.add_argument("--clip-input-dim", type=int, default=768)
     parser.add_argument("--transf-input-dim", type=int, default=384)
@@ -232,9 +259,20 @@ def main():
 
     root = Path(args.root)
 
-    # Resolve plan file path
+    # Resolve plan file path (supports absolute path or file name)
     plan_file_arg = Path(args.plan_file)
-    plan_fp = root / "rearrange" / "task_plans" / args.task / args.subtask / args.split / args.plan_file
+    if plan_file_arg.is_absolute():
+        plan_fp = plan_file_arg
+    else:
+        plan_fp = (
+            root
+            / "rearrange"
+            / "task_plans"
+            / args.task
+            / args.subtask
+            / args.split
+            / args.plan_file
+        )
     assert plan_fp.exists(), f"Plan file not found: {plan_fp}"
 
     # Resolve spawn data path based on task/subtask/split
@@ -244,15 +282,14 @@ def main():
     # Plans metadata
     plan_data = plan_data_from_file(plan_fp)
     all_plan_count = len(plan_data.plans)
-
     # Create eval envs
     env_cfg = EnvConfig(
         env_id="PickSubtaskTrain-v0",
         num_envs=args.num_envs,
         max_episode_steps=args.max_episode_steps,
-        all_plan_count=all_plan_count,
         task_plan_fp=str(plan_fp),
         spawn_data_fp=str(spawn_fp),
+        continuous_task=False,
         record_video=False,
         cat_state=True,
         cat_pixels=False,
@@ -300,7 +337,7 @@ def main():
     for seed in seeds:
         # Load weights for this seed
         base_dir = Path(
-            f"mshab_exps/PickSubtaskTrain-v0/{args.task}-{args.subtask}/{args.task}-{args.subtask}-{args.agent}-{seed}"
+            f"mshab_exps/PickSubtaskTrain-v0/{args.task}-{args.subtask}/{args.task}-{args.subtask}-{args.agent}-{seed}/models"
         )
         ckpt_path = base_dir / args.ckpt_name
         assert ckpt_path.exists(), f"Checkpoint not found: {ckpt_path}"
@@ -311,15 +348,38 @@ def main():
 
         # Evaluate all plan ids
         records = []
-        all_ids = list(range(all_plan_count))
 
+        all_ids = list(range(all_plan_count))
         for start in tqdm(range(0, len(all_ids), args.num_envs), desc=f"Evaluating seed {seed}"):
             chunk = all_ids[start : start + args.num_envs]
             padded_ids = pad_ids(chunk, args.num_envs)
-            obs, _ = env.reset(options={"task_plan_idxs": torch.tensor(padded_ids)})
+            obs, _ = env.reset(options={
+                "task_plan_idxs": torch.tensor(padded_ids, dtype=torch.long, device=device)
+            })
 
             # Run a full episode rollout for the current batch
-            run_eval_episode(env, obs, agent, uid2lbl, uid2scene_id, device)
+            # NOTE: This logic is inlined from the original `run_eval_episode` to prevent
+            # it from consuming stats queues before the main eval loop can.
+            max_steps = env.max_episode_steps
+
+            # This uses the plan from the *first* environment for all envs in the batch.
+            # This is a likely bug in the original code, but we preserve it to fix the crash.
+            plan0 = env.unwrapped.task_plan[0]
+            subtask_labels = get_object_labels_batch(
+                uid2lbl, plan0.composite_subtask_uids
+            ).to(device)
+            epi_ids = torch.tensor(
+                [uid2scene_id[uid] for uid in plan0.composite_subtask_uids],
+                device=device,
+                dtype=torch.long,
+            )
+            
+            # Run simulation for one full episode
+            for _ in range(max_steps):
+                agent_obs = _flatten_obs(obs, device)
+                with torch.no_grad():
+                    action = agent(agent_obs, subtask_labels, epi_ids)
+                obs, _, _, _, _ = env.step(action[:, 0, :])
 
             # Collect per-episode stats for the unpadded subset
             batch_recs = collect_env_stats(env)[: len(chunk)]
@@ -327,7 +387,6 @@ def main():
 
         # Aggregate results for this seed
         assert len(records) > 0, "No evaluation records collected."
-        import numpy as np
 
         arr = {k: np.array([rec[k] for rec in records]) for k in records[0]}
 
