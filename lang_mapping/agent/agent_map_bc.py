@@ -77,6 +77,7 @@ class Agent_map_bc(nn.Module):
         
         self.local_feature_fusion = LocalFeatureFusion(
             dim=transf_input_dim,
+            num_layers=2,
             n_heads=num_heads,
             ff_mult=4,
             radius=0.4,
