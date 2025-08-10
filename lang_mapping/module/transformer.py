@@ -129,8 +129,11 @@ class TransformerEncoder(nn.Module):
         hidden_dim=1024,
         num_layers=4,
         num_heads=8,
+        max_seq_len: int = 1024,
     ):
         super().__init__()
+        
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_seq_len, input_dim))
         
         self.layers = nn.ModuleList([
             TransformerLayer(
@@ -143,6 +146,7 @@ class TransformerEncoder(nn.Module):
         ])
                 
         self.apply(init_weights_kaiming)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
                
     def forward(
         self,
@@ -150,10 +154,15 @@ class TransformerEncoder(nn.Module):
         coords: torch.Tensor | None = None,
     ) -> torch.Tensor:
         
+        if coords is None:
+            S = visual_token.shape[1]
+            visual_token = visual_token + self.pos_embed[:, :S]
+
         for layer in self.layers:
             visual_token = layer(src=visual_token, coords_src=coords)
  
         return visual_token
+
 
 class XformerDecoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward, dropout):
