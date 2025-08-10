@@ -311,13 +311,14 @@ class ActionTransformerDecoder(nn.Module):
         
         action_out = self.action_head(decoder_out)
         return action_out
-
+        
 
 class LocalFeatureFusion(nn.Module):
     def __init__(
         self,
         dim: int,
         num_layers: int = 2,
+        n_heads: int = 8,
         ff_mult: int = 4,
         radius: float = 0.4,
         k: int = 8,
