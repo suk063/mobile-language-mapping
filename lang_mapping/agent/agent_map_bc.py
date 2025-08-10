@@ -209,7 +209,7 @@ class Agent_map_bc(nn.Module):
     
         visual_tok = self.transformer_encoder(
             visual_token=feats,
-            coords=coords,  
+            # coords=coords,  
         ) 
         
         action_out = self.action_transformer(visual_tok, state_tok, text_emb, global_tok, global_pad_mask)
