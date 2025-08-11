@@ -200,7 +200,7 @@ class Agent_map_bc(nn.Module):
         
         # Global scene encoding
         pts_kv   = torch.cat([kv_coords, kv_feats], dim=-1)            # [B,L, 3+768]
-        global_coords, global_tok, global_pad_mask = self.scene_encoder(pts_kv, kv_pad_mask)          
+        global_feat = self.scene_encoder(pts_kv, kv_pad_mask).unsqueeze(1)          
 
         # Local feature fusion
         feats = self.local_feature_fusion(coords, feats, kv_coords, kv_feats, kv_pad_mask)
@@ -213,6 +213,6 @@ class Agent_map_bc(nn.Module):
             # coords=coords,  
         ) 
         
-        action_out = self.action_transformer(visual_tok, state_tok, text_emb, global_tok, global_pad_mask)
+        action_out = self.action_transformer(visual_tok, state_tok, text_emb, global_feat)
         
         return action_out

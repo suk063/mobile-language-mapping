@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch_geometric.nn.pool import fps, radius
-from torch_geometric.nn import MLP, PointTransformerConv
+from torch_geometric.nn import MLP, PointTransformerConv, global_max_pool
 from torch_geometric.utils import to_dense_batch
 
 
@@ -104,8 +104,11 @@ class GlobalSceneEncoder(nn.Module):
         feat = self.proj(x)
         
         # Convert back to dense tensor format (with padding)
-        xyz_out, _ = to_dense_batch(pos, batch, fill_value=1e6) # Pad with large value
-        feat_out, pad_mask = to_dense_batch(feat, batch, fill_value=0.0)
+        # xyz_out, _ = to_dense_batch(pos, batch, fill_value=1e6) # Pad with large value
+        # feat_out, pad_mask = to_dense_batch(feat, batch, fill_value=0.0)
 
-        return xyz_out, feat_out, ~pad_mask
+        # Global feature via max pooling
+        global_feat = global_max_pool(feat, batch) # (B, C_out)
+        
+        return global_feat
     
