@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -11,6 +12,7 @@ from tqdm import tqdm
 from mshab.envs.make import EnvConfig, make_env
 from mshab.envs.planner import plan_data_from_file
 from mshab.utils.array import to_tensor
+from mani_skill.utils import common
 
 # BC agents
 from lang_mapping.agent.agent_map_bc import Agent_map_bc
@@ -59,25 +61,34 @@ def pad_ids(ids: List[int], num_envs: int) -> List[int]:
     return ids + [ids[-1]] * (num_envs - len(ids))
 
 
-def collect_env_stats(env):
-    ret = torch.as_tensor(env.return_queue, dtype=torch.float32)
-    suc1 = torch.as_tensor(env.success_once_queue, dtype=torch.float32)
-    sucE = torch.as_tensor(env.success_at_end_queue, dtype=torch.float32)
-    L = torch.as_tensor(env.length_queue, dtype=torch.float32)
+def collect_env_stats(envs, device):
+    """
+    Collects environment statistics from finished episodes.
 
-    env.reset_queues()
-    max_steps = env.max_episode_steps
+    NOTE: This implementation differs from the one in `lang_mapping.utils.eval`.
+    This version handles tensor conversions and is tailored for the eval script's
+    specific environment setup, which may not use pre-converted numpy queues.
+    """
+    returns = common.to_tensor(envs.return_queue, device=device).float()
+    successes_once = common.to_tensor(envs.success_once_queue, device=device).float()
+    successes_at_end = common.to_tensor(envs.success_at_end_queue, device=device).float()
+    lengths = common.to_tensor(envs.length_queue, device=device).float()
 
     records = []
-    for i in range(ret.numel()):
+    num_episodes = returns.numel()
+    if num_episodes == 0:
+        return []
+
+    for i in range(num_episodes):
         records.append(
             dict(
-                rps=(ret[i] / max_steps).item(),
-                succ_once=suc1[i].item(),
-                succ_end=sucE[i].item(),
-                length=L[i].item(),
+                rps=returns[i].item() / envs.max_episode_steps,
+                succ_once=successes_once[i].item(),
+                succ_end=successes_at_end[i].item(),
+                length=lengths[i].item(),
             )
         )
+    envs.reset_queues()
     return records
 
 
@@ -282,6 +293,7 @@ def main():
     # Plans metadata
     plan_data = plan_data_from_file(plan_fp)
     all_plan_count = len(plan_data.plans)
+    # all_plan_count = 50
     # Create eval envs
     env_cfg = EnvConfig(
         env_id="PickSubtaskTrain-v0",
@@ -289,7 +301,6 @@ def main():
         max_episode_steps=args.max_episode_steps,
         task_plan_fp=str(plan_fp),
         spawn_data_fp=str(spawn_fp),
-        continuous_task=False,
         record_video=False,
         cat_state=True,
         cat_pixels=False,
@@ -347,9 +358,11 @@ def main():
         agent.eval()
 
         # Evaluate all plan ids
-        records = []
-
         all_ids = list(range(all_plan_count))
+        
+        # Store results per batch to calculate weighted average later
+        batch_results = []
+
         for start in tqdm(range(0, len(all_ids), args.num_envs), desc=f"Evaluating seed {seed}"):
             chunk = all_ids[start : start + args.num_envs]
             padded_ids = pad_ids(chunk, args.num_envs)
@@ -362,13 +375,12 @@ def main():
             # it from consuming stats queues before the main eval loop can.
             max_steps = env.max_episode_steps
 
-            # This uses the plan from the *first* environment for all envs in the batch.
             # This is a likely bug in the original code, but we preserve it to fix the crash.
             plan0 = env.unwrapped.task_plan[0]
             subtask_labels = get_object_labels_batch(
                 uid2lbl, plan0.composite_subtask_uids
             ).to(device)
-            epi_ids = torch.tensor(
+            scene_ids = torch.tensor(
                 [uid2scene_id[uid] for uid in plan0.composite_subtask_uids],
                 device=device,
                 dtype=torch.long,
@@ -378,17 +390,27 @@ def main():
             for _ in range(max_steps):
                 agent_obs = _flatten_obs(obs, device)
                 with torch.no_grad():
-                    action = agent(agent_obs, subtask_labels, epi_ids)
+                    action = agent(agent_obs, subtask_labels, scene_ids)
                 obs, _, _, _, _ = env.step(action[:, 0, :])
 
             # Collect per-episode stats for the unpadded subset
-            batch_recs = collect_env_stats(env)[: len(chunk)]
-            records.extend(batch_recs)
+            batch_recs = collect_env_stats(env, device)[: len(chunk)]
+            if batch_recs:
+                batch_results.append((len(chunk), batch_recs))
 
         # Aggregate results for this seed
-        assert len(records) > 0, "No evaluation records collected."
-
-        arr = {k: np.array([rec[k] for rec in records]) for k in records[0]}
+        total_n_episodes = sum(n for n, _ in batch_results)
+        if total_n_episodes == 0:
+            print(f"No episodes collected for seed {seed}. Skipping.")
+            continue
+        
+        # Calculate weighted average for each metric
+        weighted_sums = defaultdict(float)
+        for n_chunk, recs_chunk in batch_results:
+            # key: "rps", "succ_once", etc.
+            for key in recs_chunk[0].keys():
+                batch_mean = np.mean([rec[key] for rec in recs_chunk])
+                weighted_sums[key] += batch_mean * n_chunk
 
         summary = {
             "agent": args.agent,
@@ -397,10 +419,10 @@ def main():
             "split": args.split,
             "seed": int(seed),
             "ckpt_name": str(ckpt_path.name),
-            "n_episodes": int(len(records)),
-            "return_per_step": float(arr["rps"].mean()),
-            "success_once": float(arr["succ_once"].mean()),
-            "success_at_end": float(arr["succ_end"].mean()),
+            "n_episodes": int(total_n_episodes),
+            "return_per_step": float(weighted_sums["rps"] / total_n_episodes),
+            "success_once": float(weighted_sums["succ_once"] / total_n_episodes),
+            "success_at_end": float(weighted_sums["succ_end"] / total_n_episodes),
             "plan_file": str(plan_fp),
             "spawn_file": str(spawn_fp),
             "timestamp_utc": datetime.utcnow().isoformat(),
