@@ -265,7 +265,7 @@ class ActionTransformerDecoder(nn.Module):
 
         self.causal_attn_bias = xops.LowerTriangularMask()
         
-    def forward(self, visual_token, state_tok, text_emb, global_tok=None, global_tok_pad_mask=None) -> torch.Tensor:
+    def forward(self, visual_token, state_tok, text_emb, global_tok=None) -> torch.Tensor:
         B, _, d_model = visual_token.shape
         
         # Build memory and padding mask
@@ -279,10 +279,7 @@ class ActionTransformerDecoder(nn.Module):
         
         if global_tok is not None:
             memory_parts.append(global_tok)
-            if global_tok_pad_mask is not None:
-                padding_masks.append(global_tok_pad_mask)
-            else:
-                padding_masks.append(torch.zeros((B, global_tok.shape[1]), device=global_tok.device, dtype=torch.bool))
+            padding_masks.append(torch.zeros((B, 1), device=global_tok.device, dtype=torch.bool))
 
         tokens = torch.cat(memory_parts, dim=1)
         tokens = self.memory_proj(tokens)
