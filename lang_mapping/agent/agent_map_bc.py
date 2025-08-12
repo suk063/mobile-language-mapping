@@ -208,12 +208,15 @@ class Agent_map_bc(nn.Module):
         text_emb = self.text_proj(self.text_embeddings[object_labels]).unsqueeze(1)        # (B,768)
         state_tok = self.state_mlp_action(state).unsqueeze(1) # [B,1,128]
     
-        visual_tok = self.transformer_encoder(
+        memory = self.transformer_encoder(
             visual_token=feats,
-            coords=coords,  
+            state=state_tok,
+            text_emb=text_emb,
+            coords=coords,
+            global_feat=global_feat,
             use_pe=True
         ) 
         
-        action_out = self.action_transformer(visual_tok, state_tok, text_emb, global_feat)
+        action_out = self.action_transformer(memory)
         
         return action_out
