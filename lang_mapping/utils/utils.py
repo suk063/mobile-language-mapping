@@ -127,94 +127,48 @@ def get_3d_coordinates(
         return coords_world, coords_cam
     else:
         return coords_cam
-
-
-def rotary_pe_3d(
-    x: torch.Tensor,      # Could be [B, S, D] or [B, n_heads, S, D]
-    coords: torch.Tensor, # [B, S, 3]
-    base: float = 10000.0
-) -> torch.Tensor:
-    """
-    A flexible 3D rotary positional embedding that supports both 3D and 4D inputs.
-    Args:
-        x: [..., S, D], either [B, S, D] or [B, n_heads, S, D].
-        coords: [B, S, 3].
-        base: Base for frequency calculation.
-    Returns:
-        Tensor of the same shape as x, with RoPE applied.
-    """
-    # If input x is 4D => flatten to 3D, apply RoPE, then reshape back.
-    if x.dim() == 4:
-        B, H, S, D = x.shape
-        # Flatten the first two dims for x
-        x_reshaped = x.reshape(B * H, S, D)
-
-        # Also reshape coords to match (B*H, S, 3)
-        # Here we broadcast coords over the head dimension
-        coords_reshaped = coords.unsqueeze(1).expand(B, H, S, 3).reshape(B * H, S, 3)
-
-        # Apply RoPE in 3D form
-        x_rotated = _rotary_pe_3d_impl(x_reshaped, coords_reshaped, base)
-
-        # Reshape back to [B, n_heads, S, D]
-        return x_rotated.view(B, H, S, D)
-    elif x.dim() == 3:
-        # Directly apply the original logic
-        return _rotary_pe_3d_impl(x, coords, base)
+    
+def rotary_pe_3d(x, coords, base: float = 10000.0):
+    four_d = (x.dim() == 4)
+    if four_d:
+        B0, H0, S, D = x.shape
+        x = x.reshape(B0 * H0, S, D)
+        coords = coords.unsqueeze(1).expand(B0, H0, S, 3).reshape(B0 * H0, S, 3)
+        B = B0 * H0 
     else:
-        raise ValueError(
-            f"rotary_pe_3d expects x to be 3D or 4D, but got shape {x.shape}"
-        )
+        B, S, D = x.shape
+        B0, H0 = B, 1
 
-def _rotary_pe_3d_impl(
-    x: torch.Tensor,      # [B, S, D]
-    coords: torch.Tensor, # [B, S, 3]
-    base: float = 10000.0
-) -> torch.Tensor:
-    """
-    Core RoPE logic for 3D input shape [B, S, D].
-    """
-    B, S, D = x.shape
-    assert D % 6 == 0, "D must be a multiple of 6"
-    num_block = D // 6
+    assert D % 6 == 0
+    nb = D // 6
 
-    # Compute frequency factors
-    k_idx = torch.arange(num_block, device=x.device, dtype=x.dtype)
-    theta_k = 1.0 / (base ** (k_idx / (D / 6)))
+    x_blocks = x.reshape(B, S, nb, 6)
 
-    # Reshape x into blocks of size 6
-    x_splitted = x.view(B, S, num_block, 6)   # [B, S, num_block, 6]
+    k = torch.arange(nb, device=x.device, dtype=torch.float32)
+    theta = base ** (-k / float(nb))
+    x_p, y_p, z_p = coords.unbind(dim=-1)
 
-    # coords: [B, S, 3] => separate x_p, y_p, z_p
-    x_p, y_p, z_p = coords[..., 0], coords[..., 1], coords[..., 2]
+    ang_x = x_p.float().unsqueeze(-1) * theta
+    ang_y = y_p.float().unsqueeze(-1) * theta
+    ang_z = z_p.float().unsqueeze(-1) * theta
 
-    out_blocks = []
-    for k in range(num_block):
-        block = x_splitted[:, :, k, :]  # [B, S, 6]
-        x_angle = x_p * theta_k[k]
-        y_angle = y_p * theta_k[k]
-        z_angle = z_p * theta_k[k]
+    cos_x, sin_x = torch.cos(ang_x), torch.sin(ang_x)
+    cos_y, sin_y = torch.cos(ang_y), torch.sin(ang_y)
+    cos_z, sin_z = torch.cos(ang_z), torch.sin(ang_z)
 
-        b0, b1, b2, b3, b4, b5 = (block[..., i] for i in range(6))
-        cos_x, sin_x = torch.cos(x_angle), torch.sin(x_angle)
-        cos_y, sin_y = torch.cos(y_angle), torch.sin(y_angle)
-        cos_z, sin_z = torch.cos(z_angle), torch.sin(z_angle)
+    cos_x = cos_x.to(x.dtype); sin_x = sin_x.to(x.dtype)
+    cos_y = cos_y.to(x.dtype); sin_y = sin_y.to(x.dtype)
+    cos_z = cos_z.to(x.dtype); sin_z = sin_z.to(x.dtype)
 
-        # Rotate pairs around X, Y, Z
-        b0_ = b0 * cos_x - b1 * sin_x
-        b1_ = b0 * sin_x + b1 * cos_x
+    b0, b1, b2, b3, b4, b5 = x_blocks.unbind(dim=-1)
+    b0p = b0 * cos_x - b1 * sin_x; b1p = b0 * sin_x + b1 * cos_x
+    b2p = b2 * cos_y - b3 * sin_y; b3p = b2 * sin_y + b3 * cos_y
+    b4p = b4 * cos_z - b5 * sin_z; b5p = b4 * sin_z + b5 * cos_z
 
-        b2_ = b2 * cos_y - b3 * sin_y
-        b3_ = b2 * sin_y + b3 * cos_y
-
-        b4_ = b4 * cos_z - b5 * sin_z
-        b5_ = b4 * sin_z + b5 * cos_z
-
-        out_blocks.append(torch.stack([b0_, b1_, b2_, b3_, b4_, b5_], dim=-1))
-
-    # Stack all blocks along num_block dim, then reshape back
-    x_out = torch.stack(out_blocks, dim=2).view(B, S, D)
-    return x_out
+    out = torch.stack([b0p, b1p, b2p, b3p, b4p, b5p], dim=-1).reshape(B, S, D)
+    if four_d:
+        out = out.view(B0, H0, S, D) 
+    return out
 
 
 def exp_decay_weights(dists: torch.Tensor, alpha: float) -> torch.Tensor:

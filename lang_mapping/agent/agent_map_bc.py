@@ -211,6 +211,7 @@ class Agent_map_bc(nn.Module):
         visual_tok = self.transformer_encoder(
             visual_token=feats,
             coords=coords,  
+            use_pe=True
         ) 
         
         action_out = self.action_transformer(visual_tok, state_tok, text_emb, global_feat)
