@@ -162,9 +162,11 @@ class Agent_point_bc(nn.Module):
     
         visual_tok = self.transformer_encoder(
             visual_token=feats,
-            # coords=coords,  
+            coords=coords,  
         ) 
-        
+
+        # Max pooling over the sequence dimension to get a single visual token per batch
+        visual_tok = torch.amax(visual_tok, dim=1, keepdim=True)
         action_out = self.action_transformer(visual_tok, state_tok, text_emb)
         
         return action_out
