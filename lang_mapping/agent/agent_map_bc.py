@@ -80,7 +80,7 @@ class Agent_map_bc(nn.Module):
             num_layers=1,
             n_heads=num_heads,
             ff_mult=4,
-            radius=0.4,
+            radius=0.2,
             k=8,
         )
         
