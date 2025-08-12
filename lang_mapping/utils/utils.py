@@ -128,7 +128,7 @@ def get_3d_coordinates(
     else:
         return coords_cam
     
-def rotary_pe_3d(x, coords, base: float = 10000.0):
+def rotary_pe_3d(x, coords, base: float = 10000.0, pos_scale: float = 2.0):
     four_d = (x.dim() == 4)
     if four_d:
         B0, H0, S, D = x.shape
@@ -141,12 +141,14 @@ def rotary_pe_3d(x, coords, base: float = 10000.0):
 
     assert D % 6 == 0
     nb = D // 6
+    
+    coords_n = coords / pos_scale
 
     x_blocks = x.reshape(B, S, nb, 6)
 
     k = torch.arange(nb, device=x.device, dtype=torch.float32)
     theta = base ** (-k / float(nb))
-    x_p, y_p, z_p = coords.unbind(dim=-1)
+    x_p, y_p, z_p = coords_n.unbind(dim=-1)
 
     ang_x = x_p.float().unsqueeze(-1) * theta
     ang_y = y_p.float().unsqueeze(-1) * theta
@@ -167,7 +169,7 @@ def rotary_pe_3d(x, coords, base: float = 10000.0):
 
     out = torch.stack([b0p, b1p, b2p, b3p, b4p, b5p], dim=-1).reshape(B, S, D)
     if four_d:
-        out = out.view(B0, H0, S, D) 
+        out = out.reshape(B0, H0, S, D)
     return out
 
 
