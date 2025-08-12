@@ -128,7 +128,7 @@ def get_3d_coordinates(
     else:
         return coords_cam
     
-def rotary_pe_3d(x, coords, base: float = 10000.0, pos_scale: float = 2.0):
+def rotary_pe_3d(x, coords, base: float = 10000.0, pos_scale: float = 1.0):
     four_d = (x.dim() == 4)
     if four_d:
         B0, H0, S, D = x.shape
