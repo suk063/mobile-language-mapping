@@ -152,10 +152,12 @@ class TransformerEncoder(nn.Module):
         self,
         visual_token: torch.Tensor,
         coords: torch.Tensor | None = None,
+        use_pe: bool = True,
     ) -> torch.Tensor:
-        
+               
         S = visual_token.shape[1]
-        visual_token = visual_token + self.pos_embed[:, :S]
+        if use_pe:
+            visual_token = visual_token + self.pos_embed[:, :S]
 
         for layer in self.layers:
             visual_token = layer(src=visual_token, coords_src=coords)

@@ -163,6 +163,7 @@ class Agent_point_bc(nn.Module):
         visual_tok = self.transformer_encoder(
             visual_token=feats,
             coords=coords,  
+            use_pe=False
         ) 
 
         # Max pooling over the sequence dimension to get a single visual token per batch
