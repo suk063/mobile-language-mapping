@@ -81,7 +81,7 @@ class Agent_map_bc(nn.Module):
             n_heads=num_heads,
             ff_mult=4,
             radius=0.2,
-            k=4,
+            k=1,
         )
         
         self.dim_reducer = DimReducer(clip_input_dim, transf_input_dim)
