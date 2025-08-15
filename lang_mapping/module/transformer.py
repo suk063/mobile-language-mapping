@@ -151,18 +151,32 @@ class TransformerEncoder(nn.Module):
     def forward(
         self,
         visual_token: torch.Tensor,
+        state: torch.Tensor,
+        text_emb: torch.Tensor,
+        global_feat: torch.Tensor | None = None,
         coords: torch.Tensor | None = None,
         use_pe: bool = True,
     ) -> torch.Tensor:
-               
-        S = visual_token.shape[1]
+        
+        if global_feat is not None:
+            tokens = torch.cat([text_emb, state, global_feat, visual_token], dim=1)
+        else:
+            tokens = torch.cat([text_emb, state, visual_token], dim=1)
+            
         if use_pe:
-            visual_token = visual_token + self.pos_embed[:, :S]
+            tokens = tokens + self.pos_embed[:, :tokens.shape[1]]
+        
+        coords_full = None
+        if coords is not None:
+            B = tokens.size(0)
+            prefix = 2 + (1 if global_feat is not None else 0) 
+            zeros = torch.zeros(B, prefix, 3, device=coords.device, dtype=coords.dtype)
+            coords_full = torch.cat([zeros, coords], dim=1)
 
         for layer in self.layers:
-            visual_token = layer(src=visual_token, coords_src=coords)
+            tokens = layer(src=tokens, coords_src=coords_full)
  
-        return visual_token
+        return tokens
 
 
 class XformerDecoderLayer(nn.Module):
@@ -266,50 +280,27 @@ class ActionTransformerDecoder(nn.Module):
 
         self.causal_attn_bias = xops.LowerTriangularMask()
         
-    def forward(self, visual_token, state_tok, text_emb, global_tok=None) -> torch.Tensor:
-        B, _, d_model = visual_token.shape
-        
-        # Build memory and padding mask
-        memory_parts = [visual_token, state_tok]
-        padding_masks = [torch.zeros((B, visual_token.shape[1]), device=visual_token.device, dtype=torch.bool),
-                         torch.zeros((B, 1), device=state_tok.device, dtype=torch.bool)]
+    def forward(self, memory: torch.Tensor) -> torch.Tensor:
+        """
+        memory: (B, S_mem, transf_input_dim)
+        returns: (B, T=action_pred_horizon, action_dim)
+        """
+        B = memory.size(0)
 
-        if text_emb is not None:
-            memory_parts.append(text_emb)
-            padding_masks.append(torch.zeros((B, 1), device=text_emb.device, dtype=torch.bool))
-        
-        if global_tok is not None:
-            memory_parts.append(global_tok)
-            padding_masks.append(torch.zeros((B, 1), device=global_tok.device, dtype=torch.bool))
+        # project encoder memory to d_model
+        tokens = self.memory_proj(memory)  # (B, S_mem, d_model)
 
-        tokens = torch.cat(memory_parts, dim=1)
-        tokens = self.memory_proj(tokens)
-        memory_key_padding_mask = torch.cat(padding_masks, dim=1)
+        # decoder queries
+        decoder_out = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)  # (B, T, d_model)
 
-        # Pad memory to a multiple of 8 for xformers efficiency, as required by some kernels (e.g. cutlass)
-        S = tokens.shape[1]
-        pad_to = (S + 7) & (-8)
-        if S < pad_to:
-            pad_len = pad_to - S
-            tokens = F.pad(tokens, (0, 0, 0, pad_len), 'constant', 0)
-            mask_pad = torch.ones(B, pad_len, device=tokens.device, dtype=torch.bool)
-            memory_key_padding_mask = torch.cat([memory_key_padding_mask, mask_pad], dim=1)
-
-
-        query_pos = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
-
-        decoder_out = query_pos
         for layer in self.layers:
             decoder_out = layer(
                 tgt=decoder_out,
                 memory=tokens,
-                tgt_mask_bias=self.causal_attn_bias,
-                memory_key_padding_mask=memory_key_padding_mask,
+                tgt_mask_bias=self.causal_attn_bias,  # causal on target only
             )
-        
-        action_out = self.action_head(decoder_out)
-        return action_out
-        
+
+        return self.action_head(decoder_out)  # (B, T, action_dim)    
 
 class ZeroPos(nn.Module):
     def __init__(self, out_dim: int):
