@@ -17,7 +17,7 @@ NUM_ENVS=10
 ENV_ID="$(echo $SUBTASK | sed 's/\b\(.\)/\u\1/g')SubtaskTrain-v0"
 WORKSPACE="mshab_exps"
 GROUP=$TASK-$SUBTASK
-EXP_NAME="$TASK-map-$SEED-no-rel-PE-k=4"
+EXP_NAME="$TASK-map-$SEED-no-rel-PE-k=2"
 # shellcheck disable=SC2001
 PROJECT_NAME="$TASK"
 
