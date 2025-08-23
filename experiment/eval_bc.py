@@ -261,8 +261,8 @@ def main():
     parser.add_argument("--static-map-path", type=str, default=None)
     parser.add_argument("--implicit-decoder-path", type=str, default=None)
 
-    # Output
-    parser.add_argument("--out-dir", default="eval/results")
+    # Allow overriding model directory
+    parser.add_argument("--model-dir", type=str, default=None, help="Path to the model directory, overrides default path construction")
 
     args = parser.parse_args()
 
@@ -347,9 +347,12 @@ def main():
 
     for seed in seeds:
         # Load weights for this seed
-        base_dir = Path(
-            f"mshab_exps/PickSubtaskTrain-v0/{args.task}-{args.subtask}/{args.task}-{args.subtask}-{args.agent}-{seed}/models"
-        )
+        if args.model_dir:
+            base_dir = Path(args.model_dir)
+        else:
+            base_dir = Path(
+                f"mshab_exps/PickSubtaskTrain-v0/{args.task}-{args.subtask}/{args.task}-{args.subtask}-{args.agent}-{seed}/models"
+            )
         ckpt_path = base_dir / args.ckpt_name
         assert ckpt_path.exists(), f"Checkpoint not found: {ckpt_path}"
         ckpt = torch.load(str(ckpt_path), map_location=device)
@@ -428,10 +431,8 @@ def main():
             "timestamp_utc": datetime.utcnow().isoformat(),
         }
 
-        out_dir = Path(args.out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        out_json = out_dir / f"eval_{args.agent}_{args.task}_{args.subtask}_{args.split}_seed{seed}_{timestamp}.json"
+        plan_file_name = Path(args.plan_file).stem
+        out_json = ckpt_path.parent / f"{Path(args.ckpt_name).stem}_{plan_file_name}.json"
         with open(out_json, "w") as f:
             json.dump(summary, f, indent=2)
 

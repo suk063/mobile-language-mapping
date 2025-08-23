@@ -10,7 +10,7 @@ SPLIT=${SPLIT:-train}
 OBJ=${OBJ:-all_13}
 PLAN_FILE=${PLAN_FILE:-${OBJ}.json}
 
-ROOT=${ROOT:-"$HOME/.maniskill/data/scene_datasets/replica_cad_dataset"}
+ROOT=${ROOT:-"/work/mobile_language_mapping/.maniskill/data/scene_datasets/replica_cad_dataset"}
 NUM_ENVS=${NUM_ENVS:-16}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-200}
 DEVICE=${DEVICE:-cuda}
