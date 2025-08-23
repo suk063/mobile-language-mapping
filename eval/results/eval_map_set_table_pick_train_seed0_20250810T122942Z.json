@@ -1,0 +1,15 @@
+{
+  "agent": "map",
+  "task": "set_table",
+  "subtask": "pick",
+  "split": "train",
+  "seed": 0,
+  "ckpt_name": "best_eval_success_once_ckpt.pt",
+  "n_episodes": 244,
+  "return_per_step": 0.05462534075144862,
+  "success_once": 0.01639344262295082,
+  "success_at_end": 0.01639344262295082,
+  "plan_file": "/home/sunghwan/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/task_plans/set_table/pick/train/all_13.json",
+  "spawn_file": "/home/sunghwan/.maniskill/data/scene_datasets/replica_cad_dataset/rearrange/spawn_data/set_table/pick/train/spawn_data.pt",
+  "timestamp_utc": "2025-08-10T12:29:42.880704"
+}

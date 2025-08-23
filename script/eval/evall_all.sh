@@ -1,0 +1,82 @@
+#!/bin/bash
+
+set -euo pipefail
+
+EXPS_ROOT="/sh-vol/mobile-language-mapping/mshab_exps"
+SUBTASK="pick"
+OBJS=("all_13" "all_10")
+CHECKPOINTS=("best_eval_success_once_ckpt.pt" "final_ckpt.pt" "best_eval_return_per_step_ckpt.pt")
+
+if [ ! -d "${EXPS_ROOT}" ]; then
+    echo "Experiments root directory not found: ${EXPS_ROOT}"
+    exit 1
+fi
+
+# Find all experiment directories. We assume they don't contain spaces.
+find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
+    dir_name=$(basename "${exp_dir}")
+    echo "Processing experiment: ${dir_name}"
+
+    # Parse TASK, AGENT, SEED from directory name
+    # e.g., prepare_groceries-map-0-no-rel-PE-k=2 -> TASK=prepare_groceries, AGENT=map, SEED=0
+    # e.g., set_table-uplifted-1 -> TASK=set_table, AGENT=uplifted, SEED=1
+    
+    TASK=$(echo "$dir_name" | cut -d'-' -f1)
+    AGENT=$(echo "$dir_name" | cut -d'-' -f2)
+    SEED=$(echo "$dir_name" | cut -d'-' -f3)
+
+    if [ -z "${TASK}" ] || [ -z "${AGENT}" ] || [ -z "${SEED}" ]; then
+        echo "Could not parse TASK/AGENT/SEED from ${dir_name}. Skipping."
+        continue
+    fi
+    
+    echo "  TASK: ${TASK}, AGENT: ${AGENT}, SEED: ${SEED}"
+
+    model_dir="${exp_dir}/models"
+    if [ ! -d "${model_dir}" ]; then
+        echo "  Model directory not found: ${model_dir}. Skipping."
+        continue
+    fi
+
+    for ckpt in "${CHECKPOINTS[@]}"; do
+        ckpt_path="${model_dir}/${ckpt}"
+        if [ ! -f "${ckpt_path}" ]; then
+            echo "  Checkpoint not found: ${ckpt_path}. Skipping."
+            continue
+        fi
+
+        for obj in "${OBJS[@]}"; do
+            plan_file="${obj}.json"
+            
+            echo "  Running evaluation for CKPT: ${ckpt}, OBJ: ${obj}"
+
+            # Prepare common args for eval script
+            # Note: other args like --root, --num-envs will use defaults from eval_bc.py
+            ARGS=(
+              --agent "${AGENT}"
+              --task "${TASK}"
+              --subtask "${SUBTASK}"
+              --plan-file "${plan_file}"
+              --seed "${SEED}"
+              --model-dir "${model_dir}"
+              --ckpt-name "${ckpt}"
+            )
+
+            # Add map-only args if needed
+            if [ "${AGENT}" = "map" ]; then
+              ARGS+=(
+                --static-map-path "pretrained/hash_voxel_sparse.pt"
+                --implicit-decoder-path "pretrained/implicit_decoder.pt"
+              )
+            fi
+
+            # Run evaluation
+            python -m experiment.eval_bc "${ARGS[@]}"
+            echo "  Finished evaluation for CKPT: ${ckpt}, OBJ: ${obj}"
+        done
+    done
+    echo "Finished processing experiment: ${dir_name}"
+    echo "-----------------------------------------------------"
+done
+
+echo "All evaluations finished."
