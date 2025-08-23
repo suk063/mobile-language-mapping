@@ -3,6 +3,7 @@
 set -euo pipefail
 
 EXPS_ROOT="/sh-vol/mobile-language-mapping/mshab_exps"
+OUTPUT_DIR="/sh-vol/mobile-language-mapping/eval_results"
 SUBTASK="pick"
 OBJS=("all_13" "all_10")
 CHECKPOINTS=("best_eval_success_once_ckpt.pt" "final_ckpt.pt" "best_eval_return_per_step_ckpt.pt")
@@ -11,6 +12,8 @@ if [ ! -d "${EXPS_ROOT}" ]; then
     echo "Experiments root directory not found: ${EXPS_ROOT}"
     exit 1
 fi
+
+mkdir -p "${OUTPUT_DIR}"
 
 # Find all experiment directories. We assume they don't contain spaces.
 find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
@@ -80,3 +83,37 @@ find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
 done
 
 echo "All evaluations finished."
+
+RESULTS_DIR="${OUTPUT_DIR}/eval_results_$(date +%Y%m%d_%H%M%S)"
+ARCHIVE_NAME="${RESULTS_DIR}.tar.gz"
+
+echo "Collecting results into ${RESULTS_DIR}"
+mkdir -p "${RESULTS_DIR}"
+
+# Find all experiment directories again to copy results
+find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
+    dir_name=$(basename "${exp_dir}")
+    model_dir="${exp_dir}/models"
+    
+    if [ -d "${model_dir}" ]; then
+        # Find all json files and copy them
+        json_files=$(find "${model_dir}" -name "*.json")
+        if [ -n "${json_files}" ]; then
+            # Create a corresponding directory in the results folder
+            mkdir -p "${RESULTS_DIR}/${dir_name}/models"
+            echo "  Copying results from ${dir_name}"
+            find "${model_dir}" -name "*.json" -exec cp -t "${RESULTS_DIR}/${dir_name}/models/" {} +
+        fi
+    fi
+done
+
+echo "Creating archive: ${ARCHIVE_NAME}"
+tar -czvf "${ARCHIVE_NAME}" -C "$(dirname "${RESULTS_DIR}")" "$(basename "${RESULTS_DIR}")"
+
+echo "-----------------------------------------------------"
+echo "Done. Results are in ${ARCHIVE_NAME}"
+echo "You can now download this file to your local machine."
+echo "For example, using scp:"
+echo "scp user@cluster_address:${ARCHIVE_NAME} /path/on/your/local/machine/"
+echo ""
+echo "If you want to upload to a specific drive, let me know the details."
