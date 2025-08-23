@@ -35,13 +35,25 @@ find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
     
     echo "  TASK: ${TASK}, AGENT: ${AGENT}, SEED: ${SEED}"
 
+    # If agent is 'map', only run for 'no-rel-PE-k=2' experiments
+    if [ "${AGENT}" = "map" ] && [[ ! "${dir_name}" == *"no-rel-PE-k=2"* ]]; then
+        echo "  Skipping MAP agent for non 'no-rel-PE-k=2' experiment: ${dir_name}"
+        continue
+    fi
+
     model_dir="${exp_dir}/models"
     if [ ! -d "${model_dir}" ]; then
         echo "  Model directory not found: ${model_dir}. Skipping."
         continue
     fi
 
+    exp_has_error=false
     for ckpt in "${CHECKPOINTS[@]}"; do
+        if [ "${exp_has_error}" = true ]; then
+            echo "  Skipping remaining checkpoints for ${dir_name} due to previous error."
+            break
+        fi
+
         ckpt_path="${model_dir}/${ckpt}"
         if [ ! -f "${ckpt_path}" ]; then
             echo "  Checkpoint not found: ${ckpt_path}. Skipping."
@@ -74,7 +86,11 @@ find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
             fi
 
             # Run evaluation
-            python -m experiment.eval_bc "${ARGS[@]}"
+            if ! python -m experiment.eval_bc "${ARGS[@]}"; then
+                echo "  [ERROR] Evaluation failed for ${dir_name} with CKPT ${ckpt}. Skipping rest of this experiment."
+                exp_has_error=true
+                break
+            fi
             echo "  Finished evaluation for CKPT: ${ckpt}, OBJ: ${obj}"
         done
     done

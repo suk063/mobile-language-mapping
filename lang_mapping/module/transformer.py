@@ -325,7 +325,7 @@ class LocalFeatureFusion(nn.Module):
         n_heads: int = 8,
         ff_mult: int = 4,
         radius: float = 0.2,
-        k: int = 8,
+        k: int = 2,
         dropout: float = 0.1,
         use_rel_pos: bool = False
     ):
