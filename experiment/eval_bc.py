@@ -233,7 +233,7 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", help="evaluate multiple seeds (space-separated)")
     parser.add_argument(
         "--root",
-        default=str(Path("~/.maniskill/data/scene_datasets/replica_cad_dataset").expanduser()),
+        default=str(Path("/work/mobile_language_mapping/.maniskill/data/scene_datasets/replica_cad_dataset").expanduser()),
         help="Dataset root containing rearrange/ and rearrange/spawn_data",
     )
     parser.add_argument("--num-envs", type=int, default=32)
