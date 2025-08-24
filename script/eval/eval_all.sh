@@ -63,7 +63,11 @@ find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
         for obj in "${OBJS[@]}"; do
             plan_file="${obj}.json"
             
-            echo "  Running evaluation for CKPT: ${ckpt}, OBJ: ${obj}"
+            # Create a directory for logs
+            mkdir -p "${OUTPUT_DIR}/logs"
+            LOG_FILE="${OUTPUT_DIR}/logs/${dir_name}---${ckpt}---${obj}.log"
+            
+            echo "  Running evaluation for CKPT: ${ckpt}, OBJ: ${obj}. Log: ${LOG_FILE}"
 
             # Prepare common args for eval script
             # Note: other args like --root, --num-envs will use defaults from eval_bc.py
@@ -85,9 +89,10 @@ find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
               )
             fi
 
-            # Run evaluation
-            if ! python -m experiment.eval_bc "${ARGS[@]}"; then
+            # Run evaluation and redirect all output to log file
+            if ! python -m experiment.eval_bc "${ARGS[@]}" > "${LOG_FILE}" 2>&1; then
                 echo "  [ERROR] Evaluation failed for ${dir_name} with CKPT ${ckpt}. Skipping rest of this experiment."
+                echo "  See full error log in: ${LOG_FILE}"
                 exp_has_error=true
                 break
             fi
