@@ -35,6 +35,12 @@ find "${EXPS_ROOT}" -mindepth 1 -maxdepth 1 -type d | while read -r exp_dir; do
     
     echo "  TASK: ${TASK}, AGENT: ${AGENT}, SEED: ${SEED}"
 
+    # Only run for 'prepare_groceries' task
+    if [ "${TASK}" != "prepare_groceries" ]; then
+        echo "  Skipping task '${TASK}', only running for 'prepare_groceries'."
+        continue
+    fi
+
     # If agent is 'map', only run for 'no-rel-PE-k=2' experiments
     if [ "${AGENT}" = "map" ] && [[ ! "${dir_name}" == *"no-rel-PE-k=2"* ]]; then
         echo "  Skipping MAP agent for non 'no-rel-PE-k=2' experiment: ${dir_name}"
