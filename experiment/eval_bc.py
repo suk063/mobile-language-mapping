@@ -302,11 +302,14 @@ def main():
         original_plans = original_plan_content.get('plans', [])
         filtered_plans = []
         for plan in original_plans:
-            # The format of this key is inferred from the KeyError in the traceback:
-            # 'train/prepare_groceries/episode_1023.json'
-            episode_config_name = f"{args.split}/{args.task}/episode_{plan['episode_id']}.json"
-            if episode_config_name in valid_episode_configs:
-                filtered_plans.append(plan)
+            # The key 'init_config_name' holds the episode identifier used in scene_ids.yaml
+            # Correcting the previous logic which incorrectly used 'episode_id'.
+            if 'init_config_name' in plan:
+                episode_config_name = plan['init_config_name']
+                if episode_config_name in valid_episode_configs:
+                    filtered_plans.append(plan)
+            else:
+                print(f"Warning: 'init_config_name' not found in a plan object. Skipping it.")
 
         if len(original_plans) != len(filtered_plans):
             print(f"Filtered out {len(original_plans) - len(filtered_plans)} plans not found in {args.scene_ids_yaml}")
@@ -328,8 +331,11 @@ def main():
         # Use the temporary filtered plan file for the rest of this evaluation run
         plan_fp = tmp_plan_fp
 
+    except KeyError as e:
+        print(f"Caught a KeyError during plan filtering: {e}")
+        print("This may indicate a structural issue in the plan file. Continuing with original file.")
     except Exception as e:
-        print(f"Error during plan filtering: {e}")
+        print(f"An unexpected error occurred during plan filtering: {e}")
         print("Continuing with original (unfiltered) plan file. This may lead to errors.")
 
     # Resolve spawn data path based on task/subtask/split
