@@ -6,7 +6,7 @@ EXPS_ROOT="/sh-vol/mobile-language-mapping/mshab_exps"
 OUTPUT_DIR="/sh-vol/mobile-language-mapping/eval_results"
 SUBTASK="pick"
 OBJS=("all_13" "all_10")
-CHECKPOINTS=("best_eval_success_once_ckpt.pt" "final_ckpt.pt" "best_eval_return_per_step_ckpt.pt")
+CHECKPOINTS=("final_ckpt.pt")
 
 if [ ! -d "${EXPS_ROOT}" ]; then
     echo "Experiments root directory not found: ${EXPS_ROOT}"

@@ -8,9 +8,6 @@ from collections import defaultdict
 import numpy as np
 import torch
 from tqdm import tqdm
-import yaml
-import tempfile
-import atexit
 
 from mshab.envs.make import EnvConfig, make_env
 from mshab.envs.planner import plan_data_from_file
@@ -289,55 +286,6 @@ def main():
         )
     assert plan_fp.exists(), f"Plan file not found: {plan_fp}"
 
-    # Load scene IDs and filter the plan file to exclude episodes not present in the mapping.
-    # This creates a temporary plan file for the evaluation run.
-    try:
-        with open(args.scene_ids_yaml, "r") as f:
-            scene_ids_data = yaml.safe_load(f)
-        valid_episode_configs = set(scene_ids_data.keys())
-
-        with open(plan_fp, 'r') as f:
-            original_plan_content = json.load(f)
-
-        original_plans = original_plan_content.get('plans', [])
-        filtered_plans = []
-        for plan in original_plans:
-            # The key 'init_config_name' holds the episode identifier used in scene_ids.yaml
-            # Correcting the previous logic which incorrectly used 'episode_id'.
-            if 'init_config_name' in plan:
-                episode_config_name = plan['init_config_name']
-                if episode_config_name in valid_episode_configs:
-                    filtered_plans.append(plan)
-            else:
-                print(f"Warning: 'init_config_name' not found in a plan object. Skipping it.")
-
-        if len(original_plans) != len(filtered_plans):
-            print(f"Filtered out {len(original_plans) - len(filtered_plans)} plans not found in {args.scene_ids_yaml}")
-
-        if not filtered_plans:
-            print(f"No valid plans found for {plan_fp.name} after filtering. Skipping this evaluation.")
-            return
-
-        # Create a temporary file with filtered plans. It will be cleaned up automatically on exit.
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".json", dir=plan_fp.parent, indent=2) as tmp_f:
-            filtered_plan_content = original_plan_content.copy()
-            filtered_plan_content['plans'] = filtered_plans
-            json.dump(filtered_plan_content, tmp_f)
-            tmp_plan_fp = Path(tmp_f.name)
-        
-        # Register cleanup for the temporary file
-        atexit.register(lambda: tmp_plan_fp.unlink() if tmp_plan_fp.exists() else None)
-        
-        # Use the temporary filtered plan file for the rest of this evaluation run
-        plan_fp = tmp_plan_fp
-
-    except KeyError as e:
-        print(f"Caught a KeyError during plan filtering: {e}")
-        print("This may indicate a structural issue in the plan file. Continuing with original file.")
-    except Exception as e:
-        print(f"An unexpected error occurred during plan filtering: {e}")
-        print("Continuing with original (unfiltered) plan file. This may lead to errors.")
-
     # Resolve spawn data path based on task/subtask/split
     spawn_fp = root / "rearrange" / "spawn_data" / args.task / args.subtask / args.split / "spawn_data.pt"
     assert spawn_fp.exists(), f"Spawn data not found: {spawn_fp}"
@@ -498,5 +446,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
