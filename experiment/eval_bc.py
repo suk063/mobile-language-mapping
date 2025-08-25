@@ -132,6 +132,8 @@ def build_agent(
     transf_input_dim: int,
     static_map_path: Path | None = None,
     implicit_decoder_path: Path | None = None,
+    ball_query_k: int = 8,
+    use_rel_pos: bool = False,
 ):
     if kind == "map":
         assert static_map_path is not None and implicit_decoder_path is not None, (
@@ -172,6 +174,8 @@ def build_agent(
             num_layers_transformer=num_layers_transformer,
             num_action_layer=num_action_layer,
             action_pred_horizon=action_pred_horizon,
+            ball_query_k=ball_query_k,
+            use_rel_pos=use_rel_pos,
         ).to(device)
         return agent
 
@@ -248,6 +252,9 @@ def main():
     parser.add_argument("--num-layers-transformer", type=int, default=4)
     parser.add_argument("--num-action-layer", type=int, default=6)
     parser.add_argument("--action-pred-horizon", type=int, default=16)
+    parser.add_argument("--ball-query-k", type=int, default=2)
+    parser.add_argument("--use-rel-pos", action="store_true", default=False)
+    # Camera intrinsics
     parser.add_argument(
         "--camera-intrinsics",
         nargs=4,
@@ -332,6 +339,8 @@ def main():
         transf_input_dim=args.transf_input_dim,
         static_map_path=Path(args.static_map_path) if args.static_map_path else None,
         implicit_decoder_path=Path(args.implicit_decoder_path) if args.implicit_decoder_path else None,
+        ball_query_k=args.ball_query_k,
+        use_rel_pos=args.use_rel_pos,
     )
 
     # Resolve seeds list
