@@ -7,7 +7,7 @@ OUTPUT_DIR="/sh-vol/mobile-language-mapping/eval_results"
 SUBTASK="pick"
 OBJS=("all_13" "all_10")
 CHECKPOINTS=("best_eval_success_once_ckpt.pt" "final_ckpt.pt" "best_eval_return_per_step_ckpt.pt")
-BALL_QUERY_K=2
+BALL_QUERY_K=1
 USE_REL_POS=false
 
 if [ ! -d "${EXPS_ROOT}" ]; then
