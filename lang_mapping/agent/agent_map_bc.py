@@ -26,6 +26,8 @@ class Agent_map_bc(nn.Module):
         camera_intrinsics: list[float],
         static_maps: MultiVoxelHashTable = None,
         implicit_decoder: ImplicitDecoder = None,
+        ball_query_k: int = 8,
+        use_rel_pos: bool = False,
     ):
         super().__init__()
 
@@ -81,7 +83,8 @@ class Agent_map_bc(nn.Module):
             n_heads=num_heads,
             ff_mult=4,
             radius=0.2,
-            k=2,
+            k=ball_query_k,
+            use_rel_pos=use_rel_pos,
         )
         
         self.dim_reducer = DimReducer(clip_input_dim, transf_input_dim)

@@ -17,6 +17,8 @@ DEVICE=${DEVICE:-cuda}
 CKPT_NAME=${CKPT_NAME:-best_eval_success_once_ckpt.pt}
 SCENE_IDS_YAML=${SCENE_IDS_YAML:-pretrained/scene_ids.yaml}
 OUT_DIR=${OUT_DIR:-eval/results}
+BALL_QUERY_K=${BALL_QUERY_K:-2}
+USE_REL_POS=${USE_REL_POS:-False}
 
 # Optional: single seed or multiple seeds (space-separated)
 if [ "${SEEDS:-}" != "" ]; then
@@ -46,7 +48,9 @@ ARGS=(
   --scene-ids-yaml "${SCENE_IDS_YAML}"
   --ckpt-name "${CKPT_NAME}"
   --out-dir "${OUT_DIR}"
-)
+  --ball-query-k "${BALL_QUERY_K}"
+  --use-rel-pos "${USE_REL_POS}"
+  )
 
 # Add map-only args if needed
 if [ "${AGENT}" = "map" ]; then
